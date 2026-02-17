@@ -34,14 +34,36 @@ const CONFIG_PATH = join(SCHEDULER_DIR, "config.json");
 const LOCK_PATH = join(SCHEDULER_DIR, ".lock");
 const LOGS_DIR = join(SCHEDULER_DIR, "logs");
 
+const LAST_SESSION_PATH = join(SCHEDULER_DIR, "last-session.json");
+
 const DEFAULT_CONFIG: SchedulerConfig = {
   projects: [],
   cycleMinutes: 305,
   taskTimeoutMs: 600000,
   pingTimeoutMs: 30000,
   rotationThresholdDays: 7,
+  idleThresholdMinutes: 150,
   subProjectParents: ["bengo4-labo", "bl-labo"],
 };
+
+/**
+ * ユーザーがアイドル状態か判定する。
+ * 最後のセッション終了から idleThresholdMinutes 以上経過していればtrue。
+ * last-session.jsonが存在しない場合はアイドルとみなす（初回起動時など）。
+ */
+async function isUserIdle(config: SchedulerConfig): Promise<boolean> {
+  try {
+    const content = await readFile(LAST_SESSION_PATH, "utf-8");
+    const data = JSON.parse(content) as { endedAt: string };
+    const endedAt = new Date(data.endedAt).getTime();
+    const elapsedMs = Date.now() - endedAt;
+    const thresholdMs = config.idleThresholdMinutes * 60 * 1000;
+    return elapsedMs >= thresholdMs;
+  } catch {
+    // ファイルなし = まだセッションが記録されていない → アイドルとみなす
+    return true;
+  }
+}
 
 async function loadConfig(): Promise<SchedulerConfig> {
   try {
@@ -312,6 +334,24 @@ async function runCommand(): Promise<void> {
     const synced = await syncMarkdownToStore(taskStore, projectInitializer);
     if (synced > 0) {
       console.log(`[MD Sync] Synced ${synced} new task(s) from tasks.md`);
+    }
+
+    // アイドル判定: ユーザーが最近使っていた場合はタスク実行をスキップ
+    const idle = await isUserIdle(config);
+    if (!idle) {
+      console.log(`[Idle Check] User was active within ${config.idleThresholdMinutes} minutes. Skipping tasks, sending ping...`);
+      const result = await executor.ping(config.pingTimeoutMs);
+      console.log(`Ping ${result.exitCode === 0 ? "succeeded" : "failed"} (${result.durationMs}ms)`);
+
+      await logExecution({
+        timestamp: new Date().toISOString(),
+        taskId: "ping",
+        type: "ping",
+        project: "-",
+        exitCode: result.exitCode,
+        durationMs: result.durationMs,
+      });
+      return;
     }
 
     // === 全タスクを並行実行 ===

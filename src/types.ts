@@ -208,6 +208,7 @@ export interface SchedulerConfig {
   taskTimeoutMs: number;      // デフォルト: 600000（10分）
   pingTimeoutMs: number;      // デフォルト: 30000（30秒）
   rotationThresholdDays: number; // デフォルト: 7
+  idleThresholdMinutes: number; // ユーザーアイドル判定の閾値（分）。デフォルト: 150（2.5時間）
   activeHourStart?: number;   // 廃止（後方互換のためoptionalで残置）
   activeHourEnd?: number;     // 廃止（後方互換のためoptionalで残置）
   subProjectParents?: string[]; // サブプロジェクト持ち親ディレクトリ名（例: ["bengo4-labo", "bl-labo"]）

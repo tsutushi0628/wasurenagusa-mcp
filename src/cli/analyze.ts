@@ -10,7 +10,7 @@
 import { config as dotenvConfig } from "dotenv";
 import { basename, dirname, join, resolve } from "path";
 import { homedir } from "os";
-import { mkdir } from "fs/promises";
+import { mkdir, writeFile } from "fs/promises";
 import { fileURLToPath } from "url";
 import { GeminiAnalyzer } from "../analyzer/index.js";
 import { MarkdownStorage } from "../storage/index.js";
@@ -126,6 +126,16 @@ async function main() {
     await changeLogger.recordChanges(hookInput.cwd);
   } catch {
     // 変更ログ記録の失敗は握りつぶす（既存機能を壊さない）
+  }
+
+  // 最終セッション終了時刻を記録（スケジューラのアイドル判定用）
+  try {
+    const schedulerDir = join(homedir(), ".wasurenagusa", "scheduler");
+    await mkdir(schedulerDir, { recursive: true });
+    const lastSessionPath = join(schedulerDir, "last-session.json");
+    await writeFile(lastSessionPath, JSON.stringify({ endedAt: new Date().toISOString() }));
+  } catch {
+    // 記録失敗は握りつぶす
   }
 }
 
