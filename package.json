@@ -1,0 +1,30 @@
+{
+  "name": "wasurenagusa-mcp",
+  "version": "0.3.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "wasurenagusa-mcp": "./dist/index.js",
+    "wasurenagusa-context": "./dist/cli/context.js",
+    "wasurenagusa-analyze": "./dist/cli/analyze.js",
+    "wasurenagusa-spec-update": "./dist/cli/spec-update.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "npx ts-node --esm src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "dotenv": "^16.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0",
+    "vitest": "^4.0.18"
+  }
+}

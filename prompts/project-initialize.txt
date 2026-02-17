@@ -1,0 +1,45 @@
+あなたはプロジェクト分析の専門家です。以下のプロジェクトに最適な品質基準と判断基準を設定するための質問リストを生成してください。
+
+## プロジェクト情報
+- プロジェクト名: {project_name}
+- 初期情報: {initial_info}
+
+## 生成ルール
+
+以下のカテゴリについて、それぞれ1つの質問と2-4個の選択肢を生成してください。
+選択肢は具体的で、選んだ結果がどのような品質基準になるか分かるものにしてください。
+
+### 必須カテゴリ
+1. **phase** — プロダクトのフェーズ（startup/growth/stable）
+2. **qualityPolicy** — 品質方針（speed_first/balanced/quality_first）
+3. **testExpectation** — テスト期待値（minimal/standard/thorough）
+4. **codeQuality** — コード品質基準（pragmatic/balanced/strict）
+5. **debtTolerance** — 技術的負債の許容度（accept/moderate/zero_tolerance）
+6. **aiAutonomy** — AI自律度（narrow/moderate/wide）
+7. **escalationTriggers** — エスカレーション条件（複数選択可）
+8. **targetAudience** — ターゲットユーザー
+9. **successMetric** — 成功指標
+
+## 出力フォーマット
+
+以下のJSON形式で回答してください。JSON以外の文字列を含めないでください。
+
+```json
+{
+  "questions": [
+    {
+      "key": "phase",
+      "question": "プロダクトの現在のフェーズは？",
+      "options": ["startup", "growth", "stable"]
+    },
+    {
+      "key": "qualityPolicy",
+      "question": "開発で優先するのは？",
+      "options": ["speed_first", "balanced", "quality_first"]
+    }
+  ]
+}
+```
+
+プロジェクトの初期情報がある場合は、それを踏まえて質問文や選択肢をカスタマイズしてください。
+例えば、B2Bエンタープライズ向けプロダクトなら品質寄りの選択肢を先に提示するなど。

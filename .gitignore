@@ -1,0 +1,24 @@
+# Dependencies & Build
+node_modules/
+dist/
+
+# Environment (API keys)
+.env
+
+# User data (memory, owner-profile, etc.)
+.wasurenagusa/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+
+# IDE / Tool configs (local paths)
+.claude
+.serena/
+.mcp.json
+
+# Spec workflow approvals (transient state)
+.spec-workflow/approvals/
+.spec-workflow/.DS_Store
