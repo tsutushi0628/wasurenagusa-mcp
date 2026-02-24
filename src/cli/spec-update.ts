@@ -9,6 +9,7 @@
  *   --setup  cron/launchd設定の生成
  */
 
+import { existsSync } from "fs";
 import { mkdir, readFile, writeFile, unlink, open } from "fs/promises";
 import { join, dirname } from "path";
 import { homedir } from "os";
@@ -22,8 +23,8 @@ import { TaskEvaluator } from "../autonomous/evaluator.js";
 import { ProjectInitializer } from "../autonomous/project-initializer.js";
 import { ProjectScanner } from "../autonomous/project-scanner.js";
 import { ActionList } from "../autonomous/action-list.js";
-import { AUTONOMOUS_DEFAULT_OPTIONS, MAX_RETRY_COUNT } from "../autonomous/constants.js";
-import { SlackNotifier } from "../autonomous/notifier.js";
+import { AUTONOMOUS_DEFAULT_OPTIONS, MAX_RETRY_COUNT, TEMPLATE_PATTERNS } from "../autonomous/constants.js";
+import { SlackNotifier, type CycleTaskResult } from "../autonomous/notifier.js";
 import { TaskMarkdownAdapter } from "../autonomous/task-markdown.js";
 import type { SchedulerConfig, ExecutionLogEntry, AutonomousTask, AutonomousTaskStatus } from "../types.js";
 
@@ -43,8 +44,40 @@ const DEFAULT_CONFIG: SchedulerConfig = {
   pingTimeoutMs: 30000,
   rotationThresholdDays: 7,
   idleThresholdMinutes: 150,
+  maxConcurrentTasks: 3,
   subProjectParents: ["bengo4-labo", "bl-labo"],
 };
+
+/**
+ * タスクファクトリ配列を並列数制限付きで実行する。
+ * 最大 maxConcurrent 個のタスクを同時実行し、1つ完了するたびに次を開始する。
+ */
+async function runWithConcurrencyLimit(
+  taskFns: (() => Promise<void>)[],
+  maxConcurrent: number,
+): Promise<PromiseSettledResult<void>[]> {
+  const results: PromiseSettledResult<void>[] = [];
+  let index = 0;
+
+  async function runNext(): Promise<void> {
+    while (index < taskFns.length) {
+      const currentIndex = index++;
+      try {
+        await taskFns[currentIndex]();
+        results[currentIndex] = { status: "fulfilled", value: undefined };
+      } catch (error) {
+        results[currentIndex] = { status: "rejected", reason: error };
+      }
+    }
+  }
+
+  const workers = Array.from(
+    { length: Math.min(maxConcurrent, taskFns.length) },
+    () => runNext(),
+  );
+  await Promise.all(workers);
+  return results;
+}
 
 /**
  * ユーザーがアイドル状態か判定する。
@@ -179,12 +212,39 @@ async function syncStatusToMarkdown(
   await mdAdapter.updateStatus(what, project, status, extra);
 }
 
+
+function validateAutonomousTask(task: AutonomousTask): { valid: boolean; reason?: string } {
+  const fields = [
+    { name: "why", value: task.why },
+    { name: "what", value: task.what },
+    { name: "done", value: task.done },
+    { name: "project", value: task.project },
+  ];
+
+  for (const field of fields) {
+    if (!field.value || field.value.trim().length === 0) {
+      return { valid: false, reason: `フィールド "${field.name}" が空` };
+    }
+    for (const pattern of TEMPLATE_PATTERNS) {
+      if (pattern.test(field.value)) {
+        return { valid: false, reason: `フィールド "${field.name}" がテンプレート文面: "${field.value}"` };
+      }
+    }
+  }
+
+  if (!task.projectPath || !existsSync(task.projectPath)) {
+    return { valid: false, reason: `projectPath が存在しない: "${task.projectPath}"` };
+  }
+
+  return { valid: true };
+}
+
 async function executeAutonomousTask(
   task: AutonomousTask,
   taskStore: TaskStore,
   executor: Executor,
   notifier: SlackNotifier,
-): Promise<{ exitCode: number; durationMs: number }> {
+): Promise<{ exitCode: number; durationMs: number; failReason?: string }> {
   const projectInitializer = new ProjectInitializer(SCHEDULER_DIR);
   const commandGenerator = new CommandGenerator();
   const evaluator = new TaskEvaluator();
@@ -216,10 +276,9 @@ async function executeAutonomousTask(
   if (result.exitCode !== 0) {
     const failReason = `Exit code: ${result.exitCode}`;
     await taskStore.markFailed(task.id, failReason);
-    await notifier.notifyTaskFailed(task.project, task.what, failReason);
     await syncStatusToMarkdown(task.what, task.project, "failed", { error: failReason });
     console.error(`[Autonomous] Task failed with exit code ${result.exitCode}`);
-    return { exitCode: result.exitCode, durationMs: result.durationMs };
+    return { exitCode: result.exitCode, durationMs: result.durationMs, failReason };
   }
 
   // 評価
@@ -243,7 +302,6 @@ async function executeAutonomousTask(
   // verdict判定
   if (evaluation.verdict === "ok") {
     await taskStore.markCompleted(task.id);
-    await notifier.notifyTaskCompleted(task.project, task.what, evaluation.reason);
     await syncStatusToMarkdown(task.what, task.project, "completed");
     console.log(`[Autonomous] Task completed: ${evaluation.reason}`);
   } else if (evaluation.verdict === "ng") {
@@ -266,8 +324,10 @@ async function executeAutonomousTask(
       );
       await syncStatusToMarkdown(task.what, task.project, "human-required", { reason });
       console.log(`[Autonomous] Task escalated to human: ${reason}`);
+      return { exitCode: result.exitCode, durationMs: result.durationMs, failReason: reason };
     } else {
       console.log(`[Autonomous] Task will retry (${updated.retryCount}/${MAX_RETRY_COUNT}): ${evaluation.reason}`);
+      return { exitCode: result.exitCode, durationMs: result.durationMs, failReason: evaluation.reason };
     }
   } else {
     // human-required
@@ -286,6 +346,7 @@ async function executeAutonomousTask(
     );
     await syncStatusToMarkdown(task.what, task.project, "human-required", { reason: evaluation.reason });
     console.log(`[Autonomous] Task requires human decision: ${evaluation.reason}`);
+    return { exitCode: result.exitCode, durationMs: result.durationMs, failReason: evaluation.reason };
   }
 
   return { exitCode: result.exitCode, durationMs: result.durationMs };
@@ -354,10 +415,12 @@ async function runCommand(): Promise<void> {
       return;
     }
 
-    // === 全タスクを並行実行 ===
-    const promises: Promise<void>[] = [];
+    // === タスク収集 → 並列数制限付き実行 ===
+    const taskFns: (() => Promise<void>)[] = [];
+    const cycleResults: CycleTaskResult[] = [];
+    const cycleStartMs = Date.now();
 
-    // 自律タスク: 全dequeue → 並行実行
+    // 自律タスク: 全dequeue
     const autonomousTasks: AutonomousTask[] = [];
     let nextTask = await taskStore.dequeue();
     while (nextTask) {
@@ -366,39 +429,63 @@ async function runCommand(): Promise<void> {
     }
 
     for (const autoTask of autonomousTasks) {
-      promises.push(
-        (async () => {
-          await syncStatusToMarkdown(autoTask.what, autoTask.project, "in-progress");
-          let execResult = { exitCode: -1, durationMs: 0 };
-          try {
-            execResult = await executeAutonomousTask(autoTask, taskStore, executor, notifier);
-          } catch (error) {
-            let errorMessage: string;
-            if (error instanceof Error) {
-              errorMessage = error.message;
-            } else {
-              errorMessage = String(error);
-            }
-            await taskStore.markFailed(autoTask.id, errorMessage);
-            await notifier.notifyTaskFailed(autoTask.project, autoTask.what, errorMessage);
-            await syncStatusToMarkdown(autoTask.what, autoTask.project, "failed", { error: errorMessage });
-            console.error(`[Autonomous] Task failed with error: ${errorMessage}`);
-          }
+      const validation = validateAutonomousTask(autoTask);
+      if (!validation.valid) {
+        const reason = `バリデーション失敗: ${validation.reason}`;
+        await taskStore.markFailed(autoTask.id, reason);
+        cycleResults.push({
+          project: autoTask.project,
+          taskType: "autonomous",
+          description: autoTask.what,
+          exitCode: 1,
+          durationMs: 0,
+          failReason: reason,
+        });
+        await syncStatusToMarkdown(autoTask.what, autoTask.project, "failed", { error: reason });
+        console.error(`[Autonomous] Task skipped (invalid): ${reason}`);
+        continue;
+      }
 
-          await logExecution({
-            timestamp: new Date().toISOString(),
-            taskId: autoTask.id,
-            type: "autonomous",
-            project: autoTask.project,
-            exitCode: execResult.exitCode,
-            durationMs: execResult.durationMs,
-            summary: `Autonomous task: ${autoTask.what}`,
-          });
-        })(),
-      );
+      taskFns.push(async () => {
+        await syncStatusToMarkdown(autoTask.what, autoTask.project, "in-progress");
+        let execResult: { exitCode: number; durationMs: number; failReason?: string } = { exitCode: -1, durationMs: 0 };
+        try {
+          execResult = await executeAutonomousTask(autoTask, taskStore, executor, notifier);
+        } catch (error) {
+          let errorMessage: string;
+          if (error instanceof Error) {
+            errorMessage = error.message;
+          } else {
+            errorMessage = String(error);
+          }
+          await taskStore.markFailed(autoTask.id, errorMessage);
+          await syncStatusToMarkdown(autoTask.what, autoTask.project, "failed", { error: errorMessage });
+          console.error(`[Autonomous] Task failed with error: ${errorMessage}`);
+          execResult = { exitCode: -1, durationMs: 0, failReason: `Error: ${errorMessage}` };
+        }
+
+        cycleResults.push({
+          project: autoTask.project,
+          taskType: "autonomous",
+          description: autoTask.what,
+          exitCode: execResult.exitCode,
+          durationMs: execResult.durationMs,
+          failReason: execResult.failReason,
+        });
+
+        await logExecution({
+          timestamp: new Date().toISOString(),
+          taskId: autoTask.id,
+          type: "autonomous",
+          project: autoTask.project,
+          exitCode: execResult.exitCode,
+          durationMs: execResult.durationMs,
+          summary: `Autonomous task: ${autoTask.what}`,
+        });
+      });
     }
 
-    // Spec更新タスク: キュービルド → 全dequeue → 並行実行
+    // Spec更新タスク: キュービルド → 全dequeue
     const changeLogger = new ChangeLogger(SCHEDULER_DIR);
     const taskQueue = new TaskQueue(SCHEDULER_DIR);
     const promptBuilder = new PromptBuilder();
@@ -409,60 +496,76 @@ async function runCommand(): Promise<void> {
     const specTasks = await taskQueue.dequeueAll();
 
     for (const task of specTasks) {
-      promises.push(
-        (async () => {
-          let prompt: string;
-          if (task.type === "change-based") {
-            prompt = await promptBuilder.buildChangeBasedPrompt(task);
-            // 消費済みにする（変更ログからエントリを除去）
-            const matchingEntry = changeEntries.find(
-              (e) => e.project === task.project && e.projectPath === task.projectPath,
-            );
-            if (matchingEntry) {
-              await changeLogger.consumeEntry(matchingEntry.timestamp);
-            }
-          } else {
-            prompt = await promptBuilder.buildRotationPrompt(task);
+      taskFns.push(async () => {
+        let prompt: string;
+        if (task.type === "change-based") {
+          prompt = await promptBuilder.buildChangeBasedPrompt(task);
+          const matchingEntry = changeEntries.find(
+            (e) => e.project === task.project && e.projectPath === task.projectPath,
+          );
+          if (matchingEntry) {
+            await changeLogger.consumeEntry(matchingEntry.timestamp);
           }
+        } else {
+          prompt = await promptBuilder.buildRotationPrompt(task);
+        }
 
-          console.log(`Executing ${task.type} task for ${task.project}...`);
-          const result = await executor.runSpecUpdate(prompt, task.projectPath, {
-            timeoutMs: config.taskTimeoutMs,
-          });
+        console.log(`Executing ${task.type} task for ${task.project}...`);
+        const result = await executor.runSpecUpdate(prompt, task.projectPath, {
+          timeoutMs: config.taskTimeoutMs,
+        });
 
-          if (result.exitCode === 0) {
-            await taskQueue.markComplete(task.id);
-            console.log(`Task completed for ${task.project} (${result.durationMs}ms)`);
-          } else {
-            await taskQueue.markFailed(task.id, result.stderr.slice(0, 200));
-            console.error(`Task failed for ${task.project} with exit code ${result.exitCode}`);
-          }
+        if (result.exitCode === 0) {
+          await taskQueue.markComplete(task.id);
+          console.log(`Task completed for ${task.project} (${result.durationMs}ms)`);
+        } else {
+          await taskQueue.markFailed(task.id, result.stderr.slice(0, 200));
+          console.error(`Task failed for ${task.project} with exit code ${result.exitCode}`);
+        }
 
-          await logExecution({
-            timestamp: new Date().toISOString(),
-            taskId: task.id,
-            type: task.type,
-            project: task.project,
-            exitCode: result.exitCode,
-            durationMs: result.durationMs,
-            summary: result.exitCode === 0 ? result.stdout.slice(0, 200) : undefined,
-            error: result.exitCode !== 0 ? result.stderr.slice(0, 200) : undefined,
-          });
-        })(),
-      );
+        cycleResults.push({
+          project: task.project,
+          taskType: task.type as "change-based" | "rotation",
+          description: "spec更新",
+          summary: result.exitCode === 0 ? result.stdout.slice(0, 200) : undefined,
+          exitCode: result.exitCode,
+          durationMs: result.durationMs,
+          failReason: result.exitCode !== 0 ? `Exit code: ${result.exitCode}` : undefined,
+        });
+
+        await logExecution({
+          timestamp: new Date().toISOString(),
+          taskId: task.id,
+          type: task.type,
+          project: task.project,
+          exitCode: result.exitCode,
+          durationMs: result.durationMs,
+          summary: result.exitCode === 0 ? result.stdout.slice(0, 200) : undefined,
+          error: result.exitCode !== 0 ? result.stderr.slice(0, 200) : undefined,
+        });
+      });
     }
 
-    // 並行実行 or ping
-    if (promises.length > 0) {
-      console.log(`[Parallel] Executing ${promises.length} task(s) in parallel...`);
-      const results = await Promise.allSettled(promises);
+    // 並列数制限付き実行 or ping
+    if (taskFns.length > 0) {
+      const maxConcurrent = config.maxConcurrentTasks;
+      console.log(`[Parallel] Executing ${taskFns.length} task(s) with concurrency limit ${maxConcurrent}...`);
+      const results = await runWithConcurrencyLimit(taskFns, maxConcurrent);
       const failed = results.filter((r) => r.status === "rejected");
       if (failed.length > 0) {
         console.error(`[Parallel] ${failed.length} task(s) failed unexpectedly`);
       }
-      console.log(`[Parallel] All ${promises.length} task(s) finished`);
+      console.log(`[Parallel] All ${taskFns.length} task(s) finished`);
+
+      // サイクルサマリー通知（全タスク統合）
+      if (cycleResults.length > 0) {
+        await notifier.notifyCycleSummary({
+          results: cycleResults,
+          totalDurationMs: Date.now() - cycleStartMs,
+          completedAt: new Date().toISOString(),
+        });
+      }
     } else {
-      // タスクなし → ping
       console.log("No tasks in queue. Sending keep-alive ping...");
       const result = await executor.ping(config.pingTimeoutMs);
       console.log(`Ping ${result.exitCode === 0 ? "succeeded" : "failed"} (${result.durationMs}ms)`);

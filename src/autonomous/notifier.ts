@@ -1,8 +1,7 @@
 import { config } from "../config.js";
 
 export type NotificationType =
-  | "task_completed"
-  | "task_failed"
+  | "cycle_summary"
   | "task_human_required"
   | "task_retry"
   | "daily_summary";
@@ -31,10 +30,26 @@ interface SlackContextBlock {
 
 type SlackBlock = SlackHeaderBlock | SlackSectionBlock | SlackContextBlock;
 
-// Discriminated union: daily_summaryとそれ以外でペイロード型を分離
+export interface CycleTaskResult {
+  project: string;
+  taskType: "autonomous" | "change-based" | "rotation";
+  description: string;
+  summary?: string;
+  exitCode: number;
+  durationMs: number;
+  failReason?: string;
+}
+
+export interface CycleSummary {
+  results: CycleTaskResult[];
+  totalDurationMs: number;
+  completedAt: string;
+}
+
+// Discriminated union: タイプ別でペイロード型を分離
 type NotificationPayload =
   | {
-      type: "task_completed" | "task_failed" | "task_human_required" | "task_retry";
+      type: "task_human_required" | "task_retry";
       project: string;
       taskWhat: string;
       reason?: string;
@@ -45,6 +60,10 @@ type NotificationPayload =
   | {
       type: "daily_summary";
       summary: DailySummary;
+    }
+  | {
+      type: "cycle_summary";
+      cycleSummary: CycleSummary;
     };
 
 export interface DailySummary {
@@ -64,24 +83,6 @@ export class SlackNotifier {
 
   get isEnabled(): boolean {
     return this.webhookUrl.length > 0;
-  }
-
-  async notifyTaskCompleted(project: string, taskWhat: string, reason: string): Promise<void> {
-    await this.send({
-      type: "task_completed",
-      project,
-      taskWhat,
-      reason,
-    });
-  }
-
-  async notifyTaskFailed(project: string, taskWhat: string, reason: string): Promise<void> {
-    await this.send({
-      type: "task_failed",
-      project,
-      taskWhat,
-      reason,
-    });
   }
 
   async notifyHumanRequired(
@@ -123,6 +124,13 @@ export class SlackNotifier {
     });
   }
 
+  async notifyCycleSummary(summary: CycleSummary): Promise<void> {
+    await this.send({
+      type: "cycle_summary",
+      cycleSummary: summary,
+    });
+  }
+
   private async send(payload: NotificationPayload): Promise<void> {
     if (!this.isEnabled) {
       return;
@@ -149,6 +157,10 @@ export class SlackNotifier {
   private buildSlackBlocks(payload: NotificationPayload): SlackBlock[] {
     if (payload.type === "daily_summary") {
       return this.buildDailySummaryBlocks(payload.summary);
+    }
+
+    if (payload.type === "cycle_summary") {
+      return this.buildCycleSummaryBlocks(payload.cycleSummary);
     }
 
     const emoji = this.getEmoji(payload.type);
@@ -218,10 +230,81 @@ export class SlackNotifier {
     ];
   }
 
+  private buildCycleSummaryBlocks(summary: CycleSummary): SlackBlock[] {
+    const total = summary.results.length;
+    const succeeded = summary.results.filter((r) => r.exitCode === 0).length;
+    const failed = total - succeeded;
+
+    const headerText = failed > 0
+      ? `📊 Scheduler Cycle: ${total}件実行 (${succeeded}成功 / ${failed}失敗)`
+      : `📊 Scheduler Cycle: ${total}件実行 (${succeeded}成功)`;
+
+    const taskLines = summary.results.map((r) => {
+      const emoji = r.exitCode === 0 ? "✅" : "❌";
+      const duration = r.exitCode === 0 ? ` (${this.formatDuration(r.durationMs)})` : "";
+      const failInfo = r.failReason ? ` — ${r.failReason}` : "";
+      const summaryInfo = r.summary ? ` — ${r.summary}` : "";
+      const detail = r.exitCode === 0 ? summaryInfo : failInfo;
+      return `${emoji} \`${r.project}\` [${r.taskType}] ${r.description}${detail}${duration}`;
+    });
+
+    const blocks: SlackBlock[] = [
+      {
+        type: "header",
+        text: {
+          type: "plain_text",
+          text: headerText,
+        },
+      },
+      {
+        type: "section",
+        fields: [
+          { type: "mrkdwn", text: `*Total:*\n${total}` },
+          { type: "mrkdwn", text: `*Duration:*\n${this.formatDuration(summary.totalDurationMs)}` },
+        ],
+      },
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: `*Tasks:*\n${taskLines.join("\n")}`,
+        },
+      },
+      {
+        type: "context",
+        elements: [
+          {
+            type: "mrkdwn",
+            text: `Cycle completed at ${this.formatJstDateTime(summary.completedAt)}`,
+          },
+        ],
+      },
+    ];
+
+    return blocks;
+  }
+
+  private formatDuration(ms: number): string {
+    const totalSeconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  }
+
+  private formatJstDateTime(isoString: string): string {
+    const date = new Date(isoString);
+    const jst = new Date(date.getTime() + 9 * 60 * 60 * 1000);
+    const year = jst.getUTCFullYear();
+    const month = String(jst.getUTCMonth() + 1).padStart(2, "0");
+    const day = String(jst.getUTCDate()).padStart(2, "0");
+    const hours = String(jst.getUTCHours()).padStart(2, "0");
+    const mins = String(jst.getUTCMinutes()).padStart(2, "0");
+    return `${year}-${month}-${day} ${hours}:${mins} JST`;
+  }
+
   private getEmoji(type: NotificationType): string {
     const map: Record<NotificationType, string> = {
-      task_completed: "✅",
-      task_failed: "❌",
+      cycle_summary: "📊",
       task_human_required: "🙋",
       task_retry: "🔄",
       daily_summary: "📊",
@@ -231,8 +314,7 @@ export class SlackNotifier {
 
   private getTitle(type: NotificationType): string {
     const map: Record<NotificationType, string> = {
-      task_completed: "Task Completed",
-      task_failed: "Task Failed",
+      cycle_summary: "Scheduler Cycle Summary",
       task_human_required: "Human Decision Required",
       task_retry: "Retry Limit Reached",
       daily_summary: "Daily Summary",

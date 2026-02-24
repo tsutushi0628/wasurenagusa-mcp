@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import type { DailySummary } from "./notifier.js";
+import type { DailySummary, CycleSummary } from "./notifier.js";
 
 // fetchをモック
 const mockFetch = vi.fn();
@@ -41,45 +41,145 @@ describe("SlackNotifier", () => {
     });
   });
 
-  describe("notifyTaskCompleted", () => {
-    it("Slack webhookにBlock Kit形式でPOSTする", async () => {
+  describe("notifyCycleSummary", () => {
+    it("成功+失敗混在のサマリーをBlock Kit形式でPOSTする", async () => {
       const { SlackNotifier } = await import("./notifier.js");
       const notifier = new SlackNotifier();
 
-      await notifier.notifyTaskCompleted("my-project", "テスト実行", "全条件クリア");
+      const summary: CycleSummary = {
+        results: [
+          {
+            project: "my-project",
+            taskType: "autonomous",
+            description: "テスト追加",
+            exitCode: 0,
+            durationMs: 192000,
+          },
+          {
+            project: "other-project",
+            taskType: "autonomous",
+            description: "ビルド修正",
+            exitCode: 1,
+            durationMs: 5000,
+            failReason: "Exit code: 1",
+          },
+          {
+            project: "project-a",
+            taskType: "change-based",
+            description: "spec更新",
+            summary: "structure.mdの1行修正",
+            exitCode: 0,
+            durationMs: 130000,
+          },
+        ],
+        totalDurationMs: 754000,
+        completedAt: "2026-02-18T18:15:00.000Z",
+      };
+
+      await notifier.notifyCycleSummary(summary);
 
       expect(mockFetch).toHaveBeenCalledOnce();
       const [url, options] = mockFetch.mock.calls[0];
       expect(url).toBe("https://hooks.slack.com/services/T00/B00/xxx");
       expect(options.method).toBe("POST");
-      expect(options.headers["Content-Type"]).toBe("application/json");
 
       const body = JSON.parse(options.body);
       expect(body.blocks).toBeDefined();
-      expect(body.blocks.length).toBeGreaterThanOrEqual(2);
+      expect(body.blocks.length).toBe(4);
 
-      // header block
+      // header block: 件数と成功/失敗数
       expect(body.blocks[0].type).toBe("header");
-      expect(body.blocks[0].text.text).toContain("Task Completed");
+      expect(body.blocks[0].text.text).toContain("3件実行");
+      expect(body.blocks[0].text.text).toContain("2成功");
+      expect(body.blocks[0].text.text).toContain("1失敗");
 
-      // section with project and task
+      // section with total and duration
       expect(body.blocks[1].type).toBe("section");
-      const fieldTexts = body.blocks[1].fields.map((f: { text: string }) => f.text);
-      expect(fieldTexts.some((t: string) => t.includes("my-project"))).toBe(true);
-      expect(fieldTexts.some((t: string) => t.includes("テスト実行"))).toBe(true);
-    });
-  });
+      expect(body.blocks[1].fields[0].text).toContain("3");
+      expect(body.blocks[1].fields[1].text).toContain("Duration");
 
-  describe("notifyTaskFailed", () => {
-    it("失敗通知をPOSTする", async () => {
+      // tasks section
+      expect(body.blocks[2].type).toBe("section");
+      const tasksText = body.blocks[2].text.text;
+      expect(tasksText).toContain("my-project");
+      expect(tasksText).toContain("[autonomous]");
+      expect(tasksText).toContain("テスト追加");
+      expect(tasksText).toContain("other-project");
+      expect(tasksText).toContain("Exit code: 1");
+      expect(tasksText).toContain("project-a");
+      expect(tasksText).toContain("[change-based]");
+      expect(tasksText).toContain("spec更新");
+      expect(tasksText).toContain("structure.mdの1行修正");
+
+      // context block: completion time
+      expect(body.blocks[3].type).toBe("context");
+      expect(body.blocks[3].elements[0].text).toContain("Cycle completed at");
+      expect(body.blocks[3].elements[0].text).toContain("JST");
+    });
+
+    it("全成功パターンではヘッダーに失敗数を含めない", async () => {
       const { SlackNotifier } = await import("./notifier.js");
       const notifier = new SlackNotifier();
 
-      await notifier.notifyTaskFailed("my-project", "ビルド", "Exit code: 1");
+      const summary: CycleSummary = {
+        results: [
+          {
+            project: "my-project",
+            taskType: "autonomous",
+            description: "テスト追加",
+            exitCode: 0,
+            durationMs: 120000,
+          },
+        ],
+        totalDurationMs: 120000,
+        completedAt: "2026-02-18T18:15:00.000Z",
+      };
 
-      expect(mockFetch).toHaveBeenCalledOnce();
+      await notifier.notifyCycleSummary(summary);
+
       const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-      expect(body.blocks[0].text.text).toContain("Task Failed");
+      expect(body.blocks[0].text.text).toContain("1件実行 (1成功)");
+      expect(body.blocks[0].text.text).not.toContain("失敗");
+    });
+
+    it("失敗のみパターンでも正しく表示する", async () => {
+      const { SlackNotifier } = await import("./notifier.js");
+      const notifier = new SlackNotifier();
+
+      const summary: CycleSummary = {
+        results: [
+          {
+            project: "bad-project",
+            taskType: "autonomous",
+            description: "テスト",
+            exitCode: 1,
+            durationMs: 2000,
+            failReason: "バリデーション失敗: フィールド \"why\" が空",
+          },
+        ],
+        totalDurationMs: 2000,
+        completedAt: "2026-02-18T18:15:00.000Z",
+      };
+
+      await notifier.notifyCycleSummary(summary);
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.blocks[0].text.text).toContain("0成功 / 1失敗");
+      expect(body.blocks[2].text.text).toContain("バリデーション失敗");
+    });
+
+    it("webhookUrl未設定時はfetchを呼ばない", async () => {
+      mockWebhookUrl = "";
+      const { SlackNotifier } = await import("./notifier.js");
+      const notifier = new SlackNotifier();
+
+      await notifier.notifyCycleSummary({
+        results: [],
+        totalDurationMs: 0,
+        completedAt: new Date().toISOString(),
+      });
+
+      expect(mockFetch).not.toHaveBeenCalled();
     });
   });
 
@@ -157,27 +257,18 @@ describe("SlackNotifier", () => {
     });
   });
 
-  describe("未設定時の挙動", () => {
-    it("webhookUrl未設定時はfetchを呼ばない", async () => {
-      mockWebhookUrl = "";
-      const { SlackNotifier } = await import("./notifier.js");
-      const notifier = new SlackNotifier();
-
-      await notifier.notifyTaskCompleted("project", "task", "reason");
-
-      expect(mockFetch).not.toHaveBeenCalled();
-    });
-  });
-
   describe("エラーハンドリング", () => {
     it("webhook応答がエラーでも例外をスローしない", async () => {
       mockFetch.mockResolvedValue({ ok: false, status: 500, statusText: "Internal Server Error" });
       const { SlackNotifier } = await import("./notifier.js");
       const notifier = new SlackNotifier();
 
-      // 例外なく完了する
       await expect(
-        notifier.notifyTaskCompleted("project", "task", "reason"),
+        notifier.notifyCycleSummary({
+          results: [{ project: "p", taskType: "autonomous", description: "t", exitCode: 0, durationMs: 1000 }],
+          totalDurationMs: 1000,
+          completedAt: new Date().toISOString(),
+        }),
       ).resolves.toBeUndefined();
     });
 
@@ -187,7 +278,7 @@ describe("SlackNotifier", () => {
       const notifier = new SlackNotifier();
 
       await expect(
-        notifier.notifyTaskFailed("project", "task", "reason"),
+        notifier.notifyHumanRequired("project", "task", "reason"),
       ).resolves.toBeUndefined();
     });
   });

@@ -18,14 +18,13 @@
  */
 
 import { basename } from "path";
+import { spawn } from "child_process";
 import { findProjectRoot } from "../utils/projectRoot.js";
 import { MarkdownStorage } from "../storage/index.js";
 import { getMemoryPath, config } from "../config.js";
 import {
   isConsolidationStale,
   readConsolidatedDont,
-  writeConsolidatedDont,
-  DontConsolidator,
   formatConsolidatedDont,
 } from "../consolidator/index.js";
 import { loadOwnerProfile, getOwnerProfilePath } from "../utils/owner-profile.js";
@@ -47,32 +46,43 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf-8");
 }
 
+/**
+ * consolidationをdetachedプロセスとして非同期実行する。
+ * SessionStart hookの5秒タイムアウトに引っかからないよう、
+ * 結果は次回セッションで利用する方式に変更。
+ */
+function spawnConsolidationBackground(memoryPath: string, projectRoot: string): void {
+  const scriptPath = new URL("./consolidate-worker.js", import.meta.url).pathname;
+  const child = spawn(process.execPath, [scriptPath, memoryPath, projectRoot], {
+    detached: true,
+    stdio: "ignore",
+    env: process.env,
+  });
+  child.unref();
+}
+
 async function getDontContent(
   storage: MarkdownStorage,
   currentProject: string,
   memoryPath: string,
+  projectRoot: string,
 ): Promise<string> {
   try {
-    // 統合が古くなっていれば再統合
+    // 統合が古くなっていればバックグラウンドで再統合を開始（次回セッション向け）
     if (await isConsolidationStale(memoryPath)) {
-      const entries = await storage.readDontEntries(currentProject);
-      if (entries.length > 0 && config.geminiApiKey) {
-        const consolidator = new DontConsolidator();
-        const result = await consolidator.consolidate(entries);
-        if (result) {
-          await writeConsolidatedDont(memoryPath, result);
-        }
+      if (config.geminiApiKey) {
+        spawnConsolidationBackground(memoryPath, projectRoot);
       }
     }
 
-    // 統合版を読み込み
+    // 現時点の統合版を読み込み（前回のconsolidation結果）
     const consolidated = await readConsolidatedDont(memoryPath);
     if (consolidated) {
       const formatted = formatConsolidatedDont(consolidated);
       if (formatted) return formatted;
     }
   } catch {
-    // 統合失敗時はフォールバック
+    // 統合読み込み失敗時はフォールバック
   }
 
   // フォールバック: 従来の全件注入
@@ -105,7 +115,7 @@ async function main() {
   const context = await storage.getContext(currentProject);
 
   // dont部分は統合レイヤー経由で取得
-  const dontContent = await getDontContent(storage, currentProject, memoryPath);
+  const dontContent = await getDontContent(storage, currentProject, memoryPath, projectRoot);
 
   // 出力を組み立て
   const output: string[] = [];

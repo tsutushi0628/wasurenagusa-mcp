@@ -48,6 +48,11 @@ async function main() {
     process.exit(0);
   }
 
+  // スケジューラー起動のClaude CLIセッションは分析をスキップ（ログ爆発防止）
+  if (process.env.WASURENAGUSA_SCHEDULER === "1") {
+    process.exit(0);
+  }
+
   // Gemini APIキーがない場合はスキップ
   if (!process.env.GEMINI_API_KEY) {
     process.exit(0);

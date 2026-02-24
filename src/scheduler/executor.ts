@@ -14,6 +14,9 @@ function buildCleanEnv(): NodeJS.ProcessEnv {
       env[k] = v;
     }
   }
+  // スケジューラー起動のClaude CLIであることをマーク。
+  // Stop hookのwasurenagusa-analyzeがこの環境変数を検出し、分析をスキップする。
+  env.WASURENAGUSA_SCHEDULER = "1";
   return env;
 }
 
