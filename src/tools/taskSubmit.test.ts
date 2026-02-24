@@ -40,4 +40,41 @@ describe("handleTaskSubmit", () => {
     const parsed = JSON.parse(result);
     expect(parsed.error).toContain("メタ情報が見つかりません");
   });
+
+  it("テンプレート文面がそのまま投入された場合にエラーを返す", async () => {
+    const { handleTaskSubmit } = await import("./taskSubmit.js");
+    const result = await handleTaskSubmit({
+      why: "なぜやるか（背景・目的）",
+      what: "何をやるか",
+      done: "完了条件",
+      project: "test-project",
+    });
+    const parsed = JSON.parse(result);
+    expect(parsed.error).toContain("テンプレート文面のまま");
+  });
+
+  it("テンプレートパターン「ここに」を含む場合にエラーを返す", async () => {
+    const { handleTaskSubmit } = await import("./taskSubmit.js");
+    const result = await handleTaskSubmit({
+      why: "ここに背景を書く",
+      what: "実装する",
+      done: "テスト通過",
+      project: "test-project",
+    });
+    const parsed = JSON.parse(result);
+    expect(parsed.error).toContain("テンプレート文面のまま");
+  });
+
+  it("具体的な内容が記入されていればテンプレートバリデーションを通過する", async () => {
+    const { handleTaskSubmit } = await import("./taskSubmit.js");
+    const result = await handleTaskSubmit({
+      why: "ユーザー体験の改善のため",
+      what: "ダッシュボードにグラフを追加",
+      done: "vitest全パス",
+      project: "nonexistent-project",
+    });
+    const parsed = JSON.parse(result);
+    // テンプレバリデーションは通過し、プロジェクトメタ未登録エラーになる
+    expect(parsed.error).toContain("メタ情報が見つかりません");
+  });
 });

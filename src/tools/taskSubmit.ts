@@ -1,6 +1,7 @@
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { TaskStore } from "../autonomous/task-store.js";
 import { ProjectInitializer } from "../autonomous/project-initializer.js";
+import { TEMPLATE_PATTERNS } from "../autonomous/constants.js";
 import { homedir } from "os";
 import { join } from "path";
 
@@ -49,6 +50,23 @@ export async function handleTaskSubmit(
 
   if (!why || !what || !done || !project) {
     return JSON.stringify({ error: "why, what, done, project は全て必須です" });
+  }
+
+  // テンプレート文面チェック: テンプレをそのまま投入した場合を弾く
+  const fields = [
+    { name: "why", value: why },
+    { name: "what", value: what },
+    { name: "done", value: done },
+    { name: "project", value: project },
+  ];
+  for (const field of fields) {
+    for (const pattern of TEMPLATE_PATTERNS) {
+      if (pattern.test(field.value)) {
+        return JSON.stringify({
+          error: `"${field.name}" がテンプレート文面のままです: "${field.value}"。具体的な内容を記述してください。`,
+        });
+      }
+    }
   }
 
   const store = new TaskStore(SCHEDULER_DIR);
