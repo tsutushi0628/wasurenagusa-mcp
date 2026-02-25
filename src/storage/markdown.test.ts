@@ -401,7 +401,7 @@ describe("MarkdownStorage", () => {
       expect(context.dont).toContain("ログを読んでから質問すること");
     });
 
-    it("configはタイトル一覧のみ返却する（内容は含まない）", async () => {
+    it("configはタイトルと内容を両方返却する", async () => {
       const storage = new MarkdownStorage(tempDir);
 
       await storage.save({
@@ -414,7 +414,7 @@ describe("MarkdownStorage", () => {
       const context = await storage.getContext("yakusoku");
 
       expect(context.config).toContain("API URL設定");
-      expect(context.config).not.toContain("https://api.example.com");
+      expect(context.config).toContain("https://api.example.com");
     });
 
     it("projectフィルタ: 別プロジェクトのエントリは含まない", async () => {

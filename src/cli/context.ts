@@ -147,6 +147,13 @@ async function main() {
     output.push("（まだメモリがありません）");
   }
 
+  // 能動検索の指示を末尾に追加
+  output.push("");
+  output.push("## メモリ活用ルール（必須）");
+  output.push("- 作業開始前に `memory_search` で関連するメモリを検索し、過去の知見・設定・失敗を確認すること");
+  output.push("- 「覚えろ」と言われたら `memory_save` で保存すること（MEMORY.mdへの書き込み禁止）");
+  output.push("- 上記の設定情報（config）は過去にユーザーが覚えさせた重要情報。作業対象に関連するものは必ず参照すること");
+
   // stdoutに出力（Hooksがこれをコンテキストに注入する）
   console.log(output.join("\n"));
 }

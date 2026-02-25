@@ -237,14 +237,14 @@ export class MarkdownStorage {
   async getContext(currentProject?: string): Promise<ContextResult> {
     await this.initialize();
 
-    // configエントリ: projectフィルタ後にタイトル一覧のみ返却
+    // configエントリ: projectフィルタ後にタイトル+内容を返却
     const configEntries = await this.readCategory("config");
     const filteredConfig = currentProject
       ? configEntries.filter(e => !e.project || e.project === currentProject)
       : configEntries;
-    const configTitles = filteredConfig
-      .map(e => `- ${e.title} (id: ${e.id})`)
-      .join("\n");
+    const configFormatted = filteredConfig
+      .map(e => `### ${e.title}\n${e.content}`)
+      .join("\n\n");
 
     // dontエントリ: projectフィルタ後に全件の内容を返却
     const dontEntries = await this.readCategory("dont");
@@ -254,7 +254,7 @@ export class MarkdownStorage {
     const dontFormatted = filteredDont.map(e => formatEntry(e)).join("");
 
     return {
-      config: configTitles || "（設定情報なし）",
+      config: configFormatted || "（設定情報なし）",
       dont: dontFormatted || "（ルールなし）",
     };
   }
