@@ -43,6 +43,25 @@ titleには検索しやすい具体的な名詞を含めること。`,
   }
 };
 
+function normalizeTags(raw: unknown): string[] {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw.map(String);
+  if (typeof raw === "string") {
+    // JSON配列文字列 or カンマ区切り
+    const trimmed = raw.trim();
+    if (trimmed.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) return parsed.map(String);
+      } catch {
+        // パース失敗時はカンマ区切りとして処理
+      }
+    }
+    return trimmed.split(",").map(s => s.trim()).filter(Boolean);
+  }
+  return [];
+}
+
 export async function handleMemorySave(
   args: Record<string, unknown>,
   projectRoot: string
@@ -53,7 +72,7 @@ export async function handleMemorySave(
     category: args.category as MemoryCategory,
     title: args.title as string,
     content: args.content as string,
-    tags: (args.tags as string[]) || [],
+    tags: normalizeTags(args.tags),
     project: basename(projectRoot),
     scope: args.scope as string | undefined,
   };
