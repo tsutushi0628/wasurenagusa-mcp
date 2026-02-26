@@ -7,7 +7,8 @@
     "wasurenagusa-mcp": "./dist/index.js",
     "wasurenagusa-context": "./dist/cli/context.js",
     "wasurenagusa-analyze": "./dist/cli/analyze.js",
-    "wasurenagusa-spec-update": "./dist/cli/spec-update.js"
+    "wasurenagusa-spec-update": "./dist/cli/spec-update.js",
+    "wasurenagusa-rebuild": "./dist/cli/rebuild.js"
   },
   "scripts": {
     "build": "tsc",

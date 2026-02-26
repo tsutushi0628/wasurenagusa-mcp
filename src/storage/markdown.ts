@@ -297,10 +297,16 @@ export class MarkdownStorage {
       if (!existsSync(logsPath)) { return []; }
       const files = await readdir(logsPath);
       const entries: MemoryEntry[] = [];
+      const seenIds = new Set<string>();
       for (const file of files) {
         if (file.endsWith(".md")) {
           const content = await readFile(join(logsPath, file), "utf-8");
-          entries.push(...parseMarkdown(content, category));
+          for (const entry of parseMarkdown(content, category)) {
+            if (!seenIds.has(entry.id)) {
+              seenIds.add(entry.id);
+              entries.push(entry);
+            }
+          }
         }
       }
       return entries;
@@ -308,7 +314,14 @@ export class MarkdownStorage {
     const filePath = join(this.memoryPath, config.categoryFiles[category]);
     if (!existsSync(filePath)) { return []; }
     const content = await readFile(filePath, "utf-8");
-    return parseMarkdown(content, category);
+    const entries = parseMarkdown(content, category);
+    // 同一ファイル内の重複も排除
+    const seenIds = new Set<string>();
+    return entries.filter(e => {
+      if (seenIds.has(e.id)) { return false; }
+      seenIds.add(e.id);
+      return true;
+    });
   }
 
   private getFilePath(category: MemoryCategory, timestamp: string): string {
