@@ -31,6 +31,7 @@ import {
 import { findProjectRoot } from "./utils/projectRoot.js";
 import { ensureOwnerProfileExists } from "./utils/owner-profile.js";
 import { getMemoryPath } from "./config.js";
+import { startZombieReaper } from "./utils/zombie-reaper.js";
 
 dotenvConfig();
 
@@ -133,6 +134,9 @@ async function main() {
   // owner-profile.md が未配置ならテンプレートを自動配置
   const memoryPath = getMemoryPath(PROJECT_ROOT);
   await ensureOwnerProfileExists(memoryPath);
+
+  // ゾンビプロセスの自動掃除を開始
+  startZombieReaper();
 
   console.error("wasurenagusa-mcp server started (v0.3.0)");
 }
