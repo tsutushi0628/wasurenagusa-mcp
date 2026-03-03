@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { selectKillTargets, ProcessInfo } from "./zombie-reaper.js";
+import {
+  selectKillTargets,
+  selectSiblingTargets,
+  ProcessInfo,
+} from "./zombie-reaper.js";
 
 /**
  * プロセスツリーのテスト用ヘルパー
@@ -295,6 +299,112 @@ describe("zombie-reaper", () => {
       expect(result).not.toContain(7001);
       expect(result).not.toContain(50100);
       expect(result).not.toContain(50101);
+    });
+  });
+
+  describe("selectSiblingTargets", () => {
+    const MY_PID = 6157;
+    const PARENT_CLAUDE_PID = 6147;
+
+    // ===== シナリオ10: 兄弟Serenaをkill対象にする =====
+    it("同じ親claudeの兄弟MCP（Serena等）をkill対象にする", () => {
+      const processes: ProcessInfo[] = [
+        // 自分（wasurenagusa）
+        { pid: MY_PID, ppid: PARENT_CLAUDE_PID, command: "node wasurenagusa-mcp" },
+        // 兄弟MCP群
+        { pid: 6158, ppid: PARENT_CLAUDE_PID, command: "python serena start-mcp-server --project ." },
+        { pid: 6159, ppid: PARENT_CLAUDE_PID, command: "node playwright-mcp" },
+        { pid: 6160, ppid: PARENT_CLAUDE_PID, command: "node spec-workflow-mcp" },
+      ];
+
+      const result = selectSiblingTargets(processes, MY_PID, PARENT_CLAUDE_PID);
+
+      expect(result).toContain(6158); // Serena
+      expect(result).toContain(6159); // Playwright
+      expect(result).toContain(6160); // spec-workflow
+      expect(result).not.toContain(MY_PID); // 自分は除外
+      expect(result).toHaveLength(3);
+    });
+
+    // ===== シナリオ11: 自分自身は絶対に除外する =====
+    it("自分自身はkill対象にしない", () => {
+      const processes: ProcessInfo[] = [
+        { pid: MY_PID, ppid: PARENT_CLAUDE_PID, command: "node wasurenagusa-mcp" },
+      ];
+
+      const result = selectSiblingTargets(processes, MY_PID, PARENT_CLAUDE_PID);
+
+      expect(result).toHaveLength(0);
+    });
+
+    // ===== シナリオ12: 別セッションの兄弟は触らない =====
+    it("別のclaudeセッションの子MCPは触らない", () => {
+      const OTHER_CLAUDE_PID = 9999;
+      const processes: ProcessInfo[] = [
+        // 自分
+        { pid: MY_PID, ppid: PARENT_CLAUDE_PID, command: "node wasurenagusa-mcp" },
+        // 自分の兄弟
+        { pid: 6158, ppid: PARENT_CLAUDE_PID, command: "python serena start-mcp-server --project ." },
+        // 別セッションのMCP
+        { pid: 9001, ppid: OTHER_CLAUDE_PID, command: "python serena start-mcp-server --project ." },
+        { pid: 9002, ppid: OTHER_CLAUDE_PID, command: "node playwright-mcp" },
+      ];
+
+      const result = selectSiblingTargets(processes, MY_PID, PARENT_CLAUDE_PID);
+
+      expect(result).toContain(6158);
+      expect(result).not.toContain(9001);
+      expect(result).not.toContain(9002);
+      expect(result).toHaveLength(1);
+    });
+
+    // ===== シナリオ13: claudeバイナリは兄弟でもkillしない =====
+    it("親claudeバイナリは対象パターンに含まれないのでkillしない", () => {
+      const PLUGIN_HOST = 89556;
+      const processes: ProcessInfo[] = [
+        // 自分
+        { pid: MY_PID, ppid: PARENT_CLAUDE_PID, command: "node wasurenagusa-mcp" },
+        // 親claude（PPIDがPlugin Host）— PPIDが一致しないので対象外
+        { pid: PARENT_CLAUDE_PID, ppid: PLUGIN_HOST, command: "/path/native-binary/claude --args" },
+        // 兄弟Serena
+        { pid: 6158, ppid: PARENT_CLAUDE_PID, command: "python serena start-mcp-server" },
+      ];
+
+      const result = selectSiblingTargets(processes, MY_PID, PARENT_CLAUDE_PID);
+
+      expect(result).toContain(6158);
+      expect(result).not.toContain(PARENT_CLAUDE_PID);
+      expect(result).toHaveLength(1);
+    });
+
+    // ===== シナリオ14: 兄弟がいない場合 =====
+    it("兄弟MCPがいなければ空配列を返す", () => {
+      const processes: ProcessInfo[] = [
+        { pid: MY_PID, ppid: PARENT_CLAUDE_PID, command: "node wasurenagusa-mcp" },
+      ];
+
+      const result = selectSiblingTargets(processes, MY_PID, PARENT_CLAUDE_PID);
+
+      expect(result).toHaveLength(0);
+    });
+
+    // ===== シナリオ15: パターンにマッチしないプロセスは無視 =====
+    it("SIBLING_MCP_PATTERNSにマッチしないプロセスは無視する", () => {
+      const processes: ProcessInfo[] = [
+        { pid: MY_PID, ppid: PARENT_CLAUDE_PID, command: "node wasurenagusa-mcp" },
+        // 未知のプロセス（同じ親だけどパターン外）
+        { pid: 6170, ppid: PARENT_CLAUDE_PID, command: "node some-unknown-mcp" },
+        { pid: 6171, ppid: PARENT_CLAUDE_PID, command: "python random-script.py" },
+        // 正規の兄弟
+        { pid: 6158, ppid: PARENT_CLAUDE_PID, command: "python serena start-mcp-server" },
+      ];
+
+      const result = selectSiblingTargets(processes, MY_PID, PARENT_CLAUDE_PID);
+
+      expect(result).toContain(6158);
+      expect(result).not.toContain(6170);
+      expect(result).not.toContain(6171);
+      expect(result).toHaveLength(1);
     });
   });
 });

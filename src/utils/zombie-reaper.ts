@@ -4,15 +4,21 @@
  * MCP SDK の StdioServerTransport は親プロセスが死んでも process.exit() しないため、
  * claude バイナリやその子 MCP プロセスがゾンビとして残り続ける。
  *
- * このモジュールは3つの対策を提供する:
+ * このモジュールは4つの対策を提供する:
  * 1. stdin close 検知による自己終了（自分がゾンビにならない）
  * 2. 親プロセス生存確認ポーリング（stdin close 漏れのバックアップ）
  * 3. 30分ごとのゾンビプロセス掃除（孤児化したプロセスのみ対象）
+ * 4. 終了時の兄弟MCPプロセス巻き添え終了（Serena等のリソース解放）
  *
  * ゾンビ判定ロジック（案E: 孤児限定kill）:
  * - PPID=1（孤児化した claude バイナリ）→ kill
  * - ↑の直接の子プロセス（MCP群）→ kill
  * - 同一 Plugin Host 配下のプロセスは一切触らない
+ *
+ * 兄弟MCP巻き添えロジック:
+ * - 自分と同じ親（claude バイナリ）を持つ MCP プロセスを検出
+ * - 自分自身と claude バイナリは除外
+ * - stdin close / 親死亡時に SIGTERM を送る
  */
 
 import { execSync } from "child_process";
@@ -27,6 +33,13 @@ const TARGET_PATTERNS = [
   "playwright-mcp",
   "spec-workflow-mcp",
   "native-binary/claude",
+];
+
+/** 兄弟kill対象のMCPパターン（claude バイナリは除外） */
+const SIBLING_MCP_PATTERNS = [
+  "serena start-mcp-server",
+  "playwright-mcp",
+  "spec-workflow-mcp",
 ];
 
 export interface ProcessInfo {
@@ -144,6 +157,59 @@ export function selectKillTargets(
 }
 
 /**
+ * 自分と同じ親を持つ兄弟MCPプロセスを選定する（純粋関数・テスト用にexport）
+ *
+ * 自分の終了時に、同じ claude セッション配下の Serena 等を道連れにする。
+ * - 自分自身（process.pid）は除外
+ * - claude バイナリは除外（セッション管理はVSCode側の責務）
+ */
+export function selectSiblingTargets(
+  allTargets: ProcessInfo[],
+  myPid: number,
+  myParentPid: number
+): number[] {
+  return allTargets
+    .filter((p) => {
+      if (p.pid === myPid) return false;
+      if (p.ppid !== myParentPid) return false;
+      return SIBLING_MCP_PATTERNS.some((pattern) =>
+        p.command.includes(pattern)
+      );
+    })
+    .map((p) => p.pid);
+}
+
+/**
+ * 兄弟MCPプロセスにSIGTERMを送る（自分の終了時に呼ぶ）
+ */
+function killSiblingMcps(): void {
+  try {
+    const allTargets = findTargetProcesses();
+    const siblings = selectSiblingTargets(
+      allTargets,
+      process.pid,
+      process.ppid
+    );
+
+    for (const pid of siblings) {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        // プロセスが既に終了していても無視
+      }
+    }
+
+    if (siblings.length > 0) {
+      console.error(
+        `[zombie-reaper] killed ${siblings.length} sibling MCP(s) on exit`
+      );
+    }
+  } catch {
+    // 終了時のベストエフォート。失敗しても自分の終了は阻害しない
+  }
+}
+
+/**
  * ゾンビプロセスを検出してkillする
  */
 function reap(): { killed: number; errors: number } {
@@ -179,12 +245,14 @@ function reap(): { killed: number; errors: number } {
  */
 function setupStdinWatcher(): void {
   process.stdin.on("end", () => {
-    console.error("[zombie-reaper] stdin closed, exiting");
+    console.error("[zombie-reaper] stdin closed, killing siblings and exiting");
+    killSiblingMcps();
     process.exit(0);
   });
 
   process.stdin.on("close", () => {
-    console.error("[zombie-reaper] stdin closed, exiting");
+    console.error("[zombie-reaper] stdin closed, killing siblings and exiting");
+    killSiblingMcps();
     process.exit(0);
   });
 }
@@ -201,8 +269,9 @@ function setupParentWatcher(): void {
       process.kill(parentPid, 0);
     } catch {
       console.error(
-        `[zombie-reaper] parent ${parentPid} is dead, exiting`
+        `[zombie-reaper] parent ${parentPid} is dead, killing siblings and exiting`
       );
+      killSiblingMcps();
       process.exit(0);
     }
   }, PARENT_CHECK_INTERVAL_MS);
