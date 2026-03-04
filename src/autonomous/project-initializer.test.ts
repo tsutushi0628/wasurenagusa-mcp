@@ -5,11 +5,9 @@ import { tmpdir } from "os";
 import { ProjectInitializer } from "./project-initializer.js";
 import type { ProjectMeta } from "../types.js";
 
-const mockGenerateContent = vi.fn();
-vi.mock("../analyzer/gemini-client.js", () => ({
-  createGeminiModel: vi.fn(() => ({
-    generateContent: mockGenerateContent,
-  })),
+const mockGenerateText = vi.fn();
+vi.mock("../llm/provider.js", () => ({
+  createGenerateTextFn: vi.fn(() => mockGenerateText),
 }));
 
 vi.mock("../analyzer/prompt-loader.js", () => ({
@@ -28,20 +26,18 @@ describe("ProjectInitializer", () => {
   });
 
   describe("generateQuestions()", () => {
-    it("Geminiで質問リストを生成する", async () => {
-      mockGenerateContent.mockResolvedValue({
-        response: {
-          text: () => JSON.stringify({
-            questions: [
-              {
-                key: "phase",
-                question: "プロジェクトのフェーズは？",
-                options: ["startup", "growth", "mature"],
-              },
-            ],
-          }),
-        },
-      });
+    it("LLMで質問リストを生成する", async () => {
+      mockGenerateText.mockResolvedValue(
+        JSON.stringify({
+          questions: [
+            {
+              key: "phase",
+              question: "プロジェクトのフェーズは？",
+              options: ["startup", "growth", "mature"],
+            },
+          ],
+        }),
+      );
 
       const initializer = new ProjectInitializer(schedulerDir);
       const result = await initializer.generateQuestions("test-project", "テスト情報");
@@ -52,9 +48,7 @@ describe("ProjectInitializer", () => {
     });
 
     it("不正なJSONでエラーを投げる", async () => {
-      mockGenerateContent.mockResolvedValue({
-        response: { text: () => "これはJSONではない" },
-      });
+      mockGenerateText.mockResolvedValue("これはJSONではない");
 
       const initializer = new ProjectInitializer(schedulerDir);
       await expect(

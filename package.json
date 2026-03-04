@@ -47,9 +47,12 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@google/generative-ai": "^0.21.0",
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "dotenv": "^16.4.0"
+    "@genkit-ai/anthropic": "^0.2.0",
+    "@genkit-ai/compat-oai": "^1.29.0",
+    "@genkit-ai/google-genai": "^1.29.0",
+"@modelcontextprotocol/sdk": "^1.0.0",
+    "dotenv": "^16.4.0",
+    "genkit": "^1.29.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

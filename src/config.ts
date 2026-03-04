@@ -24,9 +24,14 @@ function resolveSlackWebhookUrl(): string {
 }
 
 export const config = {
-  // Gemini API設定
+  // LLMプロバイダ設定（gemini | openai | anthropic）
+  llmProvider: (process.env.LLM_PROVIDER || "gemini") as "gemini" | "openai" | "anthropic",
+  llmModel: process.env.LLM_MODEL || undefined,
+
+  // 各プロバイダのAPIキー
   geminiApiKey: process.env.GEMINI_API_KEY || "",
-  geminiModel: "gemini-3-flash-preview",
+  openaiApiKey: process.env.OPENAI_API_KEY || "",
+  anthropicApiKey: process.env.ANTHROPIC_API_KEY || "",
 
   // メモリディレクトリ（プロジェクトルートからの相対パス）
   memoryDir: process.env.MEMORY_DIR || ".wasurenagusa",

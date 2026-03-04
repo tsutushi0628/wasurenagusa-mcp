@@ -8,11 +8,9 @@ vi.mock("../analyzer/prompt-loader.js", () => ({
   ),
 }));
 
-const mockGenerateContent = vi.fn();
-vi.mock("../analyzer/gemini-client.js", () => ({
-  createGeminiModel: vi.fn(() => ({
-    generateContent: mockGenerateContent,
-  })),
+const mockGenerateText = vi.fn();
+vi.mock("../llm/provider.js", () => ({
+  createGenerateTextFn: vi.fn(() => mockGenerateText),
 }));
 
 describe("TaskEvaluator", () => {
@@ -57,14 +55,12 @@ describe("TaskEvaluator", () => {
 
   describe("OK判定", () => {
     it("verdictがokの場合、正常にEvaluatorResultを返す", async () => {
-      mockGenerateContent.mockResolvedValue({
-        response: {
-          text: () => JSON.stringify({
-            verdict: "ok",
-            reason: "すべてのDone条件を満たしている",
-          }),
-        },
-      });
+      mockGenerateText.mockResolvedValue(
+        JSON.stringify({
+          verdict: "ok",
+          reason: "すべてのDone条件を満たしている",
+        }),
+      );
 
       const evaluator = new TaskEvaluator();
       const result = await evaluator.evaluate(makeInput());
@@ -77,15 +73,13 @@ describe("TaskEvaluator", () => {
 
   describe("NG判定", () => {
     it("verdictがngの場合、suggestionも含めて返す", async () => {
-      mockGenerateContent.mockResolvedValue({
-        response: {
-          text: () => JSON.stringify({
-            verdict: "ng",
-            reason: "テストが失敗している",
-            suggestion: "テストを修正してリトライ",
-          }),
-        },
-      });
+      mockGenerateText.mockResolvedValue(
+        JSON.stringify({
+          verdict: "ng",
+          reason: "テストが失敗している",
+          suggestion: "テストを修正してリトライ",
+        }),
+      );
 
       const evaluator = new TaskEvaluator();
       const result = await evaluator.evaluate(makeInput());
@@ -98,14 +92,12 @@ describe("TaskEvaluator", () => {
 
   describe("human-required判定", () => {
     it("verdictがhuman-requiredの場合を正しく返す", async () => {
-      mockGenerateContent.mockResolvedValue({
-        response: {
-          text: () => JSON.stringify({
-            verdict: "human-required",
-            reason: "ライセンス選択が必要",
-          }),
-        },
-      });
+      mockGenerateText.mockResolvedValue(
+        JSON.stringify({
+          verdict: "human-required",
+          reason: "ライセンス選択が必要",
+        }),
+      );
 
       const evaluator = new TaskEvaluator();
       const result = await evaluator.evaluate(makeInput());
@@ -117,49 +109,37 @@ describe("TaskEvaluator", () => {
 
   describe("エラーハンドリング", () => {
     it("不正なJSON（verdict無し）でエラーを投げる", async () => {
-      mockGenerateContent.mockResolvedValue({
-        response: {
-          text: () => "これはJSONではありません",
-        },
-      });
+      mockGenerateText.mockResolvedValue("これはJSONではありません");
 
       const evaluator = new TaskEvaluator();
       await expect(evaluator.evaluate(makeInput())).rejects.toThrow("Failed to parse");
     });
 
     it("不正なverdict値でエラーを投げる", async () => {
-      mockGenerateContent.mockResolvedValue({
-        response: {
-          text: () => JSON.stringify({
-            verdict: "invalid-verdict",
-            reason: "テスト",
-          }),
-        },
-      });
+      mockGenerateText.mockResolvedValue(
+        JSON.stringify({
+          verdict: "invalid-verdict",
+          reason: "テスト",
+        }),
+      );
 
       const evaluator = new TaskEvaluator();
       await expect(evaluator.evaluate(makeInput())).rejects.toThrow("Invalid verdict value");
     });
 
     it("reason欠落でエラーを投げる", async () => {
-      mockGenerateContent.mockResolvedValue({
-        response: {
-          text: () => JSON.stringify({
-            verdict: "ok",
-          }),
-        },
-      });
+      mockGenerateText.mockResolvedValue(
+        JSON.stringify({
+          verdict: "ok",
+        }),
+      );
 
       const evaluator = new TaskEvaluator();
       await expect(evaluator.evaluate(makeInput())).rejects.toThrow("missing 'reason' field");
     });
 
     it("コードブロックで囲まれたJSONも正しく解析する", async () => {
-      mockGenerateContent.mockResolvedValue({
-        response: {
-          text: () => '```json\n{"verdict": "ok", "reason": "完了"}\n```',
-        },
-      });
+      mockGenerateText.mockResolvedValue('```json\n{"verdict": "ok", "reason": "完了"}\n```');
 
       const evaluator = new TaskEvaluator();
       const result = await evaluator.evaluate(makeInput());
@@ -169,17 +149,15 @@ describe("TaskEvaluator", () => {
 
   describe("stdout切り詰め", () => {
     it("50000文字を超えるoutputは末尾50000文字に切り詰められる", async () => {
-      mockGenerateContent.mockResolvedValue({
-        response: {
-          text: () => JSON.stringify({ verdict: "ok", reason: "完了" }),
-        },
-      });
+      mockGenerateText.mockResolvedValue(
+        JSON.stringify({ verdict: "ok", reason: "完了" }),
+      );
 
       const longOutput = "x".repeat(60000);
       const evaluator = new TaskEvaluator();
       await evaluator.evaluate(makeInput({ executionOutput: longOutput }));
 
-      const calledPrompt = mockGenerateContent.mock.calls[0][0] as string;
+      const calledPrompt = mockGenerateText.mock.calls[0][0] as string;
       // 末尾50000文字が含まれることを確認（全60000文字ではない）
       expect(calledPrompt.length).toBeLessThan(longOutput.length + 1000);
     });

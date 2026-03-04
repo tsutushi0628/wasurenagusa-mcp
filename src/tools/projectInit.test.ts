@@ -12,11 +12,9 @@ vi.mock("os", async () => {
   };
 });
 
-const mockGenerateContent = vi.fn();
-vi.mock("../analyzer/gemini-client.js", () => ({
-  createGeminiModel: vi.fn(() => ({
-    generateContent: mockGenerateContent,
-  })),
+const mockGenerateText = vi.fn();
+vi.mock("../llm/provider.js", () => ({
+  createGenerateTextFn: vi.fn(() => mockGenerateText),
 }));
 
 vi.mock("../analyzer/prompt-loader.js", () => ({
@@ -26,6 +24,7 @@ vi.mock("../analyzer/prompt-loader.js", () => ({
 describe("handleProjectInit", () => {
   beforeEach(async () => {
     testSchedulerDir = await mkdtemp(join(tmpdir(), "wasurenagusa-tool-init-"));
+    mockGenerateText.mockReset();
   });
 
   afterEach(async () => {
@@ -49,14 +48,10 @@ describe("handleProjectInit", () => {
     expect(parsed.error).toContain("無効なmode");
   });
 
-  it("mode=generateでGeminiの質問リストを返す", async () => {
-    mockGenerateContent.mockResolvedValue({
-      response: {
-        text: () => JSON.stringify({
-          questions: [{ key: "phase", question: "フェーズは？", options: ["startup"] }],
-        }),
-      },
-    });
+  it("mode=generateでLLMの質問リストを返す", async () => {
+    mockGenerateText.mockResolvedValue(JSON.stringify({
+      questions: [{ key: "phase", question: "フェーズは？", options: ["startup"] }],
+    }));
 
     const { handleProjectInit } = await import("./projectInit.js");
     const result = await handleProjectInit({

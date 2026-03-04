@@ -1,16 +1,20 @@
 import { loadPrompt } from "../analyzer/prompt-loader.js";
-import { createGeminiModel } from "../analyzer/gemini-client.js";
+import { createGenerateTextFn, type GenerateTextFn } from "../llm/provider.js";
 import { escapePromptVariable } from "../utils/prompt-escape.js";
 import type { CommandGenerationInput, ProjectMeta } from "../types.js";
 
 export class CommandGenerator {
+  private generateText: GenerateTextFn;
+
+  constructor() {
+    this.generateText = createGenerateTextFn();
+  }
+
   async generate(input: CommandGenerationInput): Promise<string> {
     const template = await loadPrompt("task-command.txt");
     const prompt = this.replaceVariables(template, input);
 
-    const model = createGeminiModel();
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
+    const text = await this.generateText(prompt);
     return text.trim();
   }
 

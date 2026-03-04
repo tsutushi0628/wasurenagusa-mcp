@@ -1,27 +1,16 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
-import { config } from "../config.js";
 import { ConsolidatedDont, MemoryEntry } from "../types.js";
 import { loadPrompt } from "../analyzer/prompt-loader.js";
 import { escapePromptVariable } from "../utils/prompt-escape.js";
-
-type GenerateContentFn = (prompt: string) => Promise<string>;
+import { GenerateTextFn, createGenerateTextFn } from "../llm/provider.js";
 
 export class DontConsolidator {
-  private generateContent: GenerateContentFn;
+  private generateText: GenerateTextFn;
 
-  constructor(generateContent?: GenerateContentFn) {
-    if (generateContent) {
-      this.generateContent = generateContent;
+  constructor(generateText?: GenerateTextFn) {
+    if (generateText) {
+      this.generateText = generateText;
     } else {
-      if (!config.geminiApiKey) {
-        throw new Error("GEMINI_API_KEY is not set");
-      }
-      const genAI = new GoogleGenerativeAI(config.geminiApiKey);
-      const model = genAI.getGenerativeModel({ model: config.geminiModel });
-      this.generateContent = async (prompt: string) => {
-        const result = await model.generateContent(prompt);
-        return result.response.text();
-      };
+      this.generateText = createGenerateTextFn();
     }
   }
 
@@ -37,7 +26,7 @@ export class DontConsolidator {
 
       const prompt = template.replace("{{dontEntries}}", escapePromptVariable(entriesList));
 
-      const text = await this.generateContent(prompt);
+      const text = await this.generateText(prompt);
 
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (!jsonMatch) return null;

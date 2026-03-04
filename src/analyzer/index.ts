@@ -1,1 +1,1 @@
-export { GeminiAnalyzer } from "./gemini.js";
+export { Analyzer } from "./gemini.js";

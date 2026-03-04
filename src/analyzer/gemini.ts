@@ -1,18 +1,16 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
-import { config } from "../config.js";
 import { AnalysisResult, AnalysisInput, DuplicateCheckInput } from "../types.js";
 import { loadPrompt } from "./prompt-loader.js";
+import { GenerateTextFn, createGenerateTextFn } from "../llm/provider.js";
 
-export class GeminiAnalyzer {
-  private genAI: GoogleGenerativeAI;
-  private model: any;
+export class Analyzer {
+  private generateText: GenerateTextFn;
 
-  constructor() {
-    if (!config.geminiApiKey) {
-      throw new Error("GEMINI_API_KEY is not set");
+  constructor(generateText?: GenerateTextFn) {
+    if (generateText) {
+      this.generateText = generateText;
+    } else {
+      this.generateText = createGenerateTextFn();
     }
-    this.genAI = new GoogleGenerativeAI(config.geminiApiKey);
-    this.model = this.genAI.getGenerativeModel({ model: config.geminiModel });
   }
 
   async analyze(input: AnalysisInput): Promise<AnalysisResult> {
@@ -43,9 +41,7 @@ ${input.latestMessage}
 
 上記を分析し、JSON形式で出力してください：`;
 
-      const result = await this.model.generateContent(prompt);
-      const response = result.response;
-      const text = response.text();
+      const text = await this.generateText(prompt);
 
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
@@ -56,7 +52,6 @@ ${input.latestMessage}
       return parsed;
 
     } catch (error) {
-      console.error("Gemini analysis error:", error);
       return this.defaultResult(`Analysis error: ${error}`);
     }
   }
@@ -76,8 +71,7 @@ ${input.latestMessage}
         .replace("{{newContent}}", input.newContent)
         .replace("{{existingEntries}}", entriesList);
 
-      const result = await this.model.generateContent(prompt);
-      const text = result.response.text();
+      const text = await this.generateText(prompt);
 
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (!jsonMatch) { return null; }

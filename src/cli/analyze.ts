@@ -12,7 +12,7 @@ import { basename, dirname, join, resolve } from "path";
 import { homedir } from "os";
 import { mkdir, writeFile } from "fs/promises";
 import { fileURLToPath } from "url";
-import { GeminiAnalyzer } from "../analyzer/index.js";
+import { Analyzer } from "../analyzer/index.js";
 import { MarkdownStorage } from "../storage/index.js";
 import { findProjectRoot } from "../utils/projectRoot.js";
 import { SaveParams } from "../types.js";
@@ -53,8 +53,8 @@ async function main() {
     process.exit(0);
   }
 
-  // Gemini APIキーがない場合はスキップ
-  if (!process.env.GEMINI_API_KEY) {
+  // LLM APIキーがない場合はスキップ
+  if (!process.env.GEMINI_API_KEY && !process.env.OPENAI_API_KEY && !process.env.ANTHROPIC_API_KEY) {
     process.exit(0);
   }
 
@@ -67,8 +67,8 @@ async function main() {
   // メタ情報を計算（諦め検知用）
   const meta = computeConversationMeta(parsedMessages);
 
-  // Geminiで分析
-  const analyzer = new GeminiAnalyzer();
+  // LLMで分析
+  const analyzer = new Analyzer();
   const analysis = await analyzer.analyze({
     conversationLog,
     latestMessage: conversationLog.split("\n\n").slice(-1)[0] || "",
