@@ -2,6 +2,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { config } from "../config.js";
 import { ConsolidatedDont, MemoryEntry } from "../types.js";
 import { loadPrompt } from "../analyzer/prompt-loader.js";
+import { escapePromptVariable } from "../utils/prompt-escape.js";
 
 type GenerateContentFn = (prompt: string) => Promise<string>;
 
@@ -34,7 +35,7 @@ export class DontConsolidator {
         .map(e => `- id: ${e.id} | title: ${e.title} | content: ${e.content}`)
         .join("\n");
 
-      const prompt = template.replace("{{dontEntries}}", entriesList);
+      const prompt = template.replace("{{dontEntries}}", escapePromptVariable(entriesList));
 
       const text = await this.generateContent(prompt);
 

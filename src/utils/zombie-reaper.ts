@@ -15,7 +15,7 @@
  * - 同一 Plugin Host 配下のプロセスは一切触らない
  */
 
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 
 const REAP_INTERVAL_MS = 30 * 60 * 1000; // 30分
 const PARENT_CHECK_INTERVAL_MS = 10_000; // 10秒
@@ -40,16 +40,16 @@ export interface ProcessInfo {
  */
 function findTargetProcesses(): ProcessInfo[] {
   try {
-    const grepPattern = TARGET_PATTERNS.join("|");
-    const output = execSync(
-      `ps -eo pid,ppid,args 2>/dev/null | grep -E "${grepPattern}" | grep -v grep`,
-      { encoding: "utf-8", timeout: 5000 }
-    ).trim();
+    const output = execFileSync("ps", ["-eo", "pid,ppid,args"], {
+      encoding: "utf-8",
+      timeout: 5000,
+    }).trim();
 
     if (!output) return [];
 
     return output
       .split("\n")
+      .filter((line) => TARGET_PATTERNS.some((pattern) => line.includes(pattern)))
       .map((line) => {
         const trimmed = line.trim();
         const parts = trimmed.split(/\s+/);
@@ -72,7 +72,7 @@ function findTargetProcesses(): ProcessInfo[] {
 function getPluginHostPid(): number | null {
   try {
     const myParentPid = process.ppid;
-    const output = execSync(`ps -o ppid= -p ${myParentPid}`, {
+    const output = execFileSync("ps", ["-o", "ppid=", "-p", String(myParentPid)], {
       encoding: "utf-8",
       timeout: 3000,
     }).trim();
@@ -94,7 +94,7 @@ function isUnderPluginHost(
   for (let i = 0; i < 4; i++) {
     try {
       const ppid = parseInt(
-        execSync(`ps -o ppid= -p ${current}`, {
+        execFileSync("ps", ["-o", "ppid=", "-p", String(current)], {
           encoding: "utf-8",
           timeout: 1000,
         }).trim()

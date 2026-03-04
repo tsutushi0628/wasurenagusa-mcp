@@ -30,6 +30,7 @@ import {
 } from "./tools/index.js";
 import { findProjectRoot } from "./utils/projectRoot.js";
 import { ensureOwnerProfileExists } from "./utils/owner-profile.js";
+import { sanitizeErrorMessage } from "./utils/sanitize-error.js";
 import { getMemoryPath } from "./config.js";
 import { startZombieReaper } from "./utils/zombie-reaper.js";
 
@@ -114,7 +115,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       ],
     };
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    const rawMessage = error instanceof Error ? error.message : String(error);
+    const errorMessage = sanitizeErrorMessage(rawMessage);
     return {
       content: [
         {

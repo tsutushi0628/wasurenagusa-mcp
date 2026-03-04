@@ -1,5 +1,6 @@
 import { loadPrompt } from "../analyzer/prompt-loader.js";
 import { createGeminiModel } from "../analyzer/gemini-client.js";
+import { escapePromptVariable } from "../utils/prompt-escape.js";
 import type { CommandGenerationInput, ProjectMeta } from "../types.js";
 
 export class CommandGenerator {
@@ -17,15 +18,15 @@ export class CommandGenerator {
     const metaSummary = this.buildMetaSummary(input.projectMeta);
 
     return template
-      .replace(/\{why\}/g, input.task.why)
-      .replace(/\{what\}/g, input.task.what)
-      .replace(/\{done\}/g, input.task.done)
-      .replace(/\{project_name\}/g, input.task.project)
-      .replace(/\{project_path\}/g, input.task.projectPath)
-      .replace(/\{project_meta\}/g, metaSummary)
-      .replace(/\{owner_profile\}/g, input.ownerProfile ?? "（未設定）")
+      .replace(/\{why\}/g, escapePromptVariable(input.task.why))
+      .replace(/\{what\}/g, escapePromptVariable(input.task.what))
+      .replace(/\{done\}/g, escapePromptVariable(input.task.done))
+      .replace(/\{project_name\}/g, escapePromptVariable(input.task.project))
+      .replace(/\{project_path\}/g, escapePromptVariable(input.task.projectPath))
+      .replace(/\{project_meta\}/g, escapePromptVariable(metaSummary))
+      .replace(/\{owner_profile\}/g, escapePromptVariable(input.ownerProfile ?? "（未設定）"))
       .replace(/\{retry_count\}/g, String(input.task.retryCount))
-      .replace(/\{previous_evaluations\}/g, this.buildPreviousEvaluations(input));
+      .replace(/\{previous_evaluations\}/g, escapePromptVariable(this.buildPreviousEvaluations(input)));
   }
 
   private buildMetaSummary(meta: ProjectMeta): string {
