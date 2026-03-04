@@ -1,6 +1,7 @@
 {
   "name": "wasurenagusa-mcp",
-  "version": "0.3.0",
+  "version": "0.3.1",
+  "description": "MCP server that gives AI coding agents persistent memory — auto-detect mistakes, consolidate lessons, inject context on session start",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -17,6 +18,34 @@
     "test": "vitest run",
     "test:watch": "vitest"
   },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai-agent",
+    "coding-agent",
+    "memory",
+    "claude",
+    "cursor",
+    "windsurf"
+  ],
+  "author": "tsutushi0628",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tsutushi0628/wasurenagusa-mcp.git"
+  },
+  "homepage": "https://github.com/tsutushi0628/wasurenagusa-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/tsutushi0628/wasurenagusa-mcp/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
