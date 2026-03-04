@@ -41,7 +41,7 @@ const PROJECT_ROOT = findProjectRoot();
 const server = new Server(
   {
     name: "wasurenagusa-mcp",
-    version: "0.3.0",
+    version: "0.3.1",
   },
   {
     capabilities: {
