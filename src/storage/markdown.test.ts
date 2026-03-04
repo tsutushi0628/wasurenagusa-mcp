@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, readFile } from "fs/promises";
+import { mkdtemp, rm, readFile, writeFile, mkdir } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
+import { existsSync } from "fs";
 import { MarkdownStorage } from "./markdown.js";
 
 describe("MarkdownStorage", () => {
@@ -473,6 +474,40 @@ describe("MarkdownStorage", () => {
 
       expect(context.config).toContain("yakusoku設定");
       expect(context.config).toContain("bl-labo設定");
+    });
+  });
+
+  describe("rotateOldLogs() - 不正なファイル名の無視", () => {
+    it("日付形式でないファイル名はrotate対象から除外する", async () => {
+      const storage = new MarkdownStorage(tempDir);
+      await storage.initialize();
+
+      const logsPath = join(tempDir, ".wasurenagusa", "logs");
+      // 不正なファイル名を配置
+      await writeFile(join(logsPath, "not-a-date.md"), "invalid");
+      await writeFile(join(logsPath, "malicious-file.md"), "bad content");
+
+      // rotateしても例外が飛ばない（initializeが内部でrotateOldLogsを呼ぶ）
+      await storage.initialize();
+
+      // 不正ファイルは削除されずに残る（日付形式でないため無視される）
+      expect(existsSync(join(logsPath, "not-a-date.md"))).toBe(true);
+      expect(existsSync(join(logsPath, "malicious-file.md"))).toBe(true);
+    });
+  });
+
+  describe("getFilePath() - timestampの日付バリデーション", () => {
+    it("正常な日付形式のログは保存できる", async () => {
+      const storage = new MarkdownStorage(tempDir);
+
+      const result = await storage.save({
+        category: "log",
+        title: "テストログ",
+        content: "テスト内容",
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.path).toMatch(/\d{4}-\d{2}-\d{2}\.md$/);
     });
   });
 });

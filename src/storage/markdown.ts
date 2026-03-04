@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, readdir } from "fs/promises";
+import { mkdir, readFile, writeFile, readdir, unlink } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
 import { randomBytes } from "crypto";
@@ -51,6 +51,8 @@ export class MarkdownStorage {
         await writeFile(filePath, header, "utf-8");
       }
     }
+
+    await this.rotateOldLogs();
   }
 
   async save(params: SaveParams): Promise<SaveResult> {
@@ -324,9 +326,38 @@ export class MarkdownStorage {
     });
   }
 
+  private async rotateOldLogs(): Promise<void> {
+    const logsPath = join(this.memoryPath, "logs");
+    if (!existsSync(logsPath)) { return; }
+
+    const retentionDays = config.logRetentionDays;
+    if (retentionDays <= 0) { return; }
+
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - retentionDays);
+    const cutoffStr = cutoff.toISOString().split("T")[0];
+
+    const files = await readdir(logsPath);
+    for (const file of files) {
+      if (!file.endsWith(".md")) { continue; }
+      const dateStr = file.replace(".md", "");
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) { continue; }
+      if (dateStr < cutoffStr) {
+        await unlink(join(logsPath, file));
+      }
+    }
+  }
+
+  private validateDateFormat(date: string): void {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      throw new Error(`Invalid date format in timestamp: ${date}`);
+    }
+  }
+
   private getFilePath(category: MemoryCategory, timestamp: string): string {
     if (category === "log") {
       const date = timestamp.split("T")[0];
+      this.validateDateFormat(date);
       return join(this.memoryPath, "logs", `${date}.md`);
     }
     return join(this.memoryPath, config.categoryFiles[category]);

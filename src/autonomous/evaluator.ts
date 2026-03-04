@@ -1,5 +1,6 @@
 import { loadPrompt } from "../analyzer/prompt-loader.js";
 import { createGeminiModel } from "../analyzer/gemini-client.js";
+import { escapePromptVariable } from "../utils/prompt-escape.js";
 import { MAX_STDOUT_LENGTH } from "./constants.js";
 import type { EvaluationInput, EvaluatorResult, ProjectMeta } from "../types.js";
 
@@ -24,14 +25,14 @@ export class TaskEvaluator {
     const metaSummary = this.buildMetaSummary(input.projectMeta);
 
     return template
-      .replace(/\{done\}/g, input.task.done)
-      .replace(/\{execution_output\}/g, truncatedOutput)
+      .replace(/\{done\}/g, escapePromptVariable(input.task.done))
+      .replace(/\{execution_output\}/g, escapePromptVariable(truncatedOutput))
       .replace(/\{exit_code\}/g, String(input.executionExitCode))
       .replace(/\{duration_ms\}/g, String(input.executionDurationMs))
-      .replace(/\{project_meta\}/g, metaSummary)
-      .replace(/\{owner_profile\}/g, input.ownerProfile ?? "（未設定）")
-      .replace(/\{what\}/g, input.task.what)
-      .replace(/\{why\}/g, input.task.why);
+      .replace(/\{project_meta\}/g, escapePromptVariable(metaSummary))
+      .replace(/\{owner_profile\}/g, escapePromptVariable(input.ownerProfile ?? "（未設定）"))
+      .replace(/\{what\}/g, escapePromptVariable(input.task.what))
+      .replace(/\{why\}/g, escapePromptVariable(input.task.why));
   }
 
   private buildMetaSummary(meta: ProjectMeta): string {
