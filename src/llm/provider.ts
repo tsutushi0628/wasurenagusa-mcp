@@ -9,9 +9,9 @@ export type LLMProvider = "gemini" | "openai" | "anthropic";
 export type GenerateTextFn = (prompt: string) => Promise<string>;
 
 const DEFAULT_MODELS: Record<LLMProvider, string> = {
-  gemini: "gemini-2.5-flash",
-  openai: "gpt-4o-mini",
-  anthropic: "claude-3-5-haiku",
+  gemini: "gemini-3.1-flash-lite-preview",
+  openai: "gpt-5-nano",
+  anthropic: "claude-haiku-4-5-20251001",
 };
 
 let cachedAi: Genkit | null = null;

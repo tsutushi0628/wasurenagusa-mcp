@@ -2,7 +2,7 @@ import { readFile, writeFile, stat } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
 import { config } from "../config.js";
-import { ConsolidatedDont } from "../types.js";
+import { ConsolidatedDont, ConsolidatedConfig } from "../types.js";
 import { parseMarkdown } from "../storage/parser.js";
 
 export async function isConsolidationStale(memoryPath: string): Promise<boolean> {
@@ -42,5 +42,47 @@ export async function readConsolidatedDont(memoryPath: string): Promise<Consolid
 
 export async function writeConsolidatedDont(memoryPath: string, data: ConsolidatedDont): Promise<void> {
   const consolidatedPath = join(memoryPath, config.consolidatedDontFile);
+  await writeFile(consolidatedPath, JSON.stringify(data, null, 2), "utf-8");
+}
+
+// === Config Consolidation ===
+
+export async function isConfigConsolidationStale(memoryPath: string): Promise<boolean> {
+  const configPath = join(memoryPath, config.categoryFiles.config);
+  const consolidatedPath = join(memoryPath, config.consolidatedConfigFile);
+
+  if (!existsSync(configPath)) return false;
+  if (!existsSync(consolidatedPath)) return true;
+
+  const [configStat, consolidatedStat] = await Promise.all([
+    stat(configPath),
+    stat(consolidatedPath),
+  ]);
+
+  if (configStat.mtimeMs > consolidatedStat.mtimeMs) return true;
+
+  const consolidated = await readConsolidatedConfig(memoryPath);
+  if (!consolidated) return true;
+
+  const configContent = await readFile(configPath, "utf-8");
+  const entries = parseMarkdown(configContent, "config");
+
+  return entries.length !== consolidated.sourceEntryCount;
+}
+
+export async function readConsolidatedConfig(memoryPath: string): Promise<ConsolidatedConfig | null> {
+  const consolidatedPath = join(memoryPath, config.consolidatedConfigFile);
+  if (!existsSync(consolidatedPath)) return null;
+
+  try {
+    const content = await readFile(consolidatedPath, "utf-8");
+    return JSON.parse(content) as ConsolidatedConfig;
+  } catch {
+    return null;
+  }
+}
+
+export async function writeConsolidatedConfig(memoryPath: string, data: ConsolidatedConfig): Promise<void> {
+  const consolidatedPath = join(memoryPath, config.consolidatedConfigFile);
   await writeFile(consolidatedPath, JSON.stringify(data, null, 2), "utf-8");
 }

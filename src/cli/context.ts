@@ -24,8 +24,11 @@ import { MarkdownStorage } from "../storage/index.js";
 import { getMemoryPath, config } from "../config.js";
 import {
   isConsolidationStale,
+  isConfigConsolidationStale,
   readConsolidatedDont,
+  readConsolidatedConfig,
   formatConsolidatedDont,
+  formatConsolidatedConfig,
 } from "../consolidator/index.js";
 import { loadOwnerProfile, getOwnerProfilePath } from "../utils/owner-profile.js";
 
@@ -52,6 +55,8 @@ async function readStdin(): Promise<string> {
  * 結果は次回セッションで利用する方式に変更。
  */
 function spawnConsolidationBackground(memoryPath: string, projectRoot: string): void {
+  if (!config.geminiApiKey && !config.openaiApiKey && !config.anthropicApiKey) return;
+
   const scriptPath = new URL("./consolidate-worker.js", import.meta.url).pathname;
   const child = spawn(process.execPath, [scriptPath, memoryPath, projectRoot], {
     detached: true,
@@ -65,16 +70,8 @@ async function getDontContent(
   storage: MarkdownStorage,
   currentProject: string,
   memoryPath: string,
-  projectRoot: string,
 ): Promise<string> {
   try {
-    // 統合が古くなっていればバックグラウンドで再統合を開始（次回セッション向け）
-    if (await isConsolidationStale(memoryPath)) {
-      if (config.geminiApiKey) {
-        spawnConsolidationBackground(memoryPath, projectRoot);
-      }
-    }
-
     // 現時点の統合版を読み込み（前回のconsolidation結果）
     const consolidated = await readConsolidatedDont(memoryPath);
     if (consolidated) {
@@ -88,6 +85,26 @@ async function getDontContent(
   // フォールバック: 従来の全件注入
   const context = await storage.getContext(currentProject);
   return context.dont;
+}
+
+async function getConfigContent(
+  storage: MarkdownStorage,
+  currentProject: string,
+  memoryPath: string,
+): Promise<string> {
+  try {
+    const consolidated = await readConsolidatedConfig(memoryPath);
+    if (consolidated) {
+      const formatted = formatConsolidatedConfig(consolidated);
+      if (formatted) return formatted;
+    }
+  } catch {
+    // 統合読み込み失敗時はフォールバック
+  }
+
+  // フォールバック: 従来の全件注入
+  const context = await storage.getContext(currentProject);
+  return context.config;
 }
 
 async function main() {
@@ -112,19 +129,30 @@ async function main() {
 
   // MarkdownStorageでコンテキスト取得
   const storage = new MarkdownStorage(projectRoot);
-  const context = await storage.getContext(currentProject);
 
-  // dont部分は統合レイヤー経由で取得
-  const dontContent = await getDontContent(storage, currentProject, memoryPath, projectRoot);
+  // dont/configいずれかの統合が古ければバックグラウンドで再統合（次回セッション向け）
+  const [dontStale, configStale] = await Promise.all([
+    isConsolidationStale(memoryPath),
+    isConfigConsolidationStale(memoryPath),
+  ]);
+  if (dontStale || configStale) {
+    spawnConsolidationBackground(memoryPath, projectRoot);
+  }
+
+  // 統合レイヤー経由で取得（統合版があればそれを、なければ生データを注入）
+  const [configContent, dontContent] = await Promise.all([
+    getConfigContent(storage, currentProject, memoryPath),
+    getDontContent(storage, currentProject, memoryPath),
+  ]);
 
   // 出力を組み立て
   const output: string[] = [];
 
   output.push("=== wasurenagusa メモリ ===\n");
 
-  if (context.config && context.config !== "（設定情報なし）") {
+  if (configContent && configContent !== "（設定情報なし）") {
     output.push("## 設定情報（config）\n");
-    output.push(context.config + "\n");
+    output.push(configContent + "\n");
   }
 
   if (dontContent && dontContent !== "（ルールなし）") {
