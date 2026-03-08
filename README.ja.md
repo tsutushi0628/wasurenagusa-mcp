@@ -231,6 +231,17 @@ claude mcp add wasurenagusa -- wasurenagusa-mcp
           }
         ]
       }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "wasurenagusa-context",
+            "timeout": 15
+          }
+        ]
+      }
     ]
   }
 }
@@ -307,7 +318,7 @@ Claude Code を起動する。初回は `.wasurenagusa/` ディレクトリが�
 
 | コマンド | 用途 | 呼び出し元 |
 |---------|------|-----------|
-| `wasurenagusa-context` | config + dont をstdoutに出力 | SessionStart Hook |
+| `wasurenagusa-context` | config + dont をstdoutに出力 | SessionStart Hook / PreCompact Hook |
 | `wasurenagusa-analyze` | 会話を LLM 分析し自動保存 | Stop Hook |
 | `wasurenagusa-spec-update` | Spec ドキュメント自動更新 | cron / systemd timer |
 

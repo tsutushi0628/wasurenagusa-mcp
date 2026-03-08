@@ -179,6 +179,17 @@ Add to `~/.claude/settings.local.json`:
           }
         ]
       }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "wasurenagusa-context",
+            "timeout": 15
+          }
+        ]
+      }
     ]
   }
 }
