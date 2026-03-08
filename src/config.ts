@@ -24,9 +24,14 @@ function resolveSlackWebhookUrl(): string {
 }
 
 export const config = {
-  // Gemini API設定
+  // LLMプロバイダ設定（gemini | openai | anthropic）
+  llmProvider: (process.env.LLM_PROVIDER || "gemini") as "gemini" | "openai" | "anthropic",
+  llmModel: process.env.LLM_MODEL || undefined,
+
+  // 各プロバイダのAPIキー
   geminiApiKey: process.env.GEMINI_API_KEY || "",
-  geminiModel: "gemini-3-flash-preview",
+  openaiApiKey: process.env.OPENAI_API_KEY || "",
+  anthropicApiKey: process.env.ANTHROPIC_API_KEY || "",
 
   // メモリディレクトリ（プロジェクトルートからの相対パス）
   memoryDir: process.env.MEMORY_DIR || ".wasurenagusa",
@@ -37,11 +42,15 @@ export const config = {
   // ログローテーション（デフォルト30日保持）
   logRetentionDays: parseInt(process.env.LOG_RETENTION_DAYS || "30", 10),
 
+  // カテゴリ別エントリ上限（超過分は自動アーカイブ）
+  maxEntriesPerCategory: parseInt(process.env.MAX_ENTRIES_PER_CATEGORY || "100", 10),
+
   // Slack Webhook通知（起動時にバリデーション済み）
   slackWebhookUrl: resolveSlackWebhookUrl(),
 
-  // dont統合ファイル名
+  // 統合ファイル名
   consolidatedDontFile: "consolidated-dont.json",
+  consolidatedConfigFile: "consolidated-config.json",
 
   // カテゴリとファイルのマッピング
   categoryFiles: {

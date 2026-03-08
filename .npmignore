@@ -1,0 +1,32 @@
+# Source (dist/ is published, src/ is not)
+src/
+prompts/
+
+# Dev & test
+*.test.ts
+vitest.config.ts
+tsconfig.json
+.env
+.env.example
+
+# Docs & planning
+docs/
+.spec-workflow/
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+
+# Git
+.git/
+.gitignore
+
+# Memory data
+.wasurenagusa/
+
+# Misc
+coverage/
+scripts/
+*.md
+!README.md

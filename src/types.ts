@@ -140,6 +140,23 @@ export interface ConsolidatedDont {
   version: number;          // フォーマットバージョン (1)
 }
 
+// 統合された設定サマリー
+export interface ConfigSummary {
+  theme: string;            // テーマ名（例: "ポート番号一覧"）
+  summary: string;          // 圧縮された設定情報
+  tags: string[];           // memory_search用タグ
+  sourceCount: number;      // 元エントリ数
+  sourceIds: string[];      // 元エントリID一覧
+}
+
+// config統合結果
+export interface ConsolidatedConfig {
+  summaries: ConfigSummary[];
+  consolidatedAt: string;   // ISO 8601 JST
+  sourceEntryCount: number; // 統合元configエントリ総数
+  version: number;          // フォーマットバージョン (1)
+}
+
 // CLI分析用（Stop Hook用）
 export interface AnalyzeParams {
   transcriptPath: string;

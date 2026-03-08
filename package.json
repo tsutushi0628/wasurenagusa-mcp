@@ -1,6 +1,6 @@
 {
   "name": "wasurenagusa-mcp",
-  "version": "0.3.1",
+  "version": "0.6.0",
   "description": "MCP server that gives AI coding agents persistent memory — auto-detect mistakes, consolidate lessons, inject context on session start",
   "type": "module",
   "main": "dist/index.js",
@@ -47,9 +47,13 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@google/generative-ai": "^0.21.0",
+    "@genkit-ai/anthropic": "^0.2.0",
+    "@genkit-ai/compat-oai": "^1.29.0",
+    "@genkit-ai/google-genai": "^1.29.0",
+    "@google/generative-ai": "^0.24.1",
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "dotenv": "^16.4.0"
+    "dotenv": "^16.4.0",
+    "genkit": "^1.29.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

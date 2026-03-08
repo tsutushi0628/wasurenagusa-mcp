@@ -1,7 +1,7 @@
 import { readFile, writeFile, mkdir } from "fs/promises";
 import { join, dirname } from "path";
 import { loadPrompt } from "../analyzer/prompt-loader.js";
-import { createGeminiModel } from "../analyzer/gemini-client.js";
+import { createGenerateTextFn, type GenerateTextFn } from "../llm/provider.js";
 import type { ProjectMeta, ProjectInitOutput } from "../types.js";
 
 const DEFAULT_PROJECT_META: Omit<ProjectMeta, "project" | "projectPath" | "createdAt" | "updatedAt"> = {
@@ -18,9 +18,11 @@ const DEFAULT_PROJECT_META: Omit<ProjectMeta, "project" | "projectPath" | "creat
 
 export class ProjectInitializer {
   private projectsDir: string;
+  private generateText: GenerateTextFn;
 
   constructor(schedulerDir: string) {
     this.projectsDir = join(schedulerDir, "projects");
+    this.generateText = createGenerateTextFn();
   }
 
   async generateQuestions(projectName: string, initialInfo?: string): Promise<ProjectInitOutput> {
@@ -29,9 +31,7 @@ export class ProjectInitializer {
       .replace(/\{project_name\}/g, projectName)
       .replace(/\{initial_info\}/g, initialInfo ?? "なし");
 
-    const model = createGeminiModel();
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
+    const text = await this.generateText(prompt);
 
     const jsonMatch = text.match(/\{[\s\S]*"questions"[\s\S]*\}/);
     if (!jsonMatch) {

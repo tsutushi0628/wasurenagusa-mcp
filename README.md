@@ -1,182 +1,159 @@
-# wasurenagusa-mcp
+# wasurenagusa
 
-**wasurenagusa**（忘れな草） — 「私を忘れないで」という花言葉を持つ花。
+**Teach your AI coding agent to learn from its mistakes.**
 
-**Claude Code に記憶を与える MCP サーバー。同じミスは、もう繰り返さない。**
+[![npm version](https://img.shields.io/npm/v/wasurenagusa-mcp)](https://www.npmjs.com/package/wasurenagusa-mcp)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org)
 
-> 「ポートは3000って言ったよね？」「さっき決めたでしょ？」
->
-> Claude Code との会話で、同じことを何度も説明した経験はありませんか。
-> wasurenagusa は、AI アシスタントに「記憶」を与える MCP サーバーです。
-> 設定情報、やってはいけないこと、過去の決定事項を自動で記録・自動で注入。
-> あなたは普段通りに会話するだけ。裏側で LLM が会話を分析し、重要な情報を蓄積していきます。
+> *wasurenagusa* (forget-me-not) — a Japanese flower whose name means "don't forget me."
 
 ---
 
-## wasurenagusa が解決する3つの「忘れる」
+## The Problem
 
-### 1. プロジェクトの知識
+AI coding agents are powerful but amnesiac. Every session starts from scratch — your project conventions, past decisions, and hard-learned lessons vanish the moment a session ends.
 
-Claude Code はセッションが変わるたびに、すべてを忘れる。
-API の URL、ポート番号、「ログを読んでから質問して」というルール、先週決めたアーキテクチャ。
+Existing solutions either require manual effort or simply store raw memories that grow until they overwhelm the context window.
 
-wasurenagusa は **Hooks 連携で完全自動化** されている。
-セッション開始時に設定とルールが自動注入され、会話終了時に重要な情報が自動保存される。
-ユーザーが手動で何かする必要は、一切ない。
+## The Solution
 
-### 2. ドキュメントの最新化
+wasurenagusa is an MCP server that doesn't just *remember* — it **learns**.
 
-コードは毎日変わるのに、Spec ドキュメントは書いた日のまま放置される。
-wasurenagusa は夜間にコード変更を検知し、ドキュメントを自動で更新する。
+1. **Detects mistakes automatically** — Catches retry patterns, user frustration, and repeated failures
+2. **Distills lessons into principles** — LLM compresses hundreds of raw entries into a handful of actionable rules
+3. **Compresses config into themes** — LLM groups scattered settings into coherent summaries, preserving facts like ports and paths
+4. **Injects only what matters** — Consolidated wisdom + active settings only. No template bloat, no duplicate entries.
 
-### 3. トークン枠を使い切り
+**Fully automated via Claude Code hooks — zero configuration after setup.**
 
-Claude Code の 5 時間レート制限。寝ている間の枠は、普通なら無駄になる。
-wasurenagusa のスケジューラは、アイドル時間を使って自律タスクを自動実行する。
-Spec ドキュメントの更新、リファクタリング、テスト追加 ── `task_submit` で投入したタスクを Claude が 24/365 で処理し、LLM が完了条件を評価してリトライまでやる。
+### Real-world impact
 
----
-
-## 仕組み
+From the author's daily use across 8 production projects:
 
 ```
-[セッション開始]
-    │  SessionStart Hook
-    ▼
-wasurenagusa-context 実行
-  → config + dont を自動注入（設定・ルール・過去のミス）
-    │
-    ▼
-[会話中] ─── AIが必要に応じて memory_search → memory_get_detail を自律呼び出し
-    │
-    ▼
-[Claude 応答完了]
-    │  Stop Hook
-    ▼
-wasurenagusa-analyze 実行
-  → LLM で会話を自動分析
-  → 重要情報を自動保存（怒り検知・リトライパターン検出含む）
-  → 変更ファイルをログに記録（Spec 自動更新用）
+1,581 "dont" entries   →  5-9 principles per project (LLM consolidation)
+29 config entries      →  4-5 thematic summaries     (LLM consolidation)
+21,800 chars raw data  →  6,200 chars injected        (71% reduction)
 ```
 
-**ユーザーの操作: ゼロ。**
+---
+
+## Demo
+
+<!-- TODO: Record a 30-second GIF showing the mistake-detection-and-learning loop -->
+
+<!-- ![wasurenagusa demo](./docs/demo.gif) -->
+
+<details>
+<summary>What happens behind the scenes</summary>
+
+1. **Session 1**: Claude uses port 3000 — user corrects it to 8080
+2. **Stop Hook**: wasurenagusa auto-analyzes the conversation and records the mistake
+3. **Session 2**: Claude correctly uses port 8080 without being told
+
+</details>
 
 ---
 
-## 他のメモリ MCP との違い
+## Why wasurenagusa
 
-| | wasurenagusa | 一般的なメモリ MCP |
-|---|---|---|
-| 保存方式 | LLM が会話を自動分析・自動保存 | ユーザーが手動で保存指示 |
-| 注入方式 | SessionStart Hook で自動注入 | 毎回手動で読み込み指示 |
-| トークン効率 | 段階的開示で 70-90% 削減 | 全件フル返却でコンテキスト圧迫 |
-| 感情検知 | 怒り・悲しみ・諦めを自動検出 | なし |
-| AI 自己学習 | リトライパターンを自動検出・記録 | なし |
-| dont 統合 | 数十件 → 数個の原則に自動圧縮 | エントリが増え続けてノイズ化 |
+Most memory tools store what happened. wasurenagusa teaches your AI **why things went wrong** — and ensures it never repeats the same mistake.
 
----
+It's not a memory bank. It's a **learning system**.
 
-## 主要機能
-
-### 自動記憶（Hooks 連携）
-
-- **SessionStart Hook**: セッション開始時に config（設定）と dont（やってはいけないこと）を自動注入
-- **Stop Hook**: 会話終了時に LLM で分析し、重要情報を自動保存
-
-### 感情検知
-
-ユーザーの怒り・悲しみ・失望・諦めを検知し、「❌何をした → 💡なぜダメか → ✅どうすべきか」の 3 点セットで記録。
-テキストパターンだけでなく、メッセージ長の急減少やポジティブ反応の長期不在といったメタ情報でも検出する。
-
-### AI リトライパターン検出
-
-同じ API を 3 回以上実行、同じエラーが 3 回以上発生 ── AI 自身の失敗パターンも自動で学習し、「正しいやり方」を記録する。
-
-### 段階的開示（トークン最適化）
-
-検索結果はインデックス（ID・タイトル・タグ）のみ返し、必要な項目だけフル取得する 2 段階設計。
-従来の全件返却と比較して **トークン消費を 70-90% 削減**。
-
-### 重複検出
-
-LLM ベースのセマンティック重複検出。同じテーマの新しい情報は既存エントリを自動で置換する。
-
-### dont 統合
-
-dont エントリが増えすぎた場合、LLM で 5-6 個の行動原則に自動統合。
-元エントリは保持したまま、コンテキスト注入サイズを 36KB → 3-4KB に圧縮する。
-
-### 自律タスク実行
-
-`task_submit` でタスクを投入すると、スケジューラが Claude CLI をサブプロセスとして起動し自動実行する。
-LLM が実行結果を完了条件と照合し、未達ならリトライする。Spec 更新、リファクタリング、テスト追加など汎用的に使える。
-
-### Spec 自動更新（スケジューラ）
-
-自律タスクの代表的なユースケース。夜間の 5 時間ウィンドウで、変更されたコードに対応する Spec ドキュメントを自動更新。
-タスクがない場合は keep-alive ping でレート制限枠をリセットする。
-
-### Owner Profile
-
-MCP サーバー初回起動時に `.wasurenagusa/owner-profile.md` が自動生成される。
-優先順位、設計方針、コミュニケーションスタイルなど 20 の質問に答えておくと、AI が自律タスク実行時にその基準で判断する。
+| | wasurenagusa | claude-mem | mcp-memory-service | CLAUDE.md |
+|---|---|---|---|---|
+| Auto-detect mistakes | Yes (retry + sentiment) | No | No | No |
+| Auto-consolidate (LLM) | Yes (dont→principles, config→themes) | No | Yes (decay-based) | No |
+| Zero-effort via hooks | Yes | Yes | No | No |
+| Human-readable storage | Yes (Markdown) | No (SQLite) | No (ChromaDB) | Yes |
+| Multi-LLM support | Gemini / OpenAI / Anthropic | Claude only | Local embeddings | N/A |
+| Token-efficient retrieval | Yes (index → detail, 70-90% savings) | Yes (3-layer) | N/A | No |
+| License | MIT | AGPL-3.0 | Apache-2.0 | N/A |
 
 ---
 
-## セットアップ
+## How It Works
 
-### 前提条件
+```
+Session Start (Hook)
+  → Checks if consolidation is stale
+  → Spawns background LLM worker if needed (non-blocking)
+  → Injects consolidated config + principles + owner profile
+  → Only customized settings injected (defaults stripped)
+
+During Session
+  → AI calls memory_search / memory_save as needed
+
+Session End (Hook)
+  → LLM analyzes the conversation
+  → Detects mistakes, frustration, retry patterns
+  → Auto-saves lessons learned
+  → Deduplicates against existing entries before saving
+
+Background (async worker)
+  → Consolidates "dont" entries → behavioral principles
+  → Consolidates "config" entries → thematic summaries
+  → Results used in next session start
+```
+
+---
+
+## Quick Start
+
+### Prerequisites
 
 - Node.js 18+
-- Claude Code（CLI）
-- Gemini API キー（[Google AI Studio](https://aistudio.google.com/) で取得）
+- Claude Code (CLI)
+- API key for one of: [Gemini](https://aistudio.google.com/) / [OpenAI](https://platform.openai.com/) / [Anthropic](https://console.anthropic.com/)
 
-### 1. クローンとビルド
+### 1. Install
 
 ```bash
-git clone git@github.com:tsutushi0628/wasurenagusa-mcp.git
-cd wasurenagusa-mcp
-npm install
-npm run build
+npm install -g wasurenagusa-mcp
 ```
 
-### 2. CLI コマンドを PATH に通す
+Or from source:
 
 ```bash
+git clone https://github.com/tsutushi0628/wasurenagusa-mcp.git
+cd wasurenagusa-mcp
+npm install && npm run build
 npm link
 ```
 
-これで `wasurenagusa-context`、`wasurenagusa-analyze`、`wasurenagusa-spec-update` がグローバルに使えるようになる。
+### 2. Configure
 
-### 3. 環境変数の設定
-
-```bash
-cp .env.example .env
-```
-
-`.env` を編集:
-
-```
-GEMINI_API_KEY=your_gemini_api_key_here
-MEMORY_DIR=.wasurenagusa
-SLACK_WEBHOOK_URL=                    # オプション: Slack通知を有効にする場合
-```
-
-| 変数 | 必須 | 説明 |
-|------|------|------|
-| `GEMINI_API_KEY` | 必須 | Gemini API キー |
-| `MEMORY_DIR` | 任意 | メモリ保存先ディレクトリ（デフォルト: `.wasurenagusa`） |
-| `SLACK_WEBHOOK_URL` | 任意 | 自律タスクの完了/失敗を Slack に通知 |
-
-### 4. Claude Code に MCP サーバーを登録
+Create `~/.wasurenagusa/.env`:
 
 ```bash
-claude mcp add wasurenagusa -- node /path/to/wasurenagusa-mcp/dist/index.js
+# Set at least one API key
+GEMINI_API_KEY=your-key-here
+# OPENAI_API_KEY=your-key-here
+# ANTHROPIC_API_KEY=your-key-here
 ```
 
-### 5. Hooks の設定
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GEMINI_API_KEY` | One of three | Google Gemini API key |
+| `OPENAI_API_KEY` | One of three | OpenAI API key |
+| `ANTHROPIC_API_KEY` | One of three | Anthropic API key |
+| `LLM_PROVIDER` | No | `gemini` (default), `openai`, or `anthropic` |
+| `LLM_MODEL` | No | Override the default model for your provider |
+| `MEMORY_DIR` | No | Memory directory (default: `.wasurenagusa`) |
+| `MAX_ENTRIES_PER_CATEGORY` | No | Entry limit per category before auto-archiving (default: `100`) |
+| `SLACK_WEBHOOK_URL` | No | Slack notifications for autonomous tasks |
 
-`~/.claude/settings.local.json`（または プロジェクトの `.claude/settings.local.json`）に以下を追加:
+### 3. Register MCP Server
+
+```bash
+claude mcp add wasurenagusa -- wasurenagusa-mcp
+```
+
+### 4. Set Up Hooks
+
+Add to `~/.claude/settings.local.json`:
 
 ```json
 {
@@ -207,149 +184,108 @@ claude mcp add wasurenagusa -- node /path/to/wasurenagusa-mcp/dist/index.js
 }
 ```
 
-### 6. 動作確認
+### 5. Start Using
 
-Claude Code を起動する。初回は `.wasurenagusa/` ディレクトリが自動作成され、`owner-profile.md` のテンプレートが配置される。
+Launch Claude Code. That's it.
 
-```
-.wasurenagusa/
-├── owner-profile.md    ← 初回自動生成。編集するとAIの自律判断に反映
-├── config.md           ← 会話から自動蓄積
-├── dont.md             ← 会話から自動蓄積
-├── decisions.md        ← 会話から自動蓄積
-├── snippets.md         ← 会話から自動蓄積
-└── logs/               ← 日付別ログ
-```
+- First session: `.wasurenagusa/` directory is created automatically
+- After first conversation: Stop Hook analyzes and saves important context
+- Second session onward: accumulated wisdom is auto-injected at start
 
-最初の会話を終えると、Stop Hook が起動して LLM が会話を分析し、重要情報が自動保存される。
-2 回目以降のセッションでは、蓄積された情報が SessionStart Hook で自動注入される。
+> Add `.wasurenagusa/` to your `.gitignore` — it contains project-specific memory data.
 
-> **重要**: `.wasurenagusa/` にはプロジェクト固有の記憶データが保存される。あなたのプロジェクトの `.gitignore` に追加しておくこと。
->
-> ```bash
-> echo '.wasurenagusa/' >> .gitignore
-> ```
+---
 
-### 7. （オプション）プロジェクト初期設定
+## Memory Categories
 
-自律タスク機能（Spec 自動更新など）を使う場合は、Claude Code 上で `project_init` ツールを実行する。
-プロジェクトの品質基準・フェーズ・判断基準を選択式で登録できる。
+| Category | What it stores | File |
+|----------|---------------|------|
+| **config** | API URLs, ports, auth locations | `config.md` |
+| **dont** | Mistakes, anti-patterns, user frustrations | `dont.md` |
+| **decision** | Architecture decisions, tech choices | `decisions.md` |
+| **log** | Implementation records, resolved errors | `logs/YYYY-MM-DD.md` |
+| **snippet** | Frequently used commands & queries | `snippets.md` |
 
-### 8. （オプション）Spec 自動更新スケジューラ
+---
 
-夜間にドキュメントを自動更新するには、cron や launchd で `wasurenagusa-spec-update` を定期実行する。
+## MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `memory_get_context` | Get config + consolidated principles (auto-called at session start) |
+| `memory_search` | Lightweight index search (ID, title, tags only) |
+| `memory_get_detail` | Get full detail by ID(s) |
+| `memory_save` | Save a memory entry explicitly |
+| `memory_delete` | Delete entries by ID |
+| `task_submit` | Submit an autonomous task for 24/7 execution |
+| `task_status` | Check task execution status |
+| `task_action_list` | List and manage pending human actions |
+| `project_init` | Initialize project quality standards |
+
+---
+
+## Advanced Features
+
+### LLM Consolidation
+
+When memory entries accumulate, the LLM automatically compresses them into compact summaries:
+
+- **Dont entries** → 5-9 behavioral principles (e.g., 1,581 raw entries → 7 principles)
+- **Config entries** → 4-5 thematic summaries (e.g., 29 entries → 5 themes preserving all ports, paths, URLs)
+
+Consolidation runs as a detached background process during session start — no latency impact. Results are cached as JSON and used from the next session onward. Staleness is detected by comparing file modification times and entry counts.
+
+Raw entries are always preserved. The consolidated version is injected at session start; original entries remain searchable via `memory_search`.
+
+### Auto-Archiving
+
+Each memory category has an entry limit (default: 100). When exceeded, oldest entries are automatically moved to archive files (`*-archive.md`). Logs have separate 30-day rotation. Your data is never deleted — just moved out of the active search path.
+
+### Sentiment Detection
+
+Detects user frustration through text patterns, message length changes, and absence of positive signals. Records what went wrong, why, and what to do instead.
+
+### Autonomous Tasks
+
+Submit tasks via `task_submit` and wasurenagusa runs them using Claude CLI as a subprocess. The LLM evaluates completion conditions and retries if needed. Useful for spec updates, refactoring, and test generation.
+
+### Owner Profile
+
+On first run, an `owner-profile.md` template is generated. Fill it in to teach the AI your decision-making preferences for autonomous task execution.
+
+Only sections you've actually customized are injected — default selections and empty fields are automatically stripped, keeping injection minimal.
+
+---
+
+## Current Limitations
+
+- **Claude Code only** — Hook-based auto-injection requires Claude Code. The MCP server itself works with any MCP-compatible client, but without auto-injection.
+
+---
+
+## Design Philosophy
+
+- **Autonomous by default, manual by choice** — Hooks automate everything. Manual tools exist but are optional.
+- **Context-efficient** — LLM consolidation + smart filtering achieves 71% injection reduction. Two-stage retrieval (index then detail) further reduces on-demand consumption.
+- **Human-readable storage** — All memory stored as Markdown. No database, no vendor lock-in.
+- **Externalized prompts** — LLM prompts live in `prompts/` as plain text. Iterate without rebuilding.
+
+---
+
+## Development
 
 ```bash
-# 例: 毎日深夜1時に実行（cron）
-0 1 * * * cd /path/to/your-project && wasurenagusa-spec-update
+npm run build        # Compile TypeScript
+npm test             # Run tests
+npm run test:watch   # Watch mode
 ```
 
 ---
 
-## メモリカテゴリ
-
-| カテゴリ | 説明 | 保存先 |
-|---------|------|--------|
-| **config** | API URL、ポート番号、認証情報の場所 | `.wasurenagusa/config.md` |
-| **dont** | やってはいけないこと、過去のミス | `.wasurenagusa/dont.md` |
-| **decision** | 技術選定、アーキテクチャ決定 | `.wasurenagusa/decisions.md` |
-| **log** | 実装完了、エラー解決の記録 | `.wasurenagusa/logs/YYYY-MM-DD.md` |
-| **snippet** | よく使うコマンド、クエリ | `.wasurenagusa/snippets.md` |
-
----
-
-## MCP ツール
-
-| ツール名 | 実行方式 | 説明 |
-|---------|---------|------|
-| `memory_get_context` | AI 自律 | config + dont を一括取得 |
-| `memory_search` | AI 自律 | 軽量インデックス検索（ID・タイトル・タグのみ） |
-| `memory_get_detail` | AI 自律 | 指定 ID のフル詳細を取得 |
-| `memory_save` | 手動（オプション） | 明示的な記憶保存 |
-| `memory_delete` | 手動 | エントリ削除（ID 指定、複数一括可） |
-| `task_submit` | AI 自律 | 自律タスクの投入 |
-| `task_status` | AI 自律 | タスク状態の確認 |
-| `task_action_list` | AI 自律 | 実行可能アクション一覧 |
-| `project_init` | 手動 | プロジェクト初期設定 |
-
----
-
-## CLI コマンド
-
-| コマンド | 用途 | 呼び出し元 |
-|---------|------|-----------|
-| `wasurenagusa-context` | config + dont をstdoutに出力 | SessionStart Hook |
-| `wasurenagusa-analyze` | 会話を LLM 分析し自動保存 | Stop Hook |
-| `wasurenagusa-spec-update` | Spec ドキュメント自動更新 | cron / systemd timer |
-
----
-
-## 技術スタック
-
-| 技術 | 用途 |
-|------|------|
-| TypeScript | 実装言語 |
-| MCP SDK (`@modelcontextprotocol/sdk`) | MCP プロトコル |
-| Gemini API (`@google/generative-ai`) | 会話分析・重複検出・dont統合 |
-| Markdown | ストレージ形式 |
-| STDIO | トランスポート |
-
----
-
-## ディレクトリ構成
-
-```
-wasurenagusa-mcp/
-├── src/
-│   ├── index.ts              # MCP サーバーエントリポイント
-│   ├── config.ts             # 設定管理
-│   ├── types.ts              # 型定義
-│   ├── cli/
-│   │   ├── context.ts        # SessionStart Hook 用 CLI
-│   │   ├── analyze.ts        # Stop Hook 用 CLI
-│   │   └── spec-update.ts    # Spec 自動更新 CLI
-│   ├── tools/                # MCP ツール定義
-│   ├── storage/              # Markdown ストレージ
-│   ├── analyzer/             # Gemini 連携・会話分析
-│   ├── autonomous/           # 自律タスク実行
-│   ├── consolidator/         # dont 統合
-│   ├── scheduler/            # Spec 更新スケジューラ
-│   ├── notifier/             # Slack 通知
-│   └── utils/                # ユーティリティ
-├── prompts/                  # Gemini プロンプト（外部化）
-├── docs/
-│   └── spec.md               # 完全実装仕様書
-├── .env.example
-├── package.json
-└── tsconfig.json
-```
-
----
-
-## 開発
-
-```bash
-# ビルド
-npm run build
-
-# テスト
-npm test
-
-# テスト（ウォッチモード）
-npm run test:watch
-```
-
----
-
-## 設計思想
-
-- **自律自動が基本、手動はオプション** — ユーザーに手動操作を強いない。Hooks で完全自動化
-- **コンテキストを圧迫しない軽量設計** — 段階的開示で必要な情報だけ取得
-- **プロンプト外部化** — `prompts/` に LLM プロンプトをテキストファイルとして配置。デプロイなしで改善可能
-- **ローカル実行** — セットアップ簡単。外部サービスは Gemini API のみ
-
----
-
-## ライセンス
+## License
 
 MIT
+
+---
+
+[Japanese README (日本語)](./README.ja.md)

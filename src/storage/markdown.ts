@@ -97,6 +97,14 @@ export class MarkdownStorage {
 
       await writeFile(filePath, existingContent + formatted, "utf-8");
 
+      // ログ以外のカテゴリでエントリ上限チェック → 超過分を自動アーカイブ
+      if (params.category !== "log") {
+        const archivedCount = await this.archiveExcessEntries(params.category);
+        if (archivedCount > 0) {
+          return { success: true, id, path: filePath, message: `Saved to ${params.category} (id: ${id}). ${archivedCount}件の古いエントリをアーカイブしました` };
+        }
+      }
+
       return { success: true, id, path: filePath, message: `Saved to ${params.category} (id: ${id})` };
     } catch (error) {
       return { success: false, id: "", path: "", message: `Failed to save: ${error}` };
@@ -239,12 +247,13 @@ export class MarkdownStorage {
   async getContext(currentProject?: string): Promise<ContextResult> {
     await this.initialize();
 
-    // configエントリ: projectフィルタ後にタイトル+内容を返却
+    // configエントリ: projectフィルタ後に重複排除してタイトル+内容を返却
     const configEntries = await this.readCategory("config");
     const filteredConfig = currentProject
       ? configEntries.filter(e => !e.project || e.project === currentProject)
       : configEntries;
-    const configFormatted = filteredConfig
+    const dedupedConfig = this.deduplicateConfigEntries(filteredConfig);
+    const configFormatted = dedupedConfig
       .map(e => `### ${e.title}\n${e.content}`)
       .join("\n\n");
 
@@ -259,6 +268,14 @@ export class MarkdownStorage {
       config: configFormatted || "（設定情報なし）",
       dont: dontFormatted || "（ルールなし）",
     };
+  }
+
+  async readConfigEntries(currentProject?: string): Promise<MemoryEntry[]> {
+    await this.initialize();
+    const configEntries = await this.readCategory("config");
+    return currentProject
+      ? configEntries.filter(e => !e.project || e.project === currentProject)
+      : configEntries;
   }
 
   async readDontEntries(currentProject?: string): Promise<MemoryEntry[]> {
@@ -348,6 +365,39 @@ export class MarkdownStorage {
     }
   }
 
+  private async archiveExcessEntries(category: MemoryCategory): Promise<number> {
+    const maxEntries = config.maxEntriesPerCategory;
+    if (maxEntries <= 0) { return 0; }
+
+    const entries = await this.readCategory(category);
+    if (entries.length <= maxEntries) { return 0; }
+
+    // ファイル内の出現順（＝挿入順）を保持。末尾がmost recent
+    // 古い方（先頭）をアーカイブし、新しい方（末尾）を残す
+    const archiveCount = entries.length - maxEntries;
+    const archive = entries.slice(0, archiveCount);
+    const keep = entries.slice(archiveCount);
+
+    // メインファイルを新しいエントリだけで再構築
+    const mainFile = join(this.memoryPath, config.categoryFiles[category]);
+    const header = getFileHeader(config.categoryFiles[category]);
+    const mainBody = keep.map(e => formatEntry(e)).join("");
+    await writeFile(mainFile, header + mainBody, "utf-8");
+
+    // アーカイブファイルに追記
+    const archiveFile = join(this.memoryPath, `${config.categoryFiles[category].replace(".md", "")}-archive.md`);
+    let archiveContent = "";
+    if (existsSync(archiveFile)) {
+      archiveContent = await readFile(archiveFile, "utf-8");
+    } else {
+      archiveContent = `# ${category} Archive\n\n自動アーカイブされたエントリ。検索対象外。\n\n---\n\n`;
+    }
+    const archiveBody = archive.map(e => formatEntry(e)).join("");
+    await writeFile(archiveFile, archiveContent + archiveBody, "utf-8");
+
+    return archive.length;
+  }
+
   private validateDateFormat(date: string): void {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       throw new Error(`Invalid date format in timestamp: ${date}`);
@@ -361,5 +411,98 @@ export class MarkdownStorage {
       return join(this.memoryPath, "logs", `${date}.md`);
     }
     return join(this.memoryPath, config.categoryFiles[category]);
+  }
+
+  /**
+   * configエントリの注入時重複排除。
+   * タイトルのトークン重複率が50%以上の場合、古い方を除外して新しい方を残す。
+   */
+  deduplicateConfigEntries(entries: MemoryEntry[]): MemoryEntry[] {
+    if (entries.length <= 1) return entries;
+
+    // 新しい順にソート（最新を優先して残す）
+    // 同一タイムスタンプ時は挿入順の後（index大）を優先
+    const indexed = entries.map((e, i) => ({ entry: e, index: i }));
+    indexed.sort((a, b) => {
+      const timeDiff = new Date(b.entry.timestamp).getTime() - new Date(a.entry.timestamp).getTime();
+      return timeDiff !== 0 ? timeDiff : b.index - a.index;
+    });
+    const sorted = indexed.map(item => item.entry);
+
+    const kept: MemoryEntry[] = [];
+
+    for (const entry of sorted) {
+      const entryTokens = this.extractTitleTokens(entry.title);
+      const entryFacts = this.extractContentFacts(entry.content);
+
+      const isDuplicate = kept.some(k => {
+        // チェック1: タイトルトークン重複（2つ以上かつ50%以上）
+        const keptTokens = this.extractTitleTokens(k.title);
+        const titleOverlap = entryTokens.filter(t => keptTokens.includes(t));
+        if (entryTokens.length > 0
+          && titleOverlap.length >= 2
+          && titleOverlap.length >= entryTokens.length * 0.5) {
+          return true;
+        }
+
+        // チェック2: コンテンツ事実（ポート番号・パス等）の包含チェック
+        // このエントリの事実が既に残されたエントリにほぼ含まれていれば冗長
+        if (entryFacts.length >= 2) {
+          const covered = entryFacts.filter(f => k.content.includes(f));
+          if (covered.length >= entryFacts.length * 0.7) {
+            return true;
+          }
+        }
+
+        return false;
+      });
+
+      if (!isDuplicate) {
+        kept.push(entry);
+      }
+    }
+
+    return kept;
+  }
+
+  /**
+   * コンテンツから検証可能な「事実」を抽出する。
+   * ポート番号（4-5桁）、ファイルパス（2セグメント以上）を対象とする。
+   */
+  private extractContentFacts(content: string): string[] {
+    const facts: string[] = [];
+    // ポート番号（4-5桁の数字、前後が単語境界）
+    const ports = content.match(/\b\d{4,5}\b/g);
+    if (ports) facts.push(...ports);
+    // ファイルパス（2セグメント以上）
+    const paths = content.match(/(?:\/[\w.-]+){2,}/g);
+    if (paths) facts.push(...paths);
+    return facts;
+  }
+
+  /**
+   * タイトルから検索用トークンを抽出。
+   * 漢字は2文字ずつのbigramに分割し、カタカナ・英数字はそのまま抽出する。
+   * 「技術設定」→ ["技術", "設定"] のように分割することで、
+   * 「設定」単体との一致検出を可能にする。
+   */
+  private extractTitleTokens(title: string): string[] {
+    const tokens: string[] = [];
+    // 漢字の連続を2文字bigramに分割
+    const kanjiSequences = title.match(/[\u4E00-\u9FFF]{2,}/g);
+    if (kanjiSequences) {
+      for (const seq of kanjiSequences) {
+        for (let i = 0; i + 1 < seq.length; i += 2) {
+          tokens.push(seq.substring(i, i + 2));
+        }
+      }
+    }
+    // カタカナの連続（2文字以上）
+    const kata = title.match(/[\u30A0-\u30FF]{2,}/g);
+    if (kata) tokens.push(...kata);
+    // 英数字の連続（2文字以上、ハイフン含む）
+    const en = title.match(/[a-zA-Z0-9][-a-zA-Z0-9]{1,}/g);
+    if (en) tokens.push(...en.map(t => t.toLowerCase()));
+    return tokens;
   }
 }

@@ -1,18 +1,22 @@
 import { loadPrompt } from "../analyzer/prompt-loader.js";
-import { createGeminiModel } from "../analyzer/gemini-client.js";
+import { createGenerateTextFn, type GenerateTextFn } from "../llm/provider.js";
 import { escapePromptVariable } from "../utils/prompt-escape.js";
 import { MAX_STDOUT_LENGTH } from "./constants.js";
 import type { EvaluationInput, EvaluatorResult, ProjectMeta } from "../types.js";
 
 export class TaskEvaluator {
+  private generateText: GenerateTextFn;
+
+  constructor() {
+    this.generateText = createGenerateTextFn();
+  }
+
   async evaluate(input: EvaluationInput): Promise<EvaluatorResult> {
     const template = await loadPrompt("task-evaluation.txt");
     const truncatedOutput = input.executionOutput.slice(-MAX_STDOUT_LENGTH);
     const prompt = this.replaceVariables(template, input, truncatedOutput);
 
-    const model = createGeminiModel();
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
+    const text = await this.generateText(prompt);
 
     return this.parseResult(text);
   }

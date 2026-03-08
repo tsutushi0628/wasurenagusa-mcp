@@ -475,6 +475,78 @@ describe("MarkdownStorage", () => {
       expect(context.config).toContain("yakusoku設定");
       expect(context.config).toContain("bl-labo設定");
     });
+
+    it("タイトルが類似するconfigエントリは新しい方のみ注入される", async () => {
+      const storage = new MarkdownStorage(tempDir);
+
+      // 古いエントリ
+      await storage.save({
+        category: "config",
+        title: "motoe-evalのポート番号設定",
+        content: "Functionsは5013",
+        project: "bengo4-labo",
+      });
+      // 新しいエントリ（タイトルが類似）
+      await storage.save({
+        category: "config",
+        title: "motoe-evalのポート番号定義",
+        content: "Functionsは5013、Viteは8010",
+        project: "bengo4-labo",
+      });
+
+      const context = await storage.getContext("bengo4-labo");
+
+      // 新しい方が残る
+      expect(context.config).toContain("motoe-evalのポート番号定義");
+      expect(context.config).toContain("Viteは8010");
+      // 古い方は除外
+      expect(context.config).not.toContain("motoe-evalのポート番号設定");
+    });
+
+    it("タイトルが異なるconfigエントリは両方注入される", async () => {
+      const storage = new MarkdownStorage(tempDir);
+
+      await storage.save({
+        category: "config",
+        title: "API URL設定",
+        content: "https://api.example.com",
+        project: "yakusoku",
+      });
+      await storage.save({
+        category: "config",
+        title: "データベース接続情報",
+        content: "Firestoreのコレクション名: users",
+        project: "yakusoku",
+      });
+
+      const context = await storage.getContext("yakusoku");
+
+      expect(context.config).toContain("API URL設定");
+      expect(context.config).toContain("データベース接続情報");
+    });
+
+    it("トークン重複が2未満の場合はduplicate判定しない", async () => {
+      const storage = new MarkdownStorage(tempDir);
+
+      await storage.save({
+        category: "config",
+        title: "contract-checker構成情報",
+        content: "Bundle ID: com.bengo4.contractchecker",
+        project: "bengo4-labo",
+      });
+      await storage.save({
+        category: "config",
+        title: "contract-checker配信要件",
+        content: "6.9インチスクリーンショット必須",
+        project: "bengo4-labo",
+      });
+
+      const context = await storage.getContext("bengo4-labo");
+
+      // トークン重複は"contract-checker"の1つだけ → 2未満なので両方残る
+      expect(context.config).toContain("contract-checker構成情報");
+      expect(context.config).toContain("contract-checker配信要件");
+    });
   });
 
   describe("rotateOldLogs() - 不正なファイル名の無視", () => {
@@ -493,6 +565,212 @@ describe("MarkdownStorage", () => {
       // 不正ファイルは削除されずに残る（日付形式でないため無視される）
       expect(existsSync(join(logsPath, "not-a-date.md"))).toBe(true);
       expect(existsSync(join(logsPath, "malicious-file.md"))).toBe(true);
+    });
+  });
+
+  describe("archiveExcessEntries() - エントリ上限超過時の自動アーカイブ", () => {
+    it("上限超過時に古いエントリがアーカイブファイルに移動する", async () => {
+      // 上限を3に設定してテスト
+      const originalMax = (await import("../config.js")).config.maxEntriesPerCategory;
+      (await import("../config.js")).config.maxEntriesPerCategory = 3;
+
+      const storage = new MarkdownStorage(tempDir);
+
+      // 5件保存（上限3を超える）
+      for (let i = 1; i <= 5; i++) {
+        await storage.save({
+          category: "dont",
+          title: `ルール${i}`,
+          content: `内容${i}`,
+        });
+      }
+
+      // メインファイルには最新3件のみ
+      const mainContent = await readFile(
+        join(tempDir, ".wasurenagusa", "dont.md"),
+        "utf-8"
+      );
+      expect(mainContent).toContain("ルール3");
+      expect(mainContent).toContain("ルール4");
+      expect(mainContent).toContain("ルール5");
+      expect(mainContent).not.toContain("ルール1");
+      expect(mainContent).not.toContain("ルール2");
+
+      // アーカイブファイルに古い2件
+      const archivePath = join(tempDir, ".wasurenagusa", "dont-archive.md");
+      expect(existsSync(archivePath)).toBe(true);
+      const archiveContent = await readFile(archivePath, "utf-8");
+      expect(archiveContent).toContain("ルール1");
+      expect(archiveContent).toContain("ルール2");
+
+      // 設定を戻す
+      (await import("../config.js")).config.maxEntriesPerCategory = originalMax;
+    });
+
+    it("上限以内ならアーカイブファイルは作成されない", async () => {
+      const originalMax = (await import("../config.js")).config.maxEntriesPerCategory;
+      (await import("../config.js")).config.maxEntriesPerCategory = 10;
+
+      const storage = new MarkdownStorage(tempDir);
+
+      await storage.save({
+        category: "config",
+        title: "設定1",
+        content: "内容1",
+      });
+      await storage.save({
+        category: "config",
+        title: "設定2",
+        content: "内容2",
+      });
+
+      const archivePath = join(tempDir, ".wasurenagusa", "config-archive.md");
+      expect(existsSync(archivePath)).toBe(false);
+
+      (await import("../config.js")).config.maxEntriesPerCategory = originalMax;
+    });
+
+    it("logカテゴリはアーカイブ対象外", async () => {
+      const originalMax = (await import("../config.js")).config.maxEntriesPerCategory;
+      (await import("../config.js")).config.maxEntriesPerCategory = 2;
+
+      const storage = new MarkdownStorage(tempDir);
+
+      for (let i = 1; i <= 5; i++) {
+        await storage.save({
+          category: "log",
+          title: `ログ${i}`,
+          content: `ログ内容${i}`,
+        });
+      }
+
+      // logs/ディレクトリ内にアーカイブファイルは存在しない
+      const archivePath = join(tempDir, ".wasurenagusa", "logs-archive.md");
+      expect(existsSync(archivePath)).toBe(false);
+
+      (await import("../config.js")).config.maxEntriesPerCategory = originalMax;
+    });
+
+    it("アーカイブ時にsave結果のメッセージにアーカイブ数が含まれる", async () => {
+      const originalMax = (await import("../config.js")).config.maxEntriesPerCategory;
+      (await import("../config.js")).config.maxEntriesPerCategory = 2;
+
+      const storage = new MarkdownStorage(tempDir);
+
+      await storage.save({ category: "snippet", title: "s1", content: "c1" });
+      await storage.save({ category: "snippet", title: "s2", content: "c2" });
+      const result = await storage.save({ category: "snippet", title: "s3", content: "c3" });
+
+      expect(result.message).toContain("アーカイブ");
+
+      (await import("../config.js")).config.maxEntriesPerCategory = originalMax;
+    });
+  });
+
+  describe("deduplicateConfigEntries() - configエントリの重複排除", () => {
+    it("タイトルトークンが50%以上重複するエントリは新しい方のみ残す", () => {
+      const storage = new MarkdownStorage(tempDir);
+
+      const entries = [
+        { id: "old", timestamp: "2026-01-01T00:00:00+09:00", category: "config" as const, title: "motoe-evalのポート番号設定", content: "5013", tags: [] },
+        { id: "new", timestamp: "2026-03-01T00:00:00+09:00", category: "config" as const, title: "motoe-evalのポート番号定義", content: "5013/8010", tags: [] },
+      ];
+
+      const result = storage.deduplicateConfigEntries(entries);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe("new");
+    });
+
+    it("タイトルが異なるエントリは両方残す", () => {
+      const storage = new MarkdownStorage(tempDir);
+
+      const entries = [
+        { id: "a", timestamp: "2026-01-01T00:00:00+09:00", category: "config" as const, title: "API URL設定", content: "https://example.com", tags: [] },
+        { id: "b", timestamp: "2026-03-01T00:00:00+09:00", category: "config" as const, title: "データベース接続情報", content: "Firestore", tags: [] },
+      ];
+
+      const result = storage.deduplicateConfigEntries(entries);
+
+      expect(result).toHaveLength(2);
+    });
+
+    it("3件以上の重複グループでも最新のみ残す", () => {
+      const storage = new MarkdownStorage(tempDir);
+
+      const entries = [
+        { id: "v1", timestamp: "2026-01-01T00:00:00+09:00", category: "config" as const, title: "各プロダクトのポート番号設定", content: "5009/5013", tags: [] },
+        { id: "v2", timestamp: "2026-02-01T00:00:00+09:00", category: "config" as const, title: "プロジェクト別ポート番号定義", content: "5013/8010", tags: [] },
+        { id: "v3", timestamp: "2026-03-01T00:00:00+09:00", category: "config" as const, title: "motoe-evalのポート番号設定", content: "5013/8010最新", tags: [] },
+      ];
+
+      const result = storage.deduplicateConfigEntries(entries);
+
+      // v3（最新）が残り、v1は「ポート番号」「設定」がv3と重複で除外、
+      // v2は「ポート番号」がv3と重複するが「定義」vs「設定」で重複率がギリギリ
+      // いずれにせよ最新のv3は必ず残る
+      expect(result[0].id).toBe("v3");
+      expect(result.length).toBeLessThanOrEqual(2);
+    });
+
+    it("空配列は空配列を返す", () => {
+      const storage = new MarkdownStorage(tempDir);
+      expect(storage.deduplicateConfigEntries([])).toEqual([]);
+    });
+
+    it("1件のみの場合はそのまま返す", () => {
+      const storage = new MarkdownStorage(tempDir);
+
+      const entries = [
+        { id: "only", timestamp: "2026-01-01T00:00:00+09:00", category: "config" as const, title: "唯一の設定", content: "内容", tags: [] },
+      ];
+
+      const result = storage.deduplicateConfigEntries(entries);
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe("only");
+    });
+
+    it("コンテンツに同じポート番号を持つエントリは包含関係で重複判定する", () => {
+      const storage = new MarkdownStorage(tempDir);
+
+      const entries = [
+        { id: "comprehensive", timestamp: "2026-03-01T00:00:00+09:00", category: "config" as const, title: "motoe-eval技術設定・環境情報", content: "React 19, Tailwind 4採用。ポートは5013/8010。DB名はai-motoe-db", tags: [] },
+        { id: "port-only", timestamp: "2026-01-01T00:00:00+09:00", category: "config" as const, title: "motoe-evalのポート番号設定", content: "Functionsは5013、Viteは8010", tags: [] },
+      ];
+
+      const result = storage.deduplicateConfigEntries(entries);
+
+      // port-onlyの事実（5013, 8010）がcomprehensiveに含まれるので除外
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe("comprehensive");
+    });
+
+    it("コンテンツ事実が1つだけの場合は重複判定しない（誤検出防止）", () => {
+      const storage = new MarkdownStorage(tempDir);
+
+      const entries = [
+        { id: "a", timestamp: "2026-03-01T00:00:00+09:00", category: "config" as const, title: "サーバー設定", content: "ポート5013を使用", tags: [] },
+        { id: "b", timestamp: "2026-01-01T00:00:00+09:00", category: "config" as const, title: "全く違うトピック", content: "偶然5013が含まれる文章", tags: [] },
+      ];
+
+      const result = storage.deduplicateConfigEntries(entries);
+
+      // 事実が1つだけなので重複判定しない
+      expect(result).toHaveLength(2);
+    });
+
+    it("Figma MCP連携のように英語+漢字の重複を検出する", () => {
+      const storage = new MarkdownStorage(tempDir);
+
+      const entries = [
+        { id: "old", timestamp: "2026-01-01T00:00:00+09:00", category: "config" as const, title: "Figma MCP連携の設定", content: "http://127.0.0.1:3845/sse", tags: [] },
+        { id: "new", timestamp: "2026-03-01T00:00:00+09:00", category: "config" as const, title: "Figma MCP連携設定", content: "https://mcp.figma.com/mcp", tags: [] },
+      ];
+
+      const result = storage.deduplicateConfigEntries(entries);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe("new");
     });
   });
 

@@ -2,15 +2,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { CommandGenerator } from "./command-generator.js";
 import type { CommandGenerationInput, AutonomousTask, ProjectMeta } from "../types.js";
 
-// createGeminiModelモック
-vi.mock("../analyzer/gemini-client.js", () => ({
-  createGeminiModel: vi.fn(() => ({
-    generateContent: vi.fn().mockResolvedValue({
-      response: {
-        text: () => "生成された命令文テキスト",
-      },
-    }),
-  })),
+const mockGenerateText = vi.fn();
+vi.mock("../llm/provider.js", () => ({
+  createGenerateTextFn: vi.fn(() => mockGenerateText),
 }));
 
 // loadPromptモック
@@ -21,6 +15,10 @@ vi.mock("../analyzer/prompt-loader.js", () => ({
 }));
 
 describe("CommandGenerator", () => {
+  beforeEach(() => {
+    mockGenerateText.mockReset();
+  });
+
   const makeTask = (): AutonomousTask => ({
     id: "test-id",
     why: "テスト目的",
@@ -52,6 +50,8 @@ describe("CommandGenerator", () => {
   });
 
   it("正常に命令文を生成する", async () => {
+    mockGenerateText.mockResolvedValue("生成された命令文テキスト");
+
     const generator = new CommandGenerator();
     const result = await generator.generate({
       task: makeTask(),
@@ -61,14 +61,8 @@ describe("CommandGenerator", () => {
     expect(result).toBe("生成された命令文テキスト");
   });
 
-  it("テンプレート変数が正しく置換されてGeminiに渡される", async () => {
-    const { createGeminiModel } = await import("../analyzer/gemini-client.js");
-    const mockGenerateContent = vi.fn().mockResolvedValue({
-      response: { text: () => "結果" },
-    });
-    vi.mocked(createGeminiModel).mockReturnValue({
-      generateContent: mockGenerateContent,
-    } as any);
+  it("テンプレート変数が正しく置換されてLLMに渡される", async () => {
+    mockGenerateText.mockResolvedValue("結果");
 
     const generator = new CommandGenerator();
     const task = makeTask();
@@ -84,7 +78,7 @@ describe("CommandGenerator", () => {
 
     await generator.generate({ task, projectMeta: makeMeta() });
 
-    const calledPrompt = mockGenerateContent.mock.calls[0][0] as string;
+    const calledPrompt = mockGenerateText.mock.calls[0][0] as string;
     expect(calledPrompt).toContain("テスト目的");
     expect(calledPrompt).toContain("テストタスク");
     expect(calledPrompt).toContain("テスト完了条件");
@@ -95,18 +89,12 @@ describe("CommandGenerator", () => {
   });
 
   it("初回実行時はprevious_evaluationsが「なし（初回実行）」になる", async () => {
-    const { createGeminiModel } = await import("../analyzer/gemini-client.js");
-    const mockGenerateContent = vi.fn().mockResolvedValue({
-      response: { text: () => "結果" },
-    });
-    vi.mocked(createGeminiModel).mockReturnValue({
-      generateContent: mockGenerateContent,
-    } as any);
+    mockGenerateText.mockResolvedValue("結果");
 
     const generator = new CommandGenerator();
     await generator.generate({ task: makeTask(), projectMeta: makeMeta() });
 
-    const calledPrompt = mockGenerateContent.mock.calls[0][0] as string;
+    const calledPrompt = mockGenerateText.mock.calls[0][0] as string;
     expect(calledPrompt).toContain("なし（初回実行）");
   });
 });
