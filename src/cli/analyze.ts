@@ -81,11 +81,13 @@ async function main() {
     const storage = new MarkdownStorage(projectRoot);
 
     // 重複チェック: 同カテゴリの既存エントリと比較
+    // log以外は全件取得してLLMに渡す（タイトル部分一致検索では漏れが多いため）
     let replaceId: string | undefined;
     try {
       const existingSearch = await storage.search({
-        query: analysis.title,
+        query: analysis.category === "log" ? analysis.title : "",
         category: analysis.category,
+        project: basename(projectRoot),
         limit: 50,
       });
       if (existingSearch.totalCount > 0) {
