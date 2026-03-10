@@ -1,4 +1,4 @@
-import { MemoryCategory, MemoryEntry } from "../types.js";
+import { MemoryCategory, MemoryEntry, MemoryImportance } from "../types.js";
 
 /**
  * MarkdownコンテンツをパースしてMemoryEntry配列に変換する
@@ -18,6 +18,7 @@ export function parseMarkdown(content: string, category: MemoryCategory): Memory
   let entryContent = "";
   let project: string | undefined;
   let scope: string | undefined;
+  let importance: MemoryImportance | undefined;
   let inContent = false;
   let contentLines: string[] = [];
 
@@ -38,6 +39,7 @@ export function parseMarkdown(content: string, category: MemoryCategory): Memory
       };
       if (project) { entry.project = project; }
       if (scope) { entry.scope = scope; }
+      if (importance) { entry.importance = importance; }
       entries.push(entry);
     }
     currentTitle = "";
@@ -47,6 +49,7 @@ export function parseMarkdown(content: string, category: MemoryCategory): Memory
     entryContent = "";
     project = undefined;
     scope = undefined;
+    importance = undefined;
   }
 
   for (const line of lines) {
@@ -84,6 +87,11 @@ export function parseMarkdown(content: string, category: MemoryCategory): Memory
       project = trimmed.replace("- **project**:", "").trim();
     } else if (trimmed.startsWith("- **scope**:")) {
       scope = trimmed.replace("- **scope**:", "").trim();
+    } else if (trimmed.startsWith("- **importance**:")) {
+      const value = trimmed.replace("- **importance**:", "").trim();
+      if (value === "critical" || value === "normal") {
+        importance = value;
+      }
     } else if (trimmed.startsWith("- **tags**:")) {
       tags = trimmed.replace("- **tags**:", "").trim().split(",").map(t => t.trim()).filter(Boolean);
     } else if (trimmed.startsWith("- **content**:")) {

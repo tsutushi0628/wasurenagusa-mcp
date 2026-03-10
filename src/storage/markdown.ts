@@ -74,6 +74,7 @@ export class MarkdownStorage {
       };
       if (params.project) { entry.project = params.project; }
       if (params.scope) { entry.scope = params.scope; }
+      if (params.importance) { entry.importance = params.importance; }
 
       const filePath = this.getFilePath(params.category, timestamp);
 
@@ -153,7 +154,7 @@ export class MarkdownStorage {
 
     const indexEntries: MemoryIndexEntry[] = limited.map(entry => ({
       id: entry.id, timestamp: entry.timestamp, category: entry.category, title: entry.title, tags: entry.tags,
-      project: entry.project, scope: entry.scope,
+      project: entry.project, scope: entry.scope, importance: entry.importance,
     }));
 
     return {
