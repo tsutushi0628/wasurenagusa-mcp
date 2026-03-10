@@ -80,7 +80,7 @@ It's not a memory bank. It's a **learning system**.
 Session Start (Hook)
   → Checks if consolidation is stale
   → Spawns background LLM worker if needed (non-blocking)
-  → Injects consolidated config + principles + owner profile
+  → Injects consolidated config + principles (layer 1) + critical permanent entries (layer 2) + recent 30-day entries (layer 3) + owner profile
   → Only customized settings injected (defaults stripped)
 
 During Session
@@ -241,12 +241,23 @@ Launch Claude Code. That's it.
 
 When memory entries accumulate, the LLM automatically compresses them into compact summaries:
 
-- **Dont entries** → 5-9 behavioral principles (e.g., 1,581 raw entries → 7 principles)
+- **Dont entries** → 5-9 behavioral principles (e.g., 1,581 raw entries → 7 principles). Entries marked `importance: "critical"` are **excluded from consolidation** and preserved as-is permanently.
 - **Config entries** → 4-5 thematic summaries (e.g., 29 entries → 5 themes preserving all ports, paths, URLs)
 
 Consolidation runs as a detached background process during session start — no latency impact. Results are cached as JSON and used from the next session onward. Staleness is detected by comparing file modification times and entry counts.
 
 Raw entries are always preserved. The consolidated version is injected at session start; original entries remain searchable via `memory_search`.
+
+#### Memory Strength (importance)
+
+Dont entries support two importance levels:
+
+| importance | Meaning | Consolidation | Injection |
+|-----------|---------|--------------|-----------|
+| `critical` | Strong prohibitions, peak anger, repeated issues | **Excluded (permanent)** | Injected verbatim every session |
+| `normal` | Standard learning records | Consolidated | Injected as principles |
+
+Set manually via `memory_save`. Auto-saved entries are judged by the LLM based on emotional intensity and expression strength.
 
 ### Auto-Archiving
 

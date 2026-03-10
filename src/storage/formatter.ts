@@ -16,12 +16,16 @@ export function formatEntry(entry: MemoryEntry): string {
     ? `- **scope**: ${entry.scope}\n`
     : "";
 
+  const importanceStr = entry.importance === "critical"
+    ? `- **importance**: critical\n`
+    : "";
+
   return `## ${entry.title}
 
 - **id**: ${entry.id}
 - **timestamp**: ${entry.timestamp}
 - **category**: ${entry.category}
-${projectStr}${scopeStr}${tagsStr}- **content**: ${entry.content}
+${projectStr}${scopeStr}${importanceStr}${tagsStr}- **content**: ${entry.content}
 
 ---
 

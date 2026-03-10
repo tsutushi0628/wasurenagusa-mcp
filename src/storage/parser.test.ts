@@ -128,6 +128,44 @@ describe("parseMarkdown", () => {
     expect(entries[1].scope).toBe("backend");
   });
 
+  it("importance行ありのMarkdownをパースしてimportanceを取得できる", () => {
+    const markdown = `## 絶対禁止事項
+
+- **id**: test-imp-001
+- **timestamp**: 2026-02-06T16:00:00.000+09:00
+- **category**: dont
+- **scope**: backend
+- **importance**: critical
+- **tags**: test
+- **content**: これは絶対にやってはいけない
+
+---
+`;
+
+    const entries = parseMarkdown(markdown, "dont");
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0].importance).toBe("critical");
+  });
+
+  it("importance行なしのMarkdownではimportanceがundefined", () => {
+    const markdown = `## 通常事項
+
+- **id**: test-imp-002
+- **timestamp**: 2026-02-06T16:00:00.000+09:00
+- **category**: dont
+- **tags**: test
+- **content**: 通常の注意事項
+
+---
+`;
+
+    const entries = parseMarkdown(markdown, "dont");
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0].importance).toBeUndefined();
+  });
+
   it("content内に ## を含むエントリを正しくパースできる", () => {
     const markdown = `## Firestore問題
 

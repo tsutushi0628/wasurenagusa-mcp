@@ -71,20 +71,68 @@ async function getDontContent(
   currentProject: string,
   memoryPath: string,
 ): Promise<string> {
+  const layers: string[] = [];
+
+  // 層1: 統合された行動原則（既存ロジック）
   try {
-    // 現時点の統合版を読み込み（前回のconsolidation結果）
     const consolidated = await readConsolidatedDont(memoryPath);
     if (consolidated) {
       const formatted = formatConsolidatedDont(consolidated);
-      if (formatted) return formatted;
+      if (formatted) {
+        layers.push("### 行動原則（統合済み）\n\n" + formatted);
+      }
     }
   } catch {
-    // 統合読み込み失敗時はフォールバック
+    // 統合読み込み失敗時はスキップ
   }
 
-  // フォールバック: 従来の全件注入
-  const context = await storage.getContext(currentProject);
-  return context.dont;
+  // dontエントリを1回だけ読み込む
+  const dontEntries = await storage.readDontEntries(currentProject);
+
+  // 層2: criticalエントリ（永続的な禁止事項）
+  const criticalEntries = dontEntries.filter(e => e.importance === "critical");
+  if (criticalEntries.length > 0) {
+    const criticalLines = criticalEntries.map(e => `- **${e.title}**: ${e.content}`).join("\n");
+    layers.push("### 絶対禁止（critical）\n\n" + criticalLines);
+  }
+
+  // 層3: 直近30日の未統合normalエントリ
+  const thirtyDaysAgo = new Date();
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+  let consolidatedSourceIds = new Set<string>();
+  try {
+    const consolidated = await readConsolidatedDont(memoryPath);
+    if (consolidated) {
+      for (const principle of consolidated.principles) {
+        for (const sourceId of principle.sourceIds) {
+          consolidatedSourceIds.add(sourceId);
+        }
+      }
+    }
+  } catch {
+    // 読み込み失敗時は空セットで続行
+  }
+
+  const recentEntries = dontEntries.filter(e => {
+    if (e.importance === "critical") return false;
+    if (consolidatedSourceIds.has(e.id)) return false;
+    const entryDate = new Date(e.timestamp);
+    return entryDate >= thirtyDaysAgo;
+  });
+
+  if (recentEntries.length > 0) {
+    const recentLines = recentEntries.map(e => `- **${e.title}**: ${e.content}`).join("\n");
+    layers.push("### 直近の注意事項\n\n" + recentLines);
+  }
+
+  if (layers.length === 0) {
+    // フォールバック: 層が一つもない場合は従来の全件注入
+    const context = await storage.getContext(currentProject);
+    return context.dont;
+  }
+
+  return layers.join("\n\n");
 }
 
 async function getConfigContent(

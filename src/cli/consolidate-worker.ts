@@ -35,12 +35,13 @@ async function main() {
   const currentProject = basename(projectRoot);
   const storage = new MarkdownStorage(projectRoot);
 
-  // dont統合
+  // dont統合（criticalエントリは統合から除外）
   if (await isConsolidationStale(memoryPath)) {
     const dontEntries = await storage.readDontEntries(currentProject);
-    if (dontEntries.length > 0) {
+    const consolidationTargets = dontEntries.filter(e => e.importance !== "critical");
+    if (consolidationTargets.length > 0) {
       const consolidator = new DontConsolidator();
-      const result = await consolidator.consolidate(dontEntries);
+      const result = await consolidator.consolidate(consolidationTargets);
       if (result) {
         await writeConsolidatedDont(memoryPath, result);
       }

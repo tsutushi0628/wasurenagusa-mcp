@@ -1,7 +1,7 @@
 import { basename } from "path";
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { MarkdownStorage } from "../storage/index.js";
-import { SaveParams, MemoryCategory } from "../types.js";
+import { SaveParams, MemoryCategory, MemoryImportance } from "../types.js";
 
 export const memorySaveTool: Tool = {
   name: "memory_save",
@@ -37,6 +37,11 @@ titleには検索しやすい具体的な名詞を含めること。`,
       scope: {
         type: "string",
         description: "スコープ（オプション）。推奨候補: frontend, backend, infra, design, spec, ai, general。自由入力も可"
+      },
+      importance: {
+        type: "string",
+        enum: ["critical", "normal"],
+        description: "記憶の強弱（オプション）。critical: 統合から除外され永続保持される重要な記憶。normal: 通常の記憶（デフォルト）"
       }
     },
     required: ["category", "title", "content"]
@@ -75,6 +80,7 @@ export async function handleMemorySave(
     tags: normalizeTags(args.tags),
     project: basename(projectRoot),
     scope: args.scope as string | undefined,
+    importance: args.importance as MemoryImportance | undefined,
   };
 
   const result = await storage.save(params);

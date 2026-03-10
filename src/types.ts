@@ -4,6 +4,9 @@ export type MemoryCategory = "config" | "dont" | "decision" | "log" | "snippet";
 // スコープ候補（推奨値。実際のscopeフィールドはstring型で自由入力も可）
 export type MemoryScope = "frontend" | "backend" | "infra" | "design" | "spec" | "ai" | "general";
 
+// 記憶の強弱
+export type MemoryImportance = "critical" | "normal";
+
 // メモリエントリ（フル）
 export interface MemoryEntry {
   id: string;            // ユニークID（タイムスタンプベース）
@@ -14,6 +17,7 @@ export interface MemoryEntry {
   title: string;         // 内容の要約（1行）
   project?: string;      // プロジェクト名（cwdのディレクトリ名）
   scope?: string;        // スコープ（frontend/backend/infra/design/spec/ai/general等）
+  importance?: MemoryImportance;  // 記憶の強弱（criticalは統合から除外、永続保持）
 }
 
 // メモリエントリ（軽量インデックス - 動的取得用）
@@ -25,6 +29,7 @@ export interface MemoryIndexEntry {
   tags: string[];
   project?: string;      // プロジェクト名
   scope?: string;        // スコープ
+  importance?: MemoryImportance;  // 記憶の強弱
 }
 
 // 保存パラメータ
@@ -36,6 +41,7 @@ export interface SaveParams {
   project?: string;      // プロジェクト名（自動付与）
   scope?: string;        // スコープ（Gemini自動判定 or 手動指定）
   replaceId?: string;    // 指定時: 既存エントリを置換（重複排除用）
+  importance?: MemoryImportance;  // 記憶の強弱（手動指定 or LLM自動判定）
 }
 
 // 保存結果
@@ -89,6 +95,7 @@ export interface AnalysisResult {
   reason: string;
   scope?: string;        // Geminiが判定したスコープ
   replaceId?: string;    // 重複エントリのID（置換対象）
+  importance?: MemoryImportance;    // LLMが判定した記憶の強弱
 }
 
 // 削除パラメータ
