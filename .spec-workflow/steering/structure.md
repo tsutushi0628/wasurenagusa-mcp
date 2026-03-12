@@ -18,6 +18,8 @@ wasurenagusa-mcp/
 │   │   ├── context.ts        # wasurenagusa-context CLI【SessionStart Hook用】
 │   │   ├── analyze.ts        # wasurenagusa-analyze CLI【Stop Hook用】
 │   │   ├── spec-update.ts    # wasurenagusa-spec-update CLI【cron/systemd timer用】
+│   │   ├── consolidate-worker.ts # dont統合バックグラウンドワーカー（context.tsからspawn）
+│   │   ├── rebuild.ts           # wasurenagusa-rebuild CLI【メンテナンス用】メモリデータの修復・重複除去
 │   │   └── transcript-reader.ts # トランスクリプトJSONLパーサー（テスト可能な独立モジュール）
 │   ├── tools/
 │   │   ├── index.ts          # ツール定義のエクスポート
@@ -25,7 +27,11 @@ wasurenagusa-mcp/
 │   │   ├── save.ts           # memory_save ツール【手動】オプション
 │   │   ├── search.ts         # memory_search ツール【AI自律】軽量インデックス返却
 │   │   ├── getDetail.ts      # memory_get_detail ツール【AI自律】フル詳細返却
-│   │   └── delete.ts         # memory_delete ツール【手動】エントリ削除
+│   │   ├── delete.ts         # memory_delete ツール【手動】エントリ削除
+│   │   ├── taskSubmit.ts     # task_submit ツール【自律タスク投入】
+│   │   ├── taskStatus.ts     # task_status ツール【自律タスク状態確認】
+│   │   ├── taskActionList.ts # task_action_list ツール【人間アクションリスト】
+│   │   └── projectInit.ts    # project_init ツール【プロジェクト初期設定】
 │   ├── storage/
 │   │   ├── index.ts          # ストレージインターフェース
 │   │   ├── markdown.ts       # Markdown読み書き実装
@@ -34,6 +40,7 @@ wasurenagusa-mcp/
 │   ├── analyzer/
 │   │   ├── index.ts              # Gemini連携エクスポート
 │   │   ├── gemini.ts             # Gemini API呼び出し・判定
+│   │   ├── gemini-client.ts      # Gemini API初期化ヘルパー（createGeminiModel）
 │   │   ├── prompt-loader.ts      # プロンプトファイル読み込み
 │   │   └── conversation-meta.ts  # 会話メタ情報計算（諦め検知用）
 │   ├── consolidator/
@@ -46,22 +53,43 @@ wasurenagusa-mcp/
 │   │   ├── task-queue.ts         # タスクキュー管理（優先度付き）
 │   │   ├── executor.ts           # Claude Code CLI呼び出し実行
 │   │   └── prompt-builder.ts     # Spec更新プロンプト組み立て
+│   ├── autonomous/
+│   │   ├── constants.ts          # 自律タスクデフォルト設定（maxTurns, timeoutMs等）
+│   │   ├── task-store.ts         # 自律タスクのCRUD・永続化
+│   │   ├── command-generator.ts  # Gemini命令文生成
+│   │   ├── evaluator.ts          # Gemini評価（OK/NG/human-required判定）
+│   │   ├── project-initializer.ts # プロジェクト初期設定・メタ情報管理
+│   │   ├── action-list.ts        # 人間アクションリスト管理
+│   │   ├── notifier.ts           # Slack通知（サイクルサマリー/人間エスカレーション/リトライ上限到達/デイリーサマリー）
+│   │   ├── project-scanner.ts    # ~/projects/配下のプロジェクト自動検出
+│   │   └── task-markdown.ts      # tasks.mdパーサー＆ライター
 │   └── utils/
-│       └── projectRoot.ts    # .git探索ロジック
+│       ├── projectRoot.ts    # .git探索ロジック
+│       ├── owner-profile.ts  # オーナープロフィール管理（自動配置・読み込み）
+│       └── zombie-reaper.ts  # ゾンビプロセス自動掃除（孤児化防止）+ 兄弟MCPプロセス巻き添え終了
 ├── prompts/
-│   ├── analysis.txt          # Gemini分析プロンプト（外部化）
-│   ├── duplicate-check.txt   # 重複チェックプロンプト（外部化）
-│   ├── consolidate.txt       # dont統合プロンプト（外部化）
-│   ├── spec-update.txt       # Spec更新プロンプトテンプレート
-│   └── spec-rotation.txt     # ローテーション更新プロンプトテンプレート
+│   ├── analysis.txt              # Gemini分析プロンプト（外部化）
+│   ├── duplicate-check.txt       # 重複チェックプロンプト（外部化）
+│   ├── consolidate.txt           # dont統合プロンプト（外部化）
+│   ├── spec-update.txt           # Spec更新プロンプトテンプレート
+│   ├── spec-rotation.txt         # ローテーション更新プロンプトテンプレート
+│   ├── task-command.txt          # 自律タスク命令文生成プロンプト
+│   ├── task-evaluation.txt       # 自律タスク評価プロンプト
+│   ├── project-initialize.txt    # プロジェクト初期設定プロンプト
+│   └── owner-profile-template.md # オーナープロフィールテンプレート
 ├── dist/                     # ビルド出力
 ├── docs/
 │   └── spec.md               # 完全実装仕様書
 ├── .spec-workflow/           # Spec Workflowドキュメント
-│   └── steering/
-│       ├── product.md
-│       ├── tech.md
-│       └── structure.md
+│   ├── steering/
+│   │   ├── product.md
+│   │   ├── tech.md
+│   │   └── structure.md
+│   └── specs/
+│       ├── wasurenagusa-mcp/        # コアMCP機能
+│       ├── project-scope-memory/    # project/scope拡張
+│       ├── spec-auto-update/        # Spec自動更新
+│       └── autonomous-task-execution/ # 自律タスク実行
 ├── package.json
 ├── tsconfig.json
 ├── vitest.config.ts          # Vitestテスト設定
@@ -80,6 +108,7 @@ wasurenagusa-mcp/
     ├── consolidated-dont.json  # dont統合キャッシュ（Geminiで原則化した結果）
     ├── decisions.md            # 決定事項（全プロジェクト集約）
     ├── snippets.md             # よく使うコマンド・クエリ（全プロジェクト集約）
+    ├── owner-profile.md        # オーナープロフィール（自律タスクの文脈に使用）
     └── logs/
         └── YYYY-MM-DD.md      # 日付別ログ
 
@@ -95,8 +124,15 @@ wasurenagusa-mcp/
 ~/.wasurenagusa/scheduler/
 ├── config.json           # プロジェクト一覧・スケジューラ設定
 ├── change-log.json       # 変更ログ（Stop Hookで記録）
-├── queue.json            # タスクキュー（優先度付き）
+├── queue.json            # タスクキュー（Spec更新用、優先度付き）
+├── autonomous-tasks.json # 自律タスクキュー
+├── action-list.json      # 人間アクションリスト
+├── tasks.md              # タスク投入用Markdown（人間が編集）
+├── last-session.json     # 最終セッション終了時刻（アイドル判定用）
 ├── .lock                 # 排他制御用ロックファイル
+├── projects/
+│   └── {project-name}/
+│       └── meta.json     # プロジェクトメタ情報（フェーズ・品質方針等）
 └── logs/
     └── YYYY-MM-DD.json   # 日別実行ログ
 ```
@@ -119,7 +155,7 @@ wasurenagusa-mcp/
 
 ### MCPツール名
 - `snake_case`（MCP規約に従う）
-- 例: `memory_save`, `memory_search`, `memory_get_detail`, `memory_get_context`, `memory_delete`
+- 例: `memory_save`, `memory_search`, `memory_get_detail`, `memory_get_context`, `memory_delete`, `task_submit`, `task_status`, `task_action_list`, `project_init`
 
 ## Import Patterns
 
@@ -202,6 +238,9 @@ main().catch(console.error);
 ### ストレージクラス構成（storage/markdown.ts）
 ```typescript
 // 1. インポート
+import { parseMarkdown } from "./parser.js";
+import { formatEntry, getFileHeader } from "./formatter.js";
+
 // 2. クラス定義
 export class MarkdownStorage {
   // プライベートフィールド
@@ -211,17 +250,24 @@ export class MarkdownStorage {
   constructor(projectRoot: string) { ... }
 
   // パブリックメソッド（CRUD操作）
+  async initialize(): Promise<void> { ... }
   async save(params: SaveParams): Promise<SaveResult> { ... }
   async search(params: SearchParams): Promise<SearchResult> { ... }
   async getDetail(params: GetDetailParams): Promise<GetDetailResult> { ... }
-  async getContext(): Promise<ContextResult> { ... }
+  async delete(params: DeleteParams): Promise<DeleteResult> { ... }
+  async getContext(currentProject?: string): Promise<ContextResult> { ... }
+  async readDontEntries(currentProject?: string): Promise<MemoryEntry[]> { ... }
 
   // プライベートヘルパー
+  private generateId(): string { ... }
+  private async replaceEntry(category, targetId, newEntry): Promise<boolean> { ... }
+  private async readFileIfExists(filePath): Promise<string> { ... }
   private async readCategory(category: MemoryCategory): Promise<MemoryEntry[]> { ... }
-  private formatEntry(entry: MemoryEntry): string { ... }
-  private parseMarkdown(content: string, category: MemoryCategory): MemoryEntry[] { ... }
+  private getFilePath(category: MemoryCategory, timestamp: string): string { ... }
 }
 ```
+
+`parseMarkdown`（Markdownパーサー）と`formatEntry`/`getFileHeader`（Markdownフォーマッター）は独立した関数として`parser.ts`・`formatter.ts`に分離されている。
 
 ## Code Organization Principles
 
@@ -240,7 +286,7 @@ export class MarkdownStorage {
        ↓                              ↓
    tools/*.ts (ツール)           scheduler/*.ts (スケジューラ)
        ↓                              ↓
-   storage/markdown.ts (ストレージ)    ↓
+   storage/markdown.ts (ストレージ)  autonomous/*.ts (自律タスク)
        ↓                              ↓
    analyzer/gemini.ts (分析)          ↓
        ↓                              ↓
@@ -260,6 +306,11 @@ export class MarkdownStorage {
 **バッチ実行（cron/systemd timerで呼び出し）**
 - `wasurenagusa-spec-update` - タスクキュー確認 → Claude Code CLI実行 or ping
 
+### CLIスクリプト（メンテナンス用）
+
+**手動実行**
+- `wasurenagusa-rebuild` - メモリデータの修復・重複除去（破損したMarkdownファイルの再構築）
+
 ### Public API（MCPツール）
 
 **AIが自律呼び出し**
@@ -271,6 +322,12 @@ export class MarkdownStorage {
 - `memory_save` - 明示的な保存
 - `memory_delete` - エントリ削除（ID指定、複数一括可）
 
+**自律タスク管理**
+- `task_submit` - タスク投入（WHY/WHAT/DONE/PROJECT）
+- `task_status` - タスク状態サマリ取得
+- `task_action_list` - 人間アクションリスト管理
+- `project_init` - プロジェクト初期設定
+
 ### Internal（外部から直接呼ばない）
 - `MarkdownStorage` クラス
 - `GeminiAnalyzer` クラス
@@ -279,10 +336,21 @@ export class MarkdownStorage {
 - `formatEntry` / `getFileHeader` 関数（Markdownフォーマッター）
 - `readTranscript` 関数（トランスクリプトJSONLパーサー）
 - `findProjectRoot` 関数
+- `createGeminiModel` 関数（Gemini API初期化ヘルパー）
 - `ChangeLogger` クラス（変更ログ記録）
 - `TaskQueue` クラス（タスクキュー管理）
-- `SpecUpdateExecutor` クラス（Claude Code CLI実行）
+- `Executor` クラス（Claude Code CLI実行）
 - `PromptBuilder` クラス（プロンプト組み立て）
+- `TaskStore` クラス（自律タスクのCRUD・永続化）
+- `CommandGenerator` クラス（自律タスク命令文生成）
+- `TaskEvaluator` クラス（自律タスク評価）
+- `ProjectInitializer` クラス（プロジェクト初期設定）
+- `ActionList` クラス（人間アクションリスト管理）
+- `SlackNotifier` クラス（Slack通知）
+- `ProjectScanner` クラス（プロジェクト自動検出）
+- `TaskMarkdownAdapter` クラス（tasks.mdパーサー＆ライター）
+- `ensureOwnerProfileExists` / `loadOwnerProfile` 関数（オーナープロフィール管理）
+- `startZombieReaper` 関数（ゾンビプロセス自動掃除：stdin close検知・親プロセス生存確認・孤児プロセスkill・兄弟MCPプロセス巻き添え終了）
 
 ## Code Size Guidelines
 

@@ -19,6 +19,10 @@ dist/
 .serena/
 .mcp.json
 
-# Spec workflow approvals (transient state)
+# Spec workflow（specs/ と steering/ のみ追跡）
 .spec-workflow/approvals/
+.spec-workflow/templates/
+.spec-workflow/user-templates/
+.spec-workflow/archive/
 .spec-workflow/.DS_Store
+.spec-workflow/**/Implementation Logs/

@@ -27,7 +27,7 @@ Wasurenagusa MCPに「Spec自動更新」機能を追加する。既存のHooks�
 - **`src/config.ts`**: 設定パターンを踏襲（Scheduler固有設定を追加）
 
 ### Integration Points
-- **`src/cli/analyze.ts`**: Stop Hook実行時に変更ファイルログ記録を追加（main関数の末尾）
+- **`src/cli/analyze.ts`**: Stop Hook実行時に変更ファイルログ記録を追加（main関数の末尾）。さらに最終セッション終了時刻を`last-session.json`に記録（スケジューラのアイドル判定用）
 - **`package.json`**: `bin` フィールドに `wasurenagusa-spec-update` を追加
 
 ## Architecture
@@ -99,7 +99,7 @@ graph TD
 - **File:** `src/scheduler/task-queue.ts`
 - **Interfaces:**
   ```typescript
-  type TaskType = "change-based" | "rotation" | "ping";
+  type TaskType = "change-based" | "rotation" | "ping" | "autonomous";
   type TaskStatus = "pending" | "in-progress" | "completed" | "failed";
 
   interface SchedulerTask {
@@ -120,6 +120,7 @@ graph TD
     constructor(schedulerDir: string);
     async buildQueue(changeEntries: ChangeLogEntry[], projectConfigs: ProjectConfig[]): Promise<void>;
     async dequeue(): Promise<SchedulerTask | null>;
+    async dequeueAll(): Promise<SchedulerTask[]>;
     async markComplete(taskId: string): Promise<void>;
     async markFailed(taskId: string, error: string): Promise<void>;
     async getStatus(): Promise<{ pending: number; completed: number; failed: number }>;
@@ -169,7 +170,7 @@ graph TD
 
 ### Component 5: SchedulerConfig
 - **Purpose:** スケジューラ設定の管理（プロジェクト一覧、パス設定）
-- **File:** `src/scheduler/index.ts`（config部分）
+- **File:** `src/types.ts`（型定義部分）
 - **Interfaces:**
   ```typescript
   interface ProjectConfig {
@@ -184,6 +185,12 @@ graph TD
     cycleMinutes: number;     // デフォルト: 305（5h5m）
     taskTimeoutMs: number;    // デフォルト: 600000（10分）
     pingTimeoutMs: number;    // デフォルト: 30000（30秒）
+    rotationThresholdDays: number; // デフォルト: 7（ローテーション更新の閾値日数）
+    idleThresholdMinutes: number;  // デフォルト: 150（ユーザーアイドル判定の閾値分）
+    maxConcurrentTasks: number;    // デフォルト: 3（タスク並列実行上限）
+    activeHourStart?: number;      // 廃止（後方互換のためoptionalで残置）
+    activeHourEnd?: number;        // 廃止（後方互換のためoptionalで残置）
+    subProjectParents?: string[];  // サブプロジェクト持ち親ディレクトリ名（例: ["bengo4-labo"]）
   }
   ```
 
@@ -191,49 +198,44 @@ graph TD
 - **Purpose:** cronから呼び出されるCLIエントリポイント
 - **File:** `src/cli/spec-update.ts`
 - **Subcommands:**
-  - `--run`: タスクキュービルド → 1タスク実行（デフォルト動作）
+  - `--run`: 全タスクを並行実行（デフォルト動作）。自律タスク・Spec更新タスクをそれぞれ全件dequeueし、`maxConcurrentTasks`（デフォルト3）で並列数を制限して実行
   - `--status`: キュー状態・最終実行結果の表示
   - `--setup`: cron/launchd設定の生成（対話なし、設定ファイル出力）
-- **Dependencies:** 全Schedulerコンポーネント
-- **Reuses:** `findProjectRoot()`
+- **Dependencies:** 全Schedulerコンポーネント + autonomous/モジュール群
 
 ## Data Models
 
 ### ChangeLog (`~/.wasurenagusa/scheduler/change-log.json`)
 ```json
-{
-  "entries": [
-    {
-      "timestamp": "2026-02-14T14:30:00+09:00",
-      "project": "my-project",
-      "projectPath": "/Users/dev/projects/my-project",
-      "changedFiles": ["src/api/handler.ts", "src/models/user.ts"],
-      "specPaths": {
-        "steering": "/Users/dev/projects/my-project/.spec-workflow/steering",
-        "specs": ["/Users/dev/projects/my-project/.spec-workflow/specs/feature-a"]
-      }
+[
+  {
+    "timestamp": "2026-02-14T14:30:00+09:00",
+    "project": "my-project",
+    "projectPath": "/Users/dev/projects/my-project",
+    "changedFiles": ["src/api/handler.ts", "src/models/user.ts"],
+    "specPaths": {
+      "steering": "/Users/dev/projects/my-project/.spec-workflow/steering",
+      "specs": ["/Users/dev/projects/my-project/.spec-workflow/specs/feature-a"]
     }
-  ]
-}
+  }
+]
 ```
 
 ### TaskQueue (`~/.wasurenagusa/scheduler/queue.json`)
 ```json
-{
-  "tasks": [
-    {
-      "id": "550e8400-e29b-41d4-a716-446655440000",
-      "type": "change-based",
-      "priority": 1,
-      "project": "my-project",
-      "projectPath": "/Users/dev/projects/my-project",
-      "specPaths": { "steering": "...", "specs": ["..."] },
-      "changedFiles": ["src/api/handler.ts"],
-      "status": "pending",
-      "createdAt": "2026-02-14T03:00:00+09:00"
-    }
-  ]
-}
+[
+  {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "type": "change-based",
+    "priority": 1,
+    "project": "my-project",
+    "projectPath": "/Users/dev/projects/my-project",
+    "specPaths": { "steering": "...", "specs": ["..."] },
+    "changedFiles": ["src/api/handler.ts"],
+    "status": "pending",
+    "createdAt": "2026-02-14T03:00:00+09:00"
+  }
+]
 ```
 
 ### SchedulerConfig (`~/.wasurenagusa/scheduler/config.json`)
@@ -258,19 +260,17 @@ graph TD
 
 ### ExecutionLog (`~/.wasurenagusa/scheduler/logs/YYYY-MM-DD.json`)
 ```json
-{
-  "executions": [
-    {
-      "timestamp": "2026-02-14T03:00:00+09:00",
-      "taskId": "550e8400-...",
-      "type": "change-based",
-      "project": "my-project",
-      "exitCode": 0,
-      "durationMs": 45000,
-      "summary": "Updated architecture.md and tech.md based on API handler changes"
-    }
-  ]
-}
+[
+  {
+    "timestamp": "2026-02-14T03:00:00+09:00",
+    "taskId": "550e8400-...",
+    "type": "change-based",
+    "project": "my-project",
+    "exitCode": 0,
+    "durationMs": 45000,
+    "summary": "Updated architecture.md and tech.md based on API handler changes"
+  }
+]
 ```
 
 ## Error Handling

@@ -95,7 +95,7 @@ wasurenagusa-mcpに自律型AIタスク実行システムを追加する。人�
 ### 1. TaskStore (`src/autonomous/task-store.ts`)
 - **Purpose:** 自律タスクのCRUD操作と永続化
 - **Interfaces:**
-  - `submit(params: TaskSubmitParams): Promise<AutonomousTask>` — タスク投入（重複チェック付き）
+  - `submit(params: TaskSubmitParams, projectPath: string): Promise<AutonomousTask>` — タスク投入（重複チェック付き）
   - `dequeue(): Promise<AutonomousTask | null>` — 最優先タスクを取得（status→in-progress）
   - `markCompleted(taskId: string): Promise<void>`
   - `markFailed(taskId: string, error: string): Promise<void>`
@@ -105,6 +105,8 @@ wasurenagusa-mcpに自律型AIタスク実行システムを追加する。人�
   - `getStatus(): Promise<TaskStatusResponse>`
   - `getHumanRequiredTasks(): Promise<AutonomousTask[]>`
   - `addEvaluation(taskId: string, entry: EvaluationEntry): Promise<void>`
+  - `setGeneratedCommand(taskId: string, command: string): Promise<void>` — 生成された命令文を保存
+  - `recoverInProgress(): Promise<number>` — 起動時にstatus=in-progressのタスクをfailedに復旧、復旧件数を返却
 - **Dependencies:** `fs/promises`（JSON読み書き）、`types.ts`
 - **Storage:** `~/.wasurenagusa/scheduler/autonomous-tasks.json`
 
@@ -127,8 +129,9 @@ wasurenagusa-mcpに自律型AIタスク実行システムを追加する。人�
 - **Purpose:** プロジェクト初期設定の質問生成と結果永続化
 - **Interfaces:**
   - `generateQuestions(projectName: string, initialInfo?: string): Promise<ProjectInitOutput>` — Geminiで質問リスト生成
-  - `saveProjectMeta(projectName: string, answers: Record<string, string>): Promise<ProjectMeta>` — 回答をProjectMetaに変換して保存
+  - `saveProjectMeta(projectName: string, projectPath: string, answers: Record<string, string>): Promise<ProjectMeta>` — 回答をProjectMetaに変換して保存
   - `loadProjectMeta(projectName: string): Promise<ProjectMeta | null>` — メタ情報読み込み
+  - `loadProjectMetaOrDefault(projectName: string, projectPath: string): Promise<ProjectMeta>` — メタ情報読み込み（未設定時はデフォルト値を返却）
   - `updateProjectMeta(projectName: string, updates: Partial<ProjectMeta>): Promise<ProjectMeta>` — PDCA更新
 - **Dependencies:** `analyzer/prompt-loader.ts`、`analyzer/gemini-client.ts`、`fs/promises`
 - **Prompt:** `prompts/project-initialize.txt`
@@ -143,14 +146,49 @@ wasurenagusa-mcpに自律型AIタスク実行システムを追加する。人�
 - **Dependencies:** `fs/promises`
 - **Storage:** `~/.wasurenagusa/scheduler/action-list.json`
 
-### 6. Gemini Client Helper (`src/analyzer/gemini-client.ts`) 【新規】
+### 6. SlackNotifier (`src/autonomous/notifier.ts`)
+- **Purpose:** サイクルサマリー通知・人間エスカレーション時のSlack通知
+- **Interfaces:**
+  - `notifyCycleSummary(summary: CycleSummary): Promise<void>` — 1サイクルの全タスク結果を1通に集約して通知
+  - `notifyHumanRequired(project, taskWhat, reason, suggestion?): Promise<void>` — 即時通知（人間判断が必要）
+  - `notifyRetryLimitReached(project, taskWhat, reason, retryCount, maxRetry): Promise<void>` — 即時通知（リトライ上限到達）
+  - `notifyDailySummary(summary: DailySummary): Promise<void>` — 日次レポート
+- **Dependencies:** `config.ts`（slackWebhookUrl）
+- **Note:** `SLACK_WEBHOOK_URL`未設定時はスキップ（オプション機能）。個別タスクの完了/失敗通知は廃止し、`notifyCycleSummary`でサイクル単位の統合通知に統一
+
+### 7. ProjectScanner (`src/autonomous/project-scanner.ts`)
+- **Purpose:** ~/projects/配下のプロジェクトを自動検出
+- **Interfaces:**
+  - `scanProjects(): Promise<ProjectEntry[]>` — ディレクトリ走査でプロジェクト一覧を返却
+- **Dependencies:** `fs/promises`、`types.ts`（ProjectEntry）
+- **Note:** subProjectParents設定でサブプロジェクト持ちの親ディレクトリにも対応
+
+### 8. TaskMarkdownAdapter (`src/autonomous/task-markdown.ts`)
+- **Purpose:** tasks.md形式でのタスク投入・管理（人間がMarkdownファイルを直接編集してタスク投入可能）
+- **Interfaces:**
+  - `readTasks(): Promise<MarkdownTask[]>` — tasks.mdから全タスクをパース
+  - `readPendingTasks(): Promise<MarkdownTask[]>` — pendingタスクだけ抽出（スケジューラー用）
+  - `updateStatus(what: string, project: string, status: AutonomousTaskStatus, extra?: { error?: string; reason?: string }): Promise<boolean>` — ステータス書き戻し
+  - `static toSubmitParams(task: MarkdownTask): TaskSubmitParams` — MarkdownTaskをTaskSubmitParams形式に変換（TaskStore連携用）
+  - `updateProjectList(projects: ProjectEntry[]): Promise<boolean>` — tasks.mdのプロジェクト一覧コメントブロックを動的更新
+- **Dependencies:** `fs/promises`、`types.ts`
+
+### 9. Owner Profile (`src/utils/owner-profile.ts`)
+- **Purpose:** オーナー（開発者）のプロフィール管理。自律タスク実行時の命令文・評価に文脈として渡される
+- **Interfaces:**
+  - `ensureOwnerProfileExists(memoryPath: string): Promise<void>` — テンプレート自動配置
+  - `loadOwnerProfile(memoryPath: string): Promise<string | null>` — プロフィール読み込み
+- **Dependencies:** `fs/promises`、`analyzer/prompt-loader.ts`
+- **Template:** `prompts/owner-profile-template.md`
+
+### 10. Gemini Client Helper (`src/analyzer/gemini-client.ts`) 【新規】
 - **Purpose:** Gemini API初期化の共通化（DRY原則）
 - **Interfaces:**
   - `createGeminiModel(): GenerativeModel` — APIキー取得+モデル生成
 - **Dependencies:** `@google/generative-ai`、`config.ts`
 - **Reuses:** 既存`src/analyzer/gemini.ts`の初期化ロジックを抽出
 
-### 7. MCPツール（4つ新規）
+### 11. MCPツール（4つ新規）
 
 **task_submit** (`src/tools/taskSubmit.ts`)
 - MCP Tool定義 + `handleTaskSubmit(args, projectRoot)` ハンドラー
@@ -169,10 +207,14 @@ wasurenagusa-mcpに自律型AIタスク実行システムを追加する。人�
 - → `ProjectInitializer.generateQuestions()` or `saveProjectMeta()`に委譲
 - フラット方式: 1回の呼び出しで全パラメータを受け付ける（ステートレス）
 
-### 8. スケジューラー拡張（`cli/spec-update.ts` 改修）
+### 12. スケジューラー拡張（`cli/spec-update.ts` 改修）
 - 既存のrunCommand()に自律タスクキュー確認を追加
-- 処理順序: 自律タスク（priority=0）→ change-based（priority=1）→ rotation（priority=2）→ ping
-- 自律タスクのオーケストレーション: dequeue → CommandGenerator → Executor → TaskEvaluator → 結果反映
+- 全タスクを並列数制限付き実行: 自律タスク全件 + Spec更新タスク全件をdequeueし、`maxConcurrentTasks`（デフォルト3）で並列数を制限して実行。タスクなしの場合のみpingを送信
+- タスクバリデーション: 実行前にwhy/what/done/projectの空チェックとテンプレート文面検知、projectPathの存在確認を実施。不正なタスクはfailedとしてスキップ
+- 自律タスクのオーケストレーション: dequeue → バリデーション → CommandGenerator → Executor → TaskEvaluator → 結果反映
+- アイドル判定: `last-session.json`の最終セッション終了時刻から`idleThresholdMinutes`分以上経過していない場合はタスク実行をスキップしpingのみ送信
+- tasks.md同期: `TaskMarkdownAdapter`でtasks.mdのpendingタスクをTaskStoreに自動取り込み。タスク完了/失敗時にtasks.mdのステータスも更新
+- プロジェクトスキャン: `ProjectScanner`で~/projects/配下のプロジェクトを自動検出し、tasks.mdのプロジェクトリストを更新
 
 ## Data Models
 
@@ -305,14 +347,52 @@ export interface ProjectInitOutput {
 export interface CommandGenerationInput {
   task: AutonomousTask;
   projectMeta: ProjectMeta;
+  ownerProfile?: string;          // オーナープロフィール（自動読み込み）
 }
 
 export interface EvaluationInput {
   task: AutonomousTask;
   projectMeta: ProjectMeta;
+  ownerProfile?: string;          // オーナープロフィール（自動読み込み）
   executionOutput: string;        // stdout（上限50,000文字）
   executionExitCode: number;
   executionDurationMs: number;
+}
+
+export interface ProjectEntry {
+  name: string;        // プロジェクト名（例: "agent-teams-labo" or "bengo4-labo/ai-motoe"）
+  path: string;        // 絶対パス
+  type: "standalone" | "subproject";
+}
+```
+
+### CycleTaskResult / CycleSummary (`src/autonomous/notifier.ts`)
+```typescript
+export interface CycleTaskResult {
+  project: string;
+  taskType: "autonomous" | "change-based" | "rotation";
+  description: string;       // autonomous: task.what, spec: "spec更新"
+  summary?: string;          // 成功時のサマリー（Spec更新のstdout先頭等）
+  exitCode: number;
+  durationMs: number;
+  failReason?: string;       // 失敗時のみ
+}
+
+export interface CycleSummary {
+  results: CycleTaskResult[];
+  totalDurationMs: number;
+  completedAt: string;        // ISO 8601
+}
+```
+
+### DailySummary (`src/autonomous/notifier.ts`)
+```typescript
+export interface DailySummary {
+  completed: number;
+  failed: number;
+  humanRequired: number;
+  pending: number;
+  date: string;               // "YYYY-MM-DD"
 }
 ```
 
@@ -326,13 +406,19 @@ TaskStore.submit()
   │ UUID付与、重複チェック、status=pending、priority=0
   │ → autonomous-tasks.json に永続化
   ▼
-[スケジューラー] cli/spec-update.ts (setIntervalループ)
-  │ 1. TaskStore.dequeue() で自律タスクを確認 (priority=0)
-  │ 2. なければ既存TaskQueue.dequeue() (priority=1,2)
-  │ 3. なければping
+[スケジューラー] cli/spec-update.ts (cron実行)
+  │ 1. TaskStore.dequeue() で自律タスクを全件取得
+  │ 2. TaskQueue.dequeue() でSpec更新タスクを全件取得
+  │ 3. 全タスクをmaxConcurrentTasks制限付きで並列実行
+  │ 4. タスクなしの場合のみping
   ▼
-ProjectInitializer.loadProjectMeta(task.project)
-  │ meta.json読み込み
+validateAutonomousTask(task)
+  │ why/what/done/projectの空チェック、テンプレート文面検知、projectPath存在確認
+  ├── invalid → TaskStore.markFailed(taskId, reason) → スキップ
+  └── valid ↓
+  ▼
+ProjectInitializer.loadProjectMetaOrDefault(task.project, task.projectPath)
+  │ meta.json読み込み（未設定時はデフォルト値）
   ▼
 CommandGenerator.generate({ task, projectMeta })
   │ loadPrompt("task-command.txt")
@@ -343,15 +429,15 @@ CommandGenerator.generate({ task, projectMeta })
 // maxTurns: 100, timeoutMs: 1800000 (30min)
 // allowedTools: ["Edit","Write","Read","Glob","Grep","Bash","TodoWrite"]
 Executor.runSpecUpdate(command, task.projectPath, {
-  maxTurns: task.maxTurns ?? AUTONOMOUS_DEFAULT_OPTIONS.maxTurns,
-  allowedTools: task.allowedTools ?? AUTONOMOUS_DEFAULT_OPTIONS.allowedTools,
-  timeoutMs: task.timeoutMs ?? AUTONOMOUS_DEFAULT_OPTIONS.timeoutMs
+  maxTurns: AUTONOMOUS_DEFAULT_OPTIONS.maxTurns,
+  allowedTools: AUTONOMOUS_DEFAULT_OPTIONS.allowedTools,
+  timeoutMs: AUTONOMOUS_DEFAULT_OPTIONS.timeoutMs
 })
   │ claude -p "{命令文}" でClaude Code実行
   │ stdout/stderr/exitCode/durationMs を取得
   ▼
 [exitCode判定]
-  ├── exitCode !== 0 → TaskStore.markFailed(taskId, stderr)
+  ├── exitCode !== 0 → TaskStore.markFailed(taskId, "Exit code: {exitCode}")
   │
   └── exitCode === 0 →
       ▼
@@ -395,7 +481,7 @@ TaskStore.resolveAction(taskId, action)
    - **User Impact:** task_statusで確認可能
 
 3. **Claude CLI exitCode !== 0**
-   - **Handling:** タスクをfailedにし、stderrをエラー理由として記録
+   - **Handling:** タスクをfailedにし、「Exit code: {exitCode}」をエラー理由として記録
    - **User Impact:** task_statusで確認可能
 
 4. **ProjectMeta未設定状態でタスク実行**
@@ -431,6 +517,9 @@ TaskStore.resolveAction(taskId, action)
 | `TaskEvaluator` | `evaluator.test.ts` | 同上 |
 | `ProjectInitializer` | `project-initializer.test.ts` | 同上 + `mkdtemp` |
 | `ActionList` | `action-list.test.ts` | `mkdtemp` |
+| `SlackNotifier` | `notifier.test.ts` | `vi.stubGlobal("fetch")`でfetchモック + `vi.mock("../config.js")`でconfigモック |
+| `ProjectScanner` | `project-scanner.test.ts` | `mkdtemp` |
+| `TaskMarkdownAdapter` | `task-markdown.test.ts` | `mkdtemp` |
 
 #### Gemini APIモックパターン（共通）
 `createGeminiModel()`ヘルパーをモックすることで、`@google/generative-ai`の内部構造に依存しない。

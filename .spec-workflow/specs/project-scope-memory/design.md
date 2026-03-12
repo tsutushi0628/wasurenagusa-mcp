@@ -36,7 +36,7 @@
 
 - **MCPツールスキーマ**: memory_save, memory_search のinputSchemaにproject/scopeパラメータ追加
 - **Markdown形式**: エントリのメタデータ行にproject/scope追加。後方互換性を維持
-- **SessionStart CLI**: 出力形式をdont全件+configタイトル一覧に変更
+- **SessionStart CLI**: 出力形式をdont全件+config全文（タイトル+内容）に変更
 - **Stop Hook CLI**: Gemini分析結果にscopeを追加し、cwdからprojectを自動取得して保存
 
 ## Architecture
@@ -110,7 +110,7 @@ src/config.ts ───────────────── getGlobalMemor
 - **変更箇所:**
   - `save()`: SaveParamsからproject/scopeを受け取りMemoryEntryに設定
   - `search()`: project/scopeフィルタリング追加
-  - `getContext()`: グローバルパス廃止、dont全件+configタイトル一覧+projectフィルタ
+  - `getContext()`: グローバルパス廃止、dont全件+config全文+projectフィルタ
 
 #### save()の変更
 
@@ -161,29 +161,25 @@ if (params.scope) {
 async getContext(currentProject?: string): Promise<ContextResult> {
   await this.initialize();
 
-  // configエントリを読み込み、projectフィルタ後タイトル一覧のみ返却
+  // configエントリ: projectフィルタ後にタイトル+内容を返却
   const configEntries = await this.readCategory("config");
-  const filteredConfig = configEntries.filter(e =>
-    !e.project || e.project === currentProject
-  );
-  const configTitles = filteredConfig
-    .map(e => `- ${e.title} (id: ${e.id})`)
-    .join("\n");
+  const filteredConfig = currentProject
+    ? configEntries.filter(e => !e.project || e.project === currentProject)
+    : configEntries;
+  const configFormatted = filteredConfig
+    .map(e => `### ${e.title}\n${e.content}`)
+    .join("\n\n");
 
-  // dontは全件の内容を返却（projectフィルタあり）
-  const dontContent = await this.readFileIfExists(
-    join(this.memoryPath, "dont.md")
-  );
-  // parseして、projectフィルタ後に再フォーマット
-  const dontEntries = parseMarkdown(dontContent, "dont");
-  const filteredDont = dontEntries.filter(e =>
-    !e.project || e.project === currentProject
-  );
+  // dontエントリ: projectフィルタ後に全件の内容を返却
+  const dontEntries = await this.readCategory("dont");
+  const filteredDont = currentProject
+    ? dontEntries.filter(e => !e.project || e.project === currentProject)
+    : dontEntries;
   const dontFormatted = filteredDont.map(e => formatEntry(e)).join("");
 
   return {
-    config: configTitles || "（設定情報なし）",
-    dont: dontFormatted || "（ルールなし）"
+    config: configFormatted || "（設定情報なし）",
+    dont: dontFormatted || "（ルールなし）",
   };
 }
 ```
@@ -205,18 +201,20 @@ async getContext(currentProject?: string): Promise<ContextResult> {
 
 ### C7: memory_get_contextツールの修正（src/tools/getContext.ts）
 
-- **Purpose:** 出力形式の変更（dont全件+configタイトル一覧）
+- **Purpose:** 出力形式の変更（dont全件+config全文）
 - **変更箇所:**
   - `handleMemoryGetContext()` でcurrentProject（projectRoot baseから取得）をgetContext()に渡す
 
 ### C8: SessionStart CLI修正（src/cli/context.ts）
 
-- **Purpose:** 出力をdont全件+configタイトル一覧に変更、グローバルパス廃止
+- **Purpose:** 出力をconfig全文+dont全件+オーナープロフィールに変更、グローバルパス廃止
 - **変更箇所:** `main()` 関数全体
 - **変更内容:**
   - グローバルパス（`~/.wasurenagusa/global/`）の読み込みを削除
-  - configはparseMarkdownでパースし、projectフィルタ後にタイトル一覧のみ出力
-  - dontはprojectフィルタ後に全件出力
+  - configはgetContext()経由でprojectフィルタ後にタイトル+内容を全文出力
+  - dontはprojectフィルタ後に統合版（フォールバックで全件）出力
+  - オーナープロフィール（owner-profile.md）を注入
+  - 能動検索指示（memory_search利用ルール）を末尾に追加
   - 現在のprojectはcwdのベースディレクトリ名から取得
 
 ### C9: Stop Hook CLI修正（src/cli/analyze.ts）
@@ -368,12 +366,12 @@ export type MemoryScope = "frontend" | "backend" | "infra" | "design" | "spec" |
 - `search()`: project/scopeフィルタが正しく動作すること
   - projectフィルタ: 指定プロジェクト + project未指定エントリのみ返却
   - scopeフィルタ: 指定scope + general + scope未指定エントリのみ返却
-- `getContext()`: dont全件 + configタイトル一覧が返却されること
+- `getContext()`: dont全件 + config全文（タイトル+内容）が返却されること
 
 ### Integration Testing
 
 - Stop Hook → Gemini分析 → project/scope付きで保存 → search で取得できること
-- SessionStart → dont全件 + configタイトル一覧が出力されること
+- SessionStart → dont全件 + config全文（タイトル+内容）が出力されること
 
 ### End-to-End Testing
 

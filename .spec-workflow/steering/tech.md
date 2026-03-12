@@ -46,17 +46,21 @@ MCPサーバー（Model Context Protocol Server）- Claude Codeの機能を拡�
 │  │  【自動】wasurenagusa-context ← SessionStart Hook       │   │
 │  │  【自動】wasurenagusa-analyze ← Stop Hook               │   │
 │  ├─────────────────────────────────────────────────────────┤   │
-│  │   MCP Tool Handlers（5ツール）                            │   │
+│  │   MCP Tool Handlers（9ツール）                            │   │
 │  │  【AI自律】memory_get_context← コンテキスト取得          │   │
 │  │  【手動】memory_save       ← オプション                  │   │
 │  │  【AI自律】memory_search   ← AIが必要時に呼び出し        │   │
 │  │  【AI自律】memory_get_detail← AIが必要時に呼び出し       │   │
 │  │  【手動】memory_delete     ← エントリ削除                │   │
+│  │  【手動】task_submit       ← 自律タスク投入              │   │
+│  │  【手動】task_status       ← タスク状態確認              │   │
+│  │  【手動】task_action_list  ← 人間アクションリスト        │   │
+│  │  【手動】project_init      ← プロジェクト初期設定        │   │
 │  └─────────────────────────────────────────────────────────┘   │
 │                              │                                 │
 │  ┌───────────────────────────▼─────────────────────────────┐   │
 │  │   Storage Layer (Markdown Files)                        │   │
-│  │   .wasurenagusa/ + ~/.wasurenagusa/global/              │   │
+│  │   .wasurenagusa/ (シンボリックリンク集約)                │   │
 │  └───────────────────────────┬─────────────────────────────┘   │
 │                              │                                 │
 │  ┌───────────────────────────▼─────────────────────────────┐   │
@@ -70,7 +74,7 @@ MCPサーバー（Model Context Protocol Server）- Claude Codeの機能を拡�
 ```
 [セッション開始]
     ↓ SessionStart Hook（type: "command"）
-wasurenagusa-context → dont全件 + configタイトル一覧を標準出力 → 最小限のコンテキスト注入
+wasurenagusa-context → config全文 + dont（統合版） + オーナープロフィール + 能動検索指示を標準出力 → コンテキスト注入
     ↓
 [会話中: AIが「あ、この話はbackendだな」と判断]
     ↓ AIが自律的にMCPツール呼び出し
@@ -104,6 +108,7 @@ wasurenagusa-spec-update
 5. **Analyzer Layer**: Gemini APIによる自動判定・リトライ検出
 6. **Consolidator Layer**: dontエントリのGemini統合（多数のdont→少数の行動原則に集約）
 7. **Scheduler Layer**: cron/systemd timerによるバッチ実行（Spec自動更新・Keep-Alive）
+8. **Autonomous Layer**: 自律タスク実行（タスクストア、命令文生成、評価者、プロジェクト初期設定、Slack通知）
 
 ### Data Storage
 
@@ -114,13 +119,15 @@ wasurenagusa-spec-update
 **ストレージ構造**:
 ```
 共通管理リポジトリ（例: firebase-kit）
-└── .wasurenagusa/          # 実体はここに1つだけ
-    ├── config.md           # 設定情報（全プロジェクト集約）
-    ├── dont.md             # やってはいけないこと（全プロジェクト集約）
-    ├── decisions.md        # 決定事項（全プロジェクト集約）
-    ├── snippets.md         # よく使うコマンド・クエリ（全プロジェクト集約）
+└── .wasurenagusa/              # 実体はここに1つだけ
+    ├── config.md               # 設定情報（全プロジェクト集約）
+    ├── dont.md                 # やってはいけないこと（全プロジェクト集約）
+    ├── consolidated-dont.json  # dont統合キャッシュ（Geminiで原則化した結果）
+    ├── decisions.md            # 決定事項（全プロジェクト集約）
+    ├── snippets.md             # よく使うコマンド・クエリ（全プロジェクト集約）
+    ├── owner-profile.md        # オーナープロフィール（自律タスクの文脈に使用）
     └── logs/
-        └── YYYY-MM-DD.md  # 日付別ログ
+        └── YYYY-MM-DD.md      # 日付別ログ
 
 各プロジェクト/
 └── .wasurenagusa -> ../firebase-kit/.wasurenagusa  # シンボリックリンク
@@ -135,9 +142,10 @@ wasurenagusa-spec-update
 |--------|-----------|---------|------|
 | **Claude Code** | MCP over STDIO | なし（ローカル） | ツール呼び出し |
 | **Claude Code Hooks** | SessionStart/Stop (type: "command") | なし（ローカル） | 自律動作トリガー |
-| **Claude Code CLI** | `claude -p` (ヘッドレス) | なし（ローカル） | Spec自動更新タスク実行・Keep-Alive |
+| **Claude Code CLI** | `claude -p` (ヘッドレス) | なし（ローカル） | Spec自動更新・自律タスク実行・Keep-Alive |
 | **Google Gemini API** | HTTPS/REST | API Key | 会話分析・自動判定・リトライ検出 |
 | **OS Scheduler** | cron (Linux) / launchd (macOS) | なし | 5h5mサイクル実行 |
+| **Slack Webhook** | HTTPS POST | Webhook URL | サイクルサマリー/人間エスカレーション/リトライ上限到達/デイリーサマリーの通知 |
 
 ## Development Environment
 
@@ -186,6 +194,10 @@ claude mcp add wasurenagusa node /path/to/wasurenagusa-mcp/dist/index.js
 | **変更ログ記録（Stop Hook追加分）** | < 500ms | git diff + JSON書き込み |
 | **タスクキュー操作** | < 100ms | JSONファイル読み書き |
 | **Spec更新タスクタイムアウト** | 600,000ms (10分) | Claude CLI実行の上限 |
+| **自律タスクタイムアウト** | 1,800,000ms (30分) | 人間投入タスクは長め |
+| **タスク投入（task_submit）** | < 100ms | JSONファイル書き込み |
+| **命令文生成（Gemini）** | < 5s | Gemini API呼び出し |
+| **評価者判定（Gemini）** | < 5s | Gemini API呼び出し |
 | **pingタイムアウト** | 30,000ms (30秒) | Keep-Alive最小リクエスト |
 
 ### Compatibility Requirements
@@ -199,7 +211,7 @@ claude mcp add wasurenagusa node /path/to/wasurenagusa-mcp/dist/index.js
 - **Security Requirements**:
   - Gemini APIキーは環境変数経由（.envファイル）
   - 機密情報（パスワード、APIキー値）は保存しない
-  - ローカル実行のみ、ネットワーク露出なし
+  - ローカル実行のみ、ネットワーク露出なし（Slack Webhook通知はオプション、アウトバウンドのみ）
 - **Compliance Standards**: なし（個人ツール）
 - **Threat Model**:
   - `.wasurenagusa/` に機密情報が含まれる可能性 → .gitignore推奨
@@ -237,9 +249,9 @@ claude mcp add wasurenagusa node /path/to/wasurenagusa-mcp/dist/index.js
    - **トレードオフ**: リモートアクセス不可（将来拡張可能）
 
 5. **「必要な時に思い出す」アーキテクチャ**
-   - **理由**: コンテキストウィンドウの効率的活用。全文注入はトークンの無駄
-   - **実装**: SessionStart時はdont全件+configタイトル一覧のみ注入。AIが必要に応じてmemory_search → memory_get_detailで動的取得
-   - **トレードオフ**: AIが適切に検索する判断力が必要（ただしdontは事前注入で安全）
+   - **理由**: コンテキストウィンドウの効率的活用
+   - **実装**: SessionStart時はconfig全文+dont（統合版）+オーナープロフィールを注入。AIが必要に応じてmemory_search → memory_get_detailで動的取得
+   - **トレードオフ**: AIが適切に検索する判断力が必要（ただしdont/configは事前注入で安全）
 
 6. **Gemini API採用（会話分析）**
    - **理由**: 高速（gemini-3-flash-preview）、コスト効率、日本語対応
@@ -279,11 +291,11 @@ claude mcp add wasurenagusa node /path/to/wasurenagusa-mcp/dist/index.js
     - **実装**: Stop Hook（wasurenagusa-analyze）でgit diffの`--name-only`相当を取得し、JSONファイルに追記
     - **トレードオフ**: サマリがないため、Claude CLIが毎回ファイルを読む必要がある
 
-14. **1サイクル1タスク実行（キュー方式）**
-    - **理由**: トークン予算の予測が困難。1タスクなら確実に完了できる
-    - **実装**: 優先度付きタスクキュー。変更ベース（新しい順）> ローテーション（古い順）
-    - **代替案**: バンドル方式（1呼び出しで複数タスク）→ トークン枯渇リスクで却下
-    - **トレードオフ**: タスク消化が遅い（1日最大4-5タスク）
+14. **並列数制限付き全タスク実行（キュー方式）**
+    - **理由**: 1サイクル1タスクではタスク消化が遅い。並列数を制限すれば安全に複数タスクを処理できる
+    - **実装**: 自律タスク全件 + Spec更新タスク全件をdequeueし、`maxConcurrentTasks`（デフォルト3）で並列数を制限して実行。タスクなしの場合のみping
+    - **代替案**: 1サイクル1タスク（旧方式）→ タスク消化が遅い（1日最大4-5タスク）で却下
+    - **トレードオフ**: 並列実行時のトークン消費量が増える。ただし`maxConcurrentTasks`で制御可能
 
 15. **Keep-Aliveはpingのみ**
     - **理由**: タスクがない時に無理に仕事を作る必要はない。ウィンドウ回転が目的

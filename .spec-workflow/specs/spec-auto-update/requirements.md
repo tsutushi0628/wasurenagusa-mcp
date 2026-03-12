@@ -34,7 +34,7 @@ Product Principleの「自律自動が基本、手動はオプション」「Hoo
 
 1. WHEN 変更ログにエントリが存在する THEN システム SHALL 変更ベースタスクを生成しキューに追加する（優先度: 高）
 2. WHEN 変更ログが空 AND Specドキュメントの最終更新日が閾値（デフォルト7日）を超えたプロジェクトがある THEN システム SHALL ローテーションタスクを最終更新が古い順に生成しキューに追加する（優先度: 低）
-3. WHEN タスクを実行する THEN システム SHALL キューから優先度が最も高いタスクを1つだけ取り出して実行する
+3. WHEN タスクを実行する THEN システム SHALL キューから全pendingタスクを取り出し、`maxConcurrentTasks`（デフォルト3）で並列数を制限して実行する
 4. WHEN タスクが正常完了 THEN システム SHALL タスクを完了済みとしてマークし、変更ベースの場合は対応する変更ログエントリを消費済みにする
 5. WHEN タスクが失敗 THEN システム SHALL タスクを失敗としてマークし、失敗理由を実行ログに記録する
 
@@ -128,6 +128,6 @@ Product Principleの「自律自動が基本、手動はオプション」「Hoo
 - 同時実行防止: ロックファイル（`~/.wasurenagusa/scheduler/.lock`）で排他制御
 
 ### Usability
-- `wasurenagusa-spec-update --setup` でcron/launchd設定の対話的セットアップ
+- `wasurenagusa-spec-update --setup` でcron/launchd設定手順の出力（非対話）
 - `wasurenagusa-spec-update --status` で現在のキュー状態・最終実行結果を表示
-- `wasurenagusa-spec-update --run` で即座に1タスク実行（手動トリガー）
+- `wasurenagusa-spec-update --run` で即座に全タスク並列実行（手動トリガー）

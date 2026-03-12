@@ -40,7 +40,7 @@ wasurenagusaの記憶構造に **project** と **scope** フィールドを追�
 #### Acceptance Criteria
 
 1. WHEN SessionStartが発火する THEN システム SHALL dontカテゴリは全件の内容を注入する
-2. WHEN SessionStartが発火する THEN システム SHALL configカテゴリはタイトル一覧のみを注入する（内容は含めない）
+2. WHEN SessionStartが発火する THEN システム SHALL configカテゴリはタイトル+内容を全文注入する（projectフィルタ適用後）
 3. WHEN SessionStartが発火する THEN システム SHALL decision/log/snippetカテゴリは注入しない
 4. WHEN 注入される THEN システム SHALL 現在のプロジェクトに関連するエントリ + project未指定のエントリのみを対象とする
 

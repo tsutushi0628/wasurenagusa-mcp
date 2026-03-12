@@ -153,7 +153,9 @@ claude mcp add wasurenagusa -- wasurenagusa-mcp
 
 ### 4. Set Up Hooks
 
-Add to `~/.claude/settings.local.json`:
+> **⚠️ Required** — Without this step, memory is never injected at session start. This is the most commonly missed setup step.
+
+Add to `~/.claude/settings.json` (or `settings.local.json` if you prefer to keep hooks separate):
 
 ```json
 {

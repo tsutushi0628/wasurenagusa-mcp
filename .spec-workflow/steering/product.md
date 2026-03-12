@@ -52,21 +52,29 @@
 6. **memory_save** - 明示的に保存したい時だけ使用
 7. **memory_delete** - 不要エントリの削除（ID指定、複数一括削除対応）
 
+### 自律タスク実行（MCPツール）
+8. **task_submit** - WHY/WHAT/DONE/PROJECTの4項目でタスクを投入。Geminiで命令文生成→Claude CLI実行→Gemini評価のパイプライン
+9. **task_status** - タスク状態サマリ（pending/in-progress/completed/failed/human-required/cancelled件数）と直近タスク一覧
+10. **task_action_list** - AIが「人間判断が必要」と仕分けたタスクの一覧と対応操作（retry/complete/cancel）
+11. **project_init** - プロジェクトの品質基準・フェーズ・判断基準を選択式で登録。評価者エージェントの判定基準に反映
+
 ### Spec自動更新（Scheduler連携）
-8. **wasurenagusa-spec-update** - 【cron/systemd timer】5時間5分サイクルでClaude Code CLIを起動し、Specドキュメントを自動更新
-9. **変更ログ記録** - Stop Hook（wasurenagusa-analyze）実行時に、セッション中に変更されたファイル一覧を変更ログに記録
-10. **タスクキュー** - 変更ベース更新・ローテーション更新を優先度付きキューで管理。1サイクル1タスク実行
-11. **Keep-Alive** - タスクがない場合でもpingを送信し、5時間ウィンドウを回転させる
+12. **wasurenagusa-spec-update** - 【cron/systemd timer】5時間5分サイクルでClaude Code CLIを起動し、Specドキュメントを自動更新
+13. **変更ログ記録** - Stop Hook（wasurenagusa-analyze）実行時に、セッション中に変更されたファイル一覧を変更ログに記録
+14. **タスクキュー** - 変更ベース更新・ローテーション更新・自律タスクを優先度付きキューで管理。全件dequeue後にmaxConcurrentTasks（デフォルト3）で並列数制限付き実行
+15. **Keep-Alive** - タスクがない場合でもpingを送信し、5時間ウィンドウを回転させる
 
 ### コア機能
-12. **Gemini自動判定** - Gemini 3 Flash（gemini-3-flash-preview）で会話を自動分類・保存
-13. **プロジェクト横断記憶** - シンボリックリンクで`.wasurenagusa/`を集約。各エントリにproject/scopeフィールドを持ち、フィルタリング可能
-14. **AIリトライ検出** - AI自身の失敗パターンを自動検出・記録
-15. **動的記憶取得** - セッション開始時は最小限の注入（dont全件+configタイトル一覧）。それ以外はAIが必要な時にmemory_search/memory_get_detailで動的に取得（「必要な時に思い出す」体験）
-16. **重複検出・自動マージ** - Geminiベースのセマンティック重複検出。同じテーマのエントリは自動置換でコンテキスト汚染を防止
-17. **メタ情報による諦め検知** - メッセージ長の急減少やポジティブ反応の不在を数値で検知し、テキストパターンだけでは拾えない「沈黙の諦め」を捕捉
-18. **プロンプト外部化** - 分析プロンプトを`prompts/`ディレクトリにテキストファイルとして管理。デプロイなしでプロンプト改善可能
-19. **dont統合（L3圧縮）** - SessionStart時にGeminiで多数のdontエントリ（例:49件）を5-6個の行動原則に統合。元エントリは保持したまま、コンテキスト注入量を36KB→3-4KBに大幅削減
+16. **Gemini自動判定** - Gemini 3 Flash（gemini-3-flash-preview）で会話を自動分類・保存
+17. **プロジェクト横断記憶** - シンボリックリンクで`.wasurenagusa/`を集約。各エントリにproject/scopeフィールドを持ち、フィルタリング可能
+18. **AIリトライ検出** - AI自身の失敗パターンを自動検出・記録
+19. **動的記憶取得** - セッション開始時はconfig全文+dont（統合版）+オーナープロフィールを注入。それ以外はAIが必要な時にmemory_search/memory_get_detailで動的に取得（「必要な時に思い出す」体験）
+20. **重複検出・自動マージ** - Geminiベースのセマンティック重複検出。同じテーマのエントリは自動置換でコンテキスト汚染を防止
+21. **メタ情報による諦め検知** - メッセージ長の急減少やポジティブ反応の不在を数値で検知し、テキストパターンだけでは拾えない「沈黙の諦め」を捕捉
+22. **プロンプト外部化** - 分析プロンプトを`prompts/`ディレクトリにテキストファイルとして管理。デプロイなしでプロンプト改善可能
+23. **dont統合（L3圧縮）** - SessionStart時にGeminiで多数のdontエントリ（例:49件）を5-6個の行動原則に統合。元エントリは保持したまま、コンテキスト注入量を36KB→3-4KBに大幅削減
+24. **Owner Profile** - SessionStart Hook初回実行時に`.wasurenagusa/owner-profile.md`を自動生成。優先順位・設計方針・コミュニケーションスタイル等を記入すると、SessionStart時のコンテキスト注入および自律タスク実行時の判断基準に反映
+25. **Slack通知** - スケジューラサイクルサマリー（1サイクル1通に統合）/人間エスカレーション/リトライ上限到達/デイリーサマリーをSlack Webhook経由で通知（`SLACK_WEBHOOK_URL`環境変数で有効化、オプション）
 
 ## Memory Categories
 
@@ -193,7 +201,7 @@
 1. **自律自動が基本、手動はオプション**: ユーザーは何もしなくても記憶が蓄積・活用される
 2. **Hooks連携で完全自動化**: SessionStart/Stopで自動実行、ユーザー介入不要
 3. **コンテキストを圧迫しない軽量設計**: 検索時はインデックスのみ返却、必要なものだけフル取得
-4. **必要な時に思い出す**: SessionStart時はdont全件+configタイトル一覧のみ注入。それ以外はAIが動的にmemory_search/memory_get_detailで取得
+4. **必要な時に思い出す**: SessionStart時はconfig全文+dont（統合版）+オーナープロフィールを注入。それ以外はAIが動的にmemory_search/memory_get_detailで取得
 5. **ローカル完結・セットアップ簡単**: npm installだけで動作、外部サービス最小限
 6. **プロジェクト横断 + スコープ分類**: シンボリックリンクで`.wasurenagusa/`を集約管理。project/scopeフィールドでフィルタリング
 7. **トリガーワード不要**: LLM（Gemini）で自動判定、自然な会話のまま学習
@@ -203,7 +211,8 @@
 
 - **Dashboard Type**: なし（CLIツール、MCPプロトコル経由でのみアクセス）
 - **Real-time Updates**: 不要（永続化されたMarkdownファイルを読み書き）
-- **Key Metrics Displayed**: 検索結果件数、保存成功/失敗
+- **Key Metrics Displayed**: 検索結果件数、保存成功/失敗、タスク状態サマリ（task_status）
+- **Notifications**: Slack Webhook経由でサイクルサマリー/人間エスカレーション/リトライ上限到達/デイリーサマリー通知（オプション）
 - **Sharing Capabilities**: `.wasurenagusa/` ディレクトリをgit管理すればチーム共有可能
 
 ## Future Vision
@@ -214,6 +223,6 @@
 - **HTTP Transport**: リモートアクセス、チーム共有
 - **Analytics**: 保存頻度、検索パターン、学習効果の可視化
 - **Collaboration**: チームでのdont/decisionの共有・投票
-- **タスクタイプ拡張**: Spec更新以外の自動タスク（セキュリティ監査、コードレビュー、TODO抽出等）
+- ~~**タスクタイプ拡張**: Spec更新以外の自動タスク（セキュリティ監査、コードレビュー、TODO抽出等）~~ → task_submitで汎用タスク投入を実装済み
 - **マルチプロジェクト並行**: 1サイクルで複数プロジェクトを効率的に処理
 - ~~**重複検出・マージ**: 同じ内容の重複を自動検出し統合~~ → v0.3.0で実装済み（Geminiベース）

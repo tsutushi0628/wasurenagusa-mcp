@@ -216,7 +216,9 @@ claude mcp add wasurenagusa -- wasurenagusa-mcp
 
 ### 4. Hooks の設定
 
-`~/.claude/settings.local.json` に以下を追加:
+> **⚠️ 必須** — このステップを省略すると、メモリはセッション開始時に注入されない。セットアップで最も見落とされやすい手順。
+
+`~/.claude/settings.json`（または hooks を別ファイルで管理したい場合は `settings.local.json`）に以下を追加:
 
 ```json
 {

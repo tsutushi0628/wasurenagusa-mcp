@@ -55,7 +55,7 @@
 - [ ] `src/autonomous/command-generator.ts`を新規作成
   - `generate(input: CommandGenerationInput): Promise<string>`
   - loadPrompt("task-command.txt")でテンプレート読み込み
-  - テンプレート変数置換: {why}, {what}, {done}, {project_name}, {project_path}, {project_meta}
+  - テンプレート変数置換: {why}, {what}, {done}, {project_name}, {project_path}, {project_meta}, {owner_profile}, {retry_count}, {previous_evaluations}
   - Gemini APIで命令文生成
   - 「作業完了時にサマリを最後に出力せよ」指示を含む命令文を返却
 - **Files:** `src/autonomous/command-generator.ts`
@@ -65,7 +65,7 @@
 - [ ] `src/autonomous/evaluator.ts`を新規作成
   - `evaluate(input: EvaluationInput): Promise<EvaluatorResult>`
   - loadPrompt("task-evaluation.txt")でテンプレート読み込み
-  - テンプレート変数置換: {done}, {execution_output}, {exit_code}, {duration_ms}, {project_meta}
+  - テンプレート変数置換: {done}, {execution_output}, {exit_code}, {duration_ms}, {project_meta}, {owner_profile}, {what}, {why}
   - Gemini APIで評価実行、JSON解析してEvaluatorResult返却
   - stdout上限: `executionOutput.slice(-50000)`で末尾50,000文字に制限
   - 不正JSON時はエラーthrow
@@ -75,8 +75,9 @@
 ### Task 2.4: ProjectInitializer
 - [ ] `src/autonomous/project-initializer.ts`を新規作成
   - `generateQuestions(projectName, initialInfo?): Promise<ProjectInitOutput>` — Geminiで質問リスト生成
-  - `saveProjectMeta(projectName, answers): Promise<ProjectMeta>` — 回答→ProjectMetaに変換して保存
+  - `saveProjectMeta(projectName, projectPath, answers): Promise<ProjectMeta>` — 回答→ProjectMetaに変換して保存
   - `loadProjectMeta(projectName): Promise<ProjectMeta | null>` — meta.json読み込み
+  - `loadProjectMetaOrDefault(projectName, projectPath): Promise<ProjectMeta>` — メタ情報読み込み（未設定時はデフォルト値）
   - `updateProjectMeta(projectName, updates): Promise<ProjectMeta>` — PDCA更新
   - 保存先: `~/.wasurenagusa/scheduler/projects/{project-name}/meta.json`
   - ProjectMeta未設定時のデフォルト値定義
@@ -91,6 +92,26 @@
   - 永続化: `~/.wasurenagusa/scheduler/action-list.json`
 - **Files:** `src/autonomous/action-list.ts`
 - **Req:** Req-6
+
+### Task 2.6: SlackNotifier
+- [ ] `src/autonomous/notifier.ts`を新規作成
+  - サイクルサマリー（1サイクル1通に統合）/人間エスカレーション/リトライ上限到達/デイリーサマリーをSlack Webhook経由で通知
+  - 環境変数 `SLACK_WEBHOOK_URL` で設定（未設定時はスキップ）
+- **Files:** `src/autonomous/notifier.ts`
+- **Req:** NFR (Usability)
+
+### Task 2.7: ProjectScanner
+- [ ] `src/autonomous/project-scanner.ts`を新規作成
+  - `~/projects/` 配下のプロジェクトを自動検出
+  - サブプロジェクト対応（`subProjectParents` 設定）
+- **Files:** `src/autonomous/project-scanner.ts`
+- **Req:** Req-6
+
+### Task 2.8: TaskMarkdownAdapter
+- [ ] `src/autonomous/task-markdown.ts`を新規作成
+  - `~/.wasurenagusa/scheduler/tasks.md`（人間がMarkdownで直接タスク投入するファイル）のパース・更新
+- **Files:** `src/autonomous/task-markdown.ts`
+- **Req:** Req-5
 
 ## Phase 3: MCPツール
 
@@ -148,15 +169,21 @@
 - [ ] `cli/spec-update.ts`を改修
   - runCommand()内で自律タスクキュー確認を追加
   - 処理順序: TaskStore.dequeue() → 既存TaskQueue.dequeue() → ping
+  - 全タスクを並列数制限付き実行: 自律タスク全件 + Spec更新タスク全件をdequeueし、`maxConcurrentTasks`（デフォルト3）で並列数を制限して実行。タスクなしの場合のみpingを送信
+  - タスクバリデーション: 実行前にwhy/what/done/projectの空チェックとテンプレート文面検知、projectPathの存在確認を実施。不正なタスクはfailedとしてスキップ
   - 自律タスクのオーケストレーションフロー:
     1. TaskStore.dequeue()
-    2. ProjectInitializer.loadProjectMeta()
-    3. CommandGenerator.generate()
-    4. Executor.runSpecUpdate() with AUTONOMOUS_DEFAULT_OPTIONS
-    5. exitCode判定 (!=0 → markFailed)
-    6. TaskEvaluator.evaluate() with stdout.slice(-50000)
-    7. verdict判定 (ok→completed, ng→incrementRetry, human-required→markHumanRequired)
-    8. retryCount >= 3 → markHumanRequired + ActionList.add()
+    2. validateAutonomousTask(task)
+    3. ProjectInitializer.loadProjectMetaOrDefault()
+    4. CommandGenerator.generate()
+    5. Executor.runSpecUpdate() with AUTONOMOUS_DEFAULT_OPTIONS
+    6. exitCode判定 (!=0 → markFailed)
+    7. TaskEvaluator.evaluate() with stdout.slice(-50000)
+    8. verdict判定 (ok→completed, ng→incrementRetry, human-required→markHumanRequired)
+    9. retryCount >= 3 → markHumanRequired + ActionList.add()
+  - アイドル判定: `last-session.json`の最終セッション終了時刻から`idleThresholdMinutes`分以上経過していない場合はタスク実行をスキップしpingのみ送信
+  - tasks.md同期: `TaskMarkdownAdapter`でtasks.mdのpendingタスクをTaskStoreに自動取り込み。タスク完了/失敗時にtasks.mdのステータスも更新
+  - プロジェクトスキャン: `ProjectScanner`で~/projects/配下のプロジェクトを自動検出し、tasks.mdのプロジェクトリストを更新
   - 起動時: TaskStore.recoverInProgress()
 - **Files:** `cli/spec-update.ts`
 - **Req:** Req-2, Req-3, Req-5, Req-8, Req-9, Req-10
@@ -240,7 +267,37 @@
 - **Files:** `src/autonomous/action-list.test.ts`
 - **Req:** Req-6
 
-### Task 6.6: MCPツールテスト
+### Task 6.6: SlackNotifierテスト
+- [ ] `src/autonomous/notifier.test.ts`を新規作成
+  - isEnabled: webhookUrl設定/未設定の判定
+  - notifyCycleSummary: Block Kit形式のPOST、全成功/失敗混在/失敗のみパターン
+  - notifyHumanRequired: suggestion有無の両パターン
+  - notifyRetryLimitReached: リトライ回数のcontext block含有
+  - notifyDailySummary: 日次サマリの正常POST
+  - エラーハンドリング: webhook応答エラー・fetch例外で例外をスローしないこと
+  - `vi.stubGlobal("fetch")`でfetchモック + `vi.mock("../config.js")`でconfigモック使用
+- **Files:** `src/autonomous/notifier.test.ts`
+- **Req:** NFR (Usability)
+
+### Task 6.7: ProjectScannerテスト
+- [ ] `src/autonomous/project-scanner.test.ts`を新規作成
+  - scanProjects: ディレクトリ走査、サブプロジェクト対応
+  - mkdtempで一時ディレクトリ使用
+- **Files:** `src/autonomous/project-scanner.test.ts`
+- **Req:** Req-6
+
+### Task 6.8: TaskMarkdownAdapterテスト
+- [ ] `src/autonomous/task-markdown.test.ts`を新規作成
+  - readTasks: tasks.mdパース
+  - readPendingTasks: pendingフィルタ
+  - updateStatus: ステータス書き戻し
+  - updateProjectList: プロジェクト一覧更新
+  - toSubmitParams: 変換
+  - mkdtempで一時ディレクトリ使用
+- **Files:** `src/autonomous/task-markdown.test.ts`
+- **Req:** Req-5
+
+### Task 6.9: MCPツールテスト
 - [ ] 各ツールのテスト作成
   - `src/tools/taskSubmit.test.ts`: 入力バリデーション、正常委譲
   - `src/tools/taskStatus.test.ts`: 正常委譲
@@ -249,7 +306,7 @@
 - **Files:** `src/tools/taskSubmit.test.ts`, `src/tools/taskStatus.test.ts`, `src/tools/taskActionList.test.ts`, `src/tools/projectInit.test.ts`
 - **Req:** Req-7
 
-### Task 6.7: 統合テスト
+### Task 6.10: 統合テスト
 - [ ] オーケストレーションの統合テスト作成
   - 正常フロー: submit → dequeue → generate → execute → evaluate(OK) → completed
   - NGフロー: 3回NG → human-required
