@@ -186,6 +186,8 @@ npm install && npm run build
 npm link
 ```
 
+> `npm run build` で CLI エントリポイントに `chmod +x` が自動適用される。手動での権限設定は不要。
+
 ### 2. 環境変数の設定
 
 `~/.wasurenagusa/.env` を作成:
@@ -206,6 +208,7 @@ GEMINI_API_KEY=your-key-here
 | `LLM_MODEL` | 任意 | プロバイダのデフォルトモデルを上書き |
 | `MEMORY_DIR` | 任意 | メモリ保存先ディレクトリ（デフォルト: `.wasurenagusa`） |
 | `MAX_ENTRIES_PER_CATEGORY` | 任意 | カテゴリ別エントリ上限（デフォルト: `100`） |
+| `LOG_RETENTION_DAYS` | 任意 | ログ保持日数（デフォルト: `30`） |
 | `SLACK_WEBHOOK_URL` | 任意 | 自律タスクの完了/失敗を Slack に通知 |
 
 ### 3. Claude Code に MCP サーバーを登録
@@ -333,6 +336,7 @@ Claude Code を起動する。初回は `.wasurenagusa/` ディレクトリが�
 |---------|------|-----------|
 | `wasurenagusa-context` | config + dont をstdoutに出力 | SessionStart Hook / PreCompact Hook |
 | `wasurenagusa-analyze` | 会話を LLM 分析し自動保存 | Stop Hook |
+| `wasurenagusa-rebuild` | 壊れたメモリデータの修復（重複排除・ログ再配置） | 手動 |
 | `wasurenagusa-spec-update` | Spec ドキュメント自動更新 | cron / systemd timer |
 
 ---

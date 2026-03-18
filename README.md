@@ -123,6 +123,8 @@ npm install && npm run build
 npm link
 ```
 
+> `npm run build` automatically runs `chmod +x` on CLI entry points. No manual permission setup needed.
+
 ### 2. Configure
 
 Create `~/.wasurenagusa/.env`:
@@ -143,6 +145,7 @@ GEMINI_API_KEY=your-key-here
 | `LLM_MODEL` | No | Override the default model for your provider |
 | `MEMORY_DIR` | No | Memory directory (default: `.wasurenagusa`) |
 | `MAX_ENTRIES_PER_CATEGORY` | No | Entry limit per category before auto-archiving (default: `100`) |
+| `LOG_RETENTION_DAYS` | No | Log retention period in days (default: `30`) |
 | `SLACK_WEBHOOK_URL` | No | Slack notifications for autonomous tasks |
 
 ### 3. Register MCP Server
@@ -234,6 +237,17 @@ Launch Claude Code. That's it.
 | `task_status` | Check task execution status |
 | `task_action_list` | List and manage pending human actions |
 | `project_init` | Initialize project quality standards |
+
+---
+
+## CLI Commands
+
+| Command | Purpose | Invoked by |
+|---------|---------|------------|
+| `wasurenagusa-context` | Output config + dont to stdout | SessionStart Hook / PreCompact Hook |
+| `wasurenagusa-analyze` | LLM-analyze conversation and auto-save | Stop Hook |
+| `wasurenagusa-rebuild` | Repair corrupted memory data (dedup, re-sort logs) | Manual |
+| `wasurenagusa-spec-update` | Auto-update spec documents | cron / systemd timer |
 
 ---
 
