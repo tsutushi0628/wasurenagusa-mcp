@@ -408,3 +408,18 @@ export interface ProjectInitOutput {
   questions: ProjectInitQuestion[];
 }
 
+// アクティブプロジェクト（最近作業したプロジェクト）
+export interface ActiveProject {
+  name: string;              // プロジェクト名（ディレクトリ名）
+  path: string;              // プロジェクト絶対パス
+  lastSessionAt: string;     // 最終セッション終了時刻（ISO 8601 JST）
+  sessionTopic: string;      // 直前セッションのトピック要約
+}
+
+// アクティブプロジェクトデータ
+export interface ActiveProjectsData {
+  projects: ActiveProject[];
+  maxActiveProjects: number; // デフォルト: 5
+  updatedAt: string;         // 最終更新時刻（ISO 8601 JST）
+}
+

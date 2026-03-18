@@ -18,6 +18,7 @@
  */
 
 import { basename, join } from "path";
+import { homedir } from "os";
 import { readFile } from "fs/promises";
 import { spawn } from "child_process";
 import { findProjectRoot } from "../utils/projectRoot.js";
@@ -301,6 +302,69 @@ async function main() {
       // ベクトル検索失敗は静かにスキップ（SessionStartのタイムアウトを守る）
       console.error("[vector] context注入時ベクトル検索失敗:", error);
     }
+  }
+
+  // 他のアクティブプロジェクトの関連記憶を横断検索
+  try {
+    const crossEmbeddingService = new EmbeddingService(config.geminiApiKey);
+    if (crossEmbeddingService.isAvailable()) {
+      const { ActiveProjectsTracker } = await import("../active-projects.js");
+      const schedulerDir = join(homedir(), ".wasurenagusa", "scheduler");
+      const activeTracker = new ActiveProjectsTracker(schedulerDir);
+      const otherProjects = await activeTracker.getOtherActiveProjects(currentProject);
+
+      if (otherProjects.length > 0) {
+        // queryEmbeddingはループ外で1回だけ計算
+        let crossQueryEmbedding: number[];
+        const crossTopicPath = join(memoryPath, "last-session-topic.json");
+        try {
+          const topicRaw = await readFile(crossTopicPath, "utf-8");
+          const topicData = JSON.parse(topicRaw);
+          if (topicData.embedding && Array.isArray(topicData.embedding)) {
+            crossQueryEmbedding = topicData.embedding;
+          } else {
+            crossQueryEmbedding = await crossEmbeddingService.embed(currentProject);
+          }
+        } catch {
+          crossQueryEmbedding = await crossEmbeddingService.embed(currentProject);
+        }
+
+        const crossProjectMemories: string[] = [];
+
+        for (const proj of otherProjects) {
+          try {
+            const projMemoryPath = getMemoryPath(proj.path);
+            const projVectorStore = new VectorStore(projMemoryPath);
+
+            // short tier = 0.2 — 高関連のみ（他プロジェクトはノイズを避ける）
+            const crossResults = await projVectorStore.search(crossQueryEmbedding, TIER_THRESHOLDS.short, 3);
+
+            if (crossResults.length > 0) {
+              const projStorage = new MarkdownStorage(proj.path);
+              const crossDetail = await projStorage.getDetail({
+                ids: crossResults.map(r => r.id),
+              });
+
+              for (const entry of crossDetail.entries) {
+                crossProjectMemories.push(`[${proj.name}] ${entry.title}: ${entry.content}`);
+              }
+            }
+          } catch {
+            // 個別プロジェクトの検索失敗はスキップ
+            continue;
+          }
+        }
+
+        if (crossProjectMemories.length > 0) {
+          output.push("\n## 他プロジェクトの関連記憶（横断検索）\n");
+          for (const mem of crossProjectMemories) {
+            output.push(`- ${mem}`);
+          }
+        }
+      }
+    }
+  } catch {
+    // 横断検索の失敗は握りつぶす
   }
 
   // 能動検索の指示を末尾に追加

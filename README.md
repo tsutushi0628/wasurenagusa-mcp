@@ -30,7 +30,7 @@ wasurenagusa is an MCP server that doesn't just *remember* — it **learns**.
 
 ### Real-world impact
 
-From the author's daily use across 8 production projects:
+From the author's daily use across 8 production projects (with cross-project memory sharing between them):
 
 ```
 1,581 "dont" entries   →  5-9 principles per project (LLM consolidation)
@@ -74,6 +74,7 @@ It's not a memory bank. It's a **learning system**.
 | Human-readable storage | Yes (Markdown + JSON vectors) | No (SQLite) | No (ChromaDB) | Yes |
 | Multi-LLM support | Gemini / OpenAI / Anthropic | Claude only | Local embeddings | N/A |
 | Token-efficient retrieval | Yes (index → detail, 70-90% savings) | Yes (3-layer) | N/A | No |
+| Cross-project memory | Yes (top 5 active projects) | No | No | No |
 | License | MIT | AGPL-3.0 | Apache-2.0 | N/A |
 
 ---
@@ -87,6 +88,7 @@ Session Start (Hook)
   → Spawns background embedding backfill worker (non-blocking)
   → Injects consolidated config + principles (layer 1) + critical permanent entries (layer 2) + recent 30-day entries (layer 3) + owner profile
   → Vector search injects semantically related short-term memories (layer 4)
+  → Cross-project vector search injects related memories from other active projects (layer 5)
   → Only customized settings injected (defaults stripped)
 
 During Session
@@ -99,6 +101,7 @@ Session End (Hook)
   → Detects mistakes, frustration, retry patterns
   → Auto-saves lessons learned (with embedding)
   → Deduplicates against existing entries before saving
+  → Updates active projects tracker (top 5 recent projects)
 
 Background (async workers)
   → Consolidates "dont" entries → behavioral principles
@@ -238,7 +241,7 @@ Launch Claude Code. That's it.
 | Tool | Description |
 |------|-------------|
 | `memory_get_context` | Get config + consolidated principles (auto-called at session start) |
-| `memory_search` | Lightweight index search (ID, title, tags only) |
+| `memory_search` | Lightweight index search (ID, title, tags only). Use `project: "active"` for cross-project search |
 | `memory_get_detail` | Get full detail by ID(s) |
 | `memory_save` | Save a memory entry explicitly |
 | `memory_delete` | Delete entries by ID |
@@ -297,6 +300,20 @@ SessionStart Hook
 **Zero new dependencies** — uses the existing `@google/generative-ai` package. Vectors are stored locally in `vectors.json` (brute-force search, ~6MB per 1,000 entries). No external database required.
 
 **Graceful degradation** — without a Gemini API key, everything works exactly as before (keyword search only). Vector features activate automatically when `GEMINI_API_KEY` is set.
+
+### Cross-Project Memory
+
+wasurenagusa automatically tracks your top 5 most recently used projects and searches across their memories for relevant context.
+
+**How it works:**
+
+1. **Stop Hook** records each project session in `~/.wasurenagusa/scheduler/active-projects.json`
+2. **SessionStart** searches other active projects' vector stores (short tier ≤ 0.2, high-relevance only)
+3. **`memory_search`** with `project: "active"` searches across all active projects (keyword + vector)
+
+**Example:** You're working on `project-a` and previously discussed authentication in `project-b`. When you start a session in `project-a` and the topic is related, wasurenagusa automatically surfaces the relevant auth memories from `project-b`.
+
+No configuration needed — works automatically after two or more projects have been used.
 
 ### LLM Consolidation
 

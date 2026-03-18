@@ -5,6 +5,8 @@ import { EmbeddingService } from "../vector/embedding-service.js";
 import { VectorStore } from "../vector/vector-store.js";
 import { TIER_THRESHOLDS, shouldPromoteToCritical } from "../vector/memory-tier.js";
 import { config, getMemoryPath } from "../config.js";
+import { homedir } from "os";
+import { join } from "path";
 
 export const memorySearchTool: Tool = {
   name: "memory_search",
@@ -29,7 +31,7 @@ export const memorySearchTool: Tool = {
       },
       project: {
         type: "string",
-        description: "プロジェクトフィルタ（オプション）。指定するとそのプロジェクト+プロジェクト未指定のエントリのみ返却"
+        description: "プロジェクトフィルタ（オプション）。指定するとそのプロジェクト+プロジェクト未指定のエントリのみ返却。\"active\"を指定すると最近作業した上位5プロジェクト横断で検索"
       },
       scope: {
         type: "string",
@@ -132,6 +134,83 @@ export async function handleMemorySearch(
     } catch (error) {
       console.error("[vector] ベクトル検索失敗:", error);
       // ベクトル検索失敗はキーワード結果に影響しない
+    }
+  }
+
+  // アクティブプロジェクト横断検索
+  if (params.project === "active") {
+    const { ActiveProjectsTracker } = await import("../active-projects.js");
+    const schedulerDir = join(homedir(), ".wasurenagusa", "scheduler");
+    const activeTracker = new ActiveProjectsTracker(schedulerDir);
+    const activeProjects = await activeTracker.getActiveProjects();
+
+    for (const proj of activeProjects) {
+      try {
+        const projStorage = new MarkdownStorage(proj.path);
+        const projResults = await projStorage.search({
+          query: params.query,
+          category: params.category,
+          limit: params.limit,
+        });
+
+        // プロジェクト名プレフィックスを付与してマージ
+        const prefixedResults = projResults.results.map(r => ({
+          ...r,
+          title: `[${proj.name}] ${r.title}`,
+        }));
+
+        // ID重複排除
+        for (const entry of prefixedResults) {
+          const exists = result.results.some(existing => existing.id === entry.id);
+          if (!exists) {
+            result.results.push(entry);
+            result.totalCount += 1;
+          }
+        }
+
+        // プロジェクト別ベクトル検索
+        if (embeddingService.isAvailable()) {
+          try {
+            const projMemoryPath = getMemoryPath(proj.path);
+            const projVectorStore = new VectorStore(projMemoryPath);
+            const projQueryEmbedding = await embeddingService.embed(params.query);
+            const projVectorResults = await projVectorStore.search(
+              projQueryEmbedding,
+              TIER_THRESHOLDS.medium,
+              limit
+            );
+
+            const existingIds = new Set(result.results.map(r => r.id));
+            const projVectorOnlyIds: string[] = [];
+            for (const vr of projVectorResults) {
+              if (!existingIds.has(vr.id)) {
+                projVectorOnlyIds.push(vr.id);
+              }
+            }
+
+            if (projVectorOnlyIds.length > 0) {
+              const projDetail = await projStorage.getDetail({ ids: projVectorOnlyIds });
+              const projVectorEntries: MemoryIndexEntry[] = projDetail.entries.map(entry => ({
+                id: entry.id,
+                timestamp: entry.timestamp,
+                category: entry.category,
+                title: `[${proj.name}] ${entry.title}`,
+                tags: entry.tags,
+                project: entry.project,
+                scope: entry.scope,
+                importance: entry.importance,
+              }));
+              result.results.push(...projVectorEntries);
+              result.totalCount += projVectorEntries.length;
+            }
+          } catch {
+            // プロジェクト別ベクトル検索失敗はスキップ
+          }
+        }
+      } catch {
+        // 個別プロジェクトの検索失敗はスキップ
+        continue;
+      }
     }
   }
 

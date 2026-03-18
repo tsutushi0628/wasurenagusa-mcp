@@ -173,6 +173,26 @@ async function main() {
       console.error("[session-topic] embedding保存失敗:", error);
     }
   }
+
+  // アクティブプロジェクト更新（横断記憶検索用）
+  try {
+    const schedulerDir = join(homedir(), ".wasurenagusa", "scheduler");
+    const { ActiveProjectsTracker } = await import("../active-projects.js");
+    const activeTracker = new ActiveProjectsTracker(schedulerDir);
+    const activeProjectRoot = findProjectRoot(hookInput.cwd);
+    let topicText = "";
+    if (analysis.sessionTopic) {
+      topicText = analysis.sessionTopic;
+    }
+    await activeTracker.update({
+      name: basename(activeProjectRoot),
+      path: activeProjectRoot,
+      lastSessionAt: new Date().toLocaleString("sv-SE", { timeZone: "Asia/Tokyo" }).replace(" ", "T") + "+09:00",
+      sessionTopic: topicText,
+    });
+  } catch {
+    // アクティブプロジェクト更新の失敗は握りつぶす（既存機能を壊さない）
+  }
 }
 
 main().catch((err) => {
