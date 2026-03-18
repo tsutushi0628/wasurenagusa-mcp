@@ -118,7 +118,8 @@ Claude Codeとユーザーの会話から、以下のカテゴリに該当する
   "tags": ["検索用タグ", "最大5個"],
   "scope": "frontend" | "backend" | "infra" | "design" | "spec" | "ai" | "general" | null,
   "importance": "critical" | "normal",
-  "reason": "判断理由を簡潔に"
+  "reason": "判断理由を簡潔に",
+  "sessionTopic": "このセッションで話していた内容の1-2文の要約。保存判定に関係なく必ず出力すること"
 }
 
 ## importanceの判定基準
@@ -162,3 +163,14 @@ importanceは記憶の強弱を示す。**dontカテゴリのみ** "critical" �
 ## 注意
 - 機密情報（パスワード、APIキーの値そのもの）は保存しない
 - 「APIキーは.envに入れる」のような場所の情報はOK
+
+## sessionTopic（必須）
+
+sessionTopicは、このセッションで「何の話をしていたか」の1-2文の要約。
+shouldSaveがtrueでもfalseでも、必ず出力すること。
+
+- プロジェクト名と主要な作業内容を含める
+- 技術的なキーワードを含める（後でベクトル検索に使われるため）
+- 例: 「wasurenagusa-mcpにベクトル記憶層を実装。Gemini embeddingとコサイン距離検索を追加した」
+- 例: 「ai-management-dxのCeoXPostingServiceのベクトル検索閾値を調整した」
+- 例: 「firebase-kitのGeminiProvider設定バグを修正。thinkingLevelパラメータ名の誤りを直した」

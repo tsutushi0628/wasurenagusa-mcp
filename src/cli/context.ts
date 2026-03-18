@@ -17,7 +17,8 @@
  * }
  */
 
-import { basename } from "path";
+import { basename, join } from "path";
+import { readFile } from "fs/promises";
 import { spawn } from "child_process";
 import { findProjectRoot } from "../utils/projectRoot.js";
 import { MarkdownStorage } from "../storage/index.js";
@@ -251,10 +252,31 @@ async function main() {
   if (embeddingService.isAvailable()) {
     try {
       const vectorStore = new VectorStore(memoryPath);
-      const queryEmbedding = await embeddingService.embed(currentProject);
+
+      // 直前セッションのトピックembeddingを読み込む（あれば）
+      let queryEmbedding: number[];
+      let querySource: string;
+      const topicPath = join(memoryPath, "last-session-topic.json");
+      try {
+        const topicRaw = await readFile(topicPath, "utf-8");
+        const topicData = JSON.parse(topicRaw);
+        if (topicData.embedding && Array.isArray(topicData.embedding)) {
+          queryEmbedding = topicData.embedding;
+          querySource = topicData.topic;
+        } else {
+          queryEmbedding = await embeddingService.embed(currentProject);
+          querySource = currentProject;
+        }
+      } catch {
+        // ファイルなし or パースエラー → プロジェクト名で検索
+        queryEmbedding = await embeddingService.embed(currentProject);
+        querySource = currentProject;
+      }
+
+      // medium tier (0.45) で検索（short 0.2だと厳しすぎてトピック関連が拾えない）
       const vectorResults = await vectorStore.search(
         queryEmbedding,
-        TIER_THRESHOLDS.short,
+        TIER_THRESHOLDS.medium,
         5
       );
 

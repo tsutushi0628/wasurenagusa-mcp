@@ -143,6 +143,36 @@ async function main() {
   } catch {
     // 記録失敗は握りつぶす
   }
+
+  // セッショントピックのembedding保存（shouldSaveに関係なく毎セッション）
+  if (analysis.sessionTopic) {
+    try {
+      const { EmbeddingService } = await import("../vector/embedding-service.js");
+      const { config } = await import("../config.js");
+      const embeddingService = new EmbeddingService(config.geminiApiKey);
+      if (embeddingService.isAvailable()) {
+        const topicEmbedding = await embeddingService.embed(analysis.sessionTopic);
+
+        // last-session-topic.json に保存（次のSessionStartで使用）
+        const topicProjectRoot = findProjectRoot(hookInput.cwd);
+        const { getMemoryPath } = await import("../config.js");
+        const memoryPath = getMemoryPath(topicProjectRoot);
+        const topicPath = join(memoryPath, "last-session-topic.json");
+
+        const topicData = {
+          topic: analysis.sessionTopic,
+          embedding: topicEmbedding,
+          project: basename(topicProjectRoot),
+          sessionId: hookInput.session_id,
+          timestamp: new Date().toLocaleString("sv-SE", { timeZone: "Asia/Tokyo" }).replace(" ", "T") + "+09:00",
+        };
+
+        await writeFile(topicPath, JSON.stringify(topicData, null, 2));
+      }
+    } catch (error) {
+      console.error("[session-topic] embedding保存失敗:", error);
+    }
+  }
 }
 
 main().catch((err) => {

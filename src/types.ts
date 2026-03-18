@@ -96,6 +96,7 @@ export interface AnalysisResult {
   scope?: string;        // Geminiが判定したスコープ
   replaceId?: string;    // 重複エントリのID（置換対象）
   importance?: MemoryImportance;    // LLMが判定した記憶の強弱
+  sessionTopic?: string;   // セッションのトピック要約（shouldSaveに関係なく毎回出力）
 }
 
 // 削除パラメータ
