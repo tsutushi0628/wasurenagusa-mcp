@@ -24,6 +24,7 @@ wasurenagusa is an MCP server that doesn't just *remember* — it **learns**.
 2. **Distills lessons into principles** — LLM compresses hundreds of raw entries into a handful of actionable rules
 3. **Compresses config into themes** — LLM groups scattered settings into coherent summaries, preserving facts like ports and paths
 4. **Injects only what matters** — Consolidated wisdom + active settings only. No template bloat, no duplicate entries.
+5. **Semantic memory with vector search** — Gemini embeddings power meaning-based retrieval across short/medium/long-term memory tiers. Frequently accessed memories auto-promote to critical.
 
 **Fully automated via Claude Code hooks — zero configuration after setup.**
 
@@ -66,8 +67,11 @@ It's not a memory bank. It's a **learning system**.
 |---|---|---|---|---|
 | Auto-detect mistakes | Yes (retry + sentiment) | No | No | No |
 | Auto-consolidate (LLM) | Yes (dont→principles, config→themes) | No | Yes (decay-based) | No |
+| Vector semantic search | Yes (Gemini embeddings, 768-dim) | No | Yes (ChromaDB) | No |
+| Memory tiers (short/mid/long) | Yes (cosine distance thresholds) | No | No | No |
+| Auto-promotion to critical | Yes (access count-based) | No | No | No |
 | Zero-effort via hooks | Yes | Yes | No | No |
-| Human-readable storage | Yes (Markdown) | No (SQLite) | No (ChromaDB) | Yes |
+| Human-readable storage | Yes (Markdown + JSON vectors) | No (SQLite) | No (ChromaDB) | Yes |
 | Multi-LLM support | Gemini / OpenAI / Anthropic | Claude only | Local embeddings | N/A |
 | Token-efficient retrieval | Yes (index → detail, 70-90% savings) | Yes (3-layer) | N/A | No |
 | License | MIT | AGPL-3.0 | Apache-2.0 | N/A |
@@ -80,21 +84,26 @@ It's not a memory bank. It's a **learning system**.
 Session Start (Hook)
   → Checks if consolidation is stale
   → Spawns background LLM worker if needed (non-blocking)
+  → Spawns background embedding backfill worker (non-blocking)
   → Injects consolidated config + principles (layer 1) + critical permanent entries (layer 2) + recent 30-day entries (layer 3) + owner profile
+  → Vector search injects semantically related short-term memories (layer 4)
   → Only customized settings injected (defaults stripped)
 
 During Session
-  → AI calls memory_search / memory_save as needed
+  → memory_save auto-generates 768-dim embedding via Gemini
+  → memory_search merges keyword + vector semantic results
+  → Vector hits increment access counts → auto-promote to critical at threshold
 
 Session End (Hook)
   → LLM analyzes the conversation
   → Detects mistakes, frustration, retry patterns
-  → Auto-saves lessons learned
+  → Auto-saves lessons learned (with embedding)
   → Deduplicates against existing entries before saving
 
-Background (async worker)
+Background (async workers)
   → Consolidates "dont" entries → behavioral principles
   → Consolidates "config" entries → thematic summaries
+  → Backfills embeddings for entries created before vector layer (20/run)
   → Results used in next session start
 ```
 
@@ -244,14 +253,50 @@ Launch Claude Code. That's it.
 
 | Command | Purpose | Invoked by |
 |---------|---------|------------|
-| `wasurenagusa-context` | Output config + dont to stdout | SessionStart Hook / PreCompact Hook |
+| `wasurenagusa-context` | Output config + dont + vector memories to stdout | SessionStart Hook / PreCompact Hook |
 | `wasurenagusa-analyze` | LLM-analyze conversation and auto-save | Stop Hook |
+| `wasurenagusa-backfill` | Generate embeddings for entries without vectors | Background (auto-spawned) |
 | `wasurenagusa-rebuild` | Repair corrupted memory data (dedup, re-sort logs) | Manual |
 | `wasurenagusa-spec-update` | Auto-update spec documents | cron / systemd timer |
 
 ---
 
 ## Advanced Features
+
+### Vector Memory Tiers
+
+wasurenagusa introduces a biologically-inspired memory system powered by Gemini embeddings. Every memory is converted to a 768-dimensional vector, enabling meaning-based retrieval that goes far beyond keyword matching.
+
+**Three-tier architecture with cosine distance thresholds:**
+
+| Tier | Threshold | Use case |
+|------|-----------|----------|
+| **Short-term** | ≤ 0.2 | Highly relevant — auto-injected at session start |
+| **Medium-term** | ≤ 0.45 | Contextually related — surfaced during `memory_search` |
+| **Long-term** | ≤ 0.7 | Loosely related — discoverable but not proactively shown |
+
+**Automatic promotion:** Every time a memory is retrieved via vector search, its access count increments. After 5 retrievals, the memory auto-promotes to `importance: "critical"` — ensuring frequently-needed knowledge is permanently injected every session. Long-dormant memories can be "woken up" by relevance and eventually earn critical status through repeated access.
+
+**How it works:**
+
+```
+memory_save
+  → Text → Gemini gemini-embedding-001 → 768-dim vector → vectors.json
+
+memory_search "authentication setup"
+  → Keyword search (existing)           ─┐
+  → Embed query → cosine distance search ─┤→ merge, deduplicate → results
+                                           └→ increment access count
+                                              → auto-promote if threshold met
+
+SessionStart Hook
+  → Embed project name → short-tier search → inject related memories
+  → Spawn backfill worker (20 entries/run, non-blocking)
+```
+
+**Zero new dependencies** — uses the existing `@google/generative-ai` package. Vectors are stored locally in `vectors.json` (brute-force search, ~6MB per 1,000 entries). No external database required.
+
+**Graceful degradation** — without a Gemini API key, everything works exactly as before (keyword search only). Vector features activate automatically when `GEMINI_API_KEY` is set.
 
 ### LLM Consolidation
 

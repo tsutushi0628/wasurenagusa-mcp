@@ -46,11 +46,16 @@ Spec ドキュメントの更新、リファクタリング、テスト追加 �
 wasurenagusa-context 実行
   → 統合データの鮮度チェック（dont + config）
   → 古ければバックグラウンドで LLM 圧縮ワーカーを起動（非ブロッキング）
+  → Embedding バックフィルワーカーをバックグラウンド起動（非ブロッキング）
   → 統合済み config + 行動原則（层1）+ critical 永続エントリ（层2）+ 直近 30 日エントリ（层3）+ Owner Profile を注入
+  → ベクトル検索で意味的に関連する短期記憶を注入（层4）
   → カスタマイズ済みの設定のみ注入（デフォルト値は除外）
     │
     ▼
 [会話中] ─── AIが必要に応じて memory_search → memory_get_detail を自律呼び出し
+         ─── memory_save 時に Gemini で 768 次元ベクトルを自動生成
+         ─── memory_search でキーワード + ベクトル意味検索を統合
+         ─── アクセスカウント蓄積 → 閾値超過で critical 自動昇格
     │
     ▼
 [Claude 応答完了]
@@ -85,8 +90,11 @@ wasurenagusa-analyze 実行
 |---|---|---|---|---|
 | ミス自動検出 | あり（リトライ + 感情） | なし | なし | なし |
 | LLM 自動統合 | あり（dont→原則, config→テーマ） | なし | あり（減衰ベース） | なし |
+| ベクトル意味検索 | あり（Gemini embedding, 768次元） | なし | あり（ChromaDB） | なし |
+| 記憶層（短期/中期/長期） | あり（コサイン距離閾値） | なし | なし | なし |
+| critical 自動昇格 | あり（アクセス回数ベース） | なし | なし | なし |
 | Hooks で完全自動化 | あり | あり | なし | なし |
-| 人間が読める保存形式 | あり（Markdown） | なし（SQLite） | なし（ChromaDB） | あり |
+| 人間が読める保存形式 | あり（Markdown + JSON ベクトル） | なし（SQLite） | なし（ChromaDB） | あり |
 | マルチ LLM 対応 | Gemini / OpenAI / Anthropic | Claude のみ | ローカル埋め込み | N/A |
 | トークン効率的な取得 | あり（index→detail, 70-90%削減） | あり（3層） | N/A | なし |
 | ライセンス | MIT | AGPL-3.0 | Apache-2.0 | N/A |
@@ -117,6 +125,41 @@ wasurenagusa-analyze 実行
 ### 重複検出
 
 LLM ベースのセマンティック重複検出。同じテーマの新しい情報は既存エントリを自動で置換する。
+
+### ベクトル記憶層（Vector Memory Tiers）
+
+生物の記憶を模倣した、Gemini embedding による意味検索システム。すべての記憶が 768 次元ベクトルに変換され、キーワードでは見つからない「意味的に近い記憶」を呼び起こせる。
+
+**コサイン距離による 3 層アーキテクチャ:**
+
+| 記憶層 | 閾値 | 用途 |
+|--------|------|------|
+| **短期（short）** | ≤ 0.2 | 高関連 — セッション開始時に自動注入 |
+| **中期（medium）** | ≤ 0.45 | 文脈関連 — `memory_search` 時に浮上 |
+| **長期（long）** | ≤ 0.7 | 緩い関連 — 検索可能だが能動的には表示されない |
+
+**自動昇格:** ベクトル検索でヒットするたびにアクセスカウントが +1。5 回を超えると自動的に `importance: "critical"` に昇格し、毎セッション永続注入される。長期に眠っていた記憶も、関連性によって「揺り起こされ」、繰り返しアクセスされることで critical に昇格する。
+
+**仕組み:**
+
+```
+memory_save
+  → テキスト → Gemini gemini-embedding-001 → 768次元ベクトル → vectors.json
+
+memory_search "認証の設定"
+  → キーワード検索（既存）              ─┐
+  → クエリ埋め込み → コサイン距離検索    ─┤→ マージ・重複排除 → 結果
+                                          └→ アクセスカウント++
+                                             → 閾値超過で critical 昇格
+
+SessionStart Hook
+  → プロジェクト名を埋め込み → 短期層検索 → 関連記憶を注入
+  → バックフィルワーカー起動（1回最大20件、非ブロッキング）
+```
+
+**依存追加ゼロ** — 既存の `@google/generative-ai` パッケージを使用。ベクトルは `vectors.json` にローカル保存（ブルートフォース検索、1,000 エントリで約 6MB）。外部 DB 不要。
+
+**グレースフルデグラデーション** — `GEMINI_API_KEY` がなければ従来通りキーワード検索のみで動作。API キーを設定した瞬間からベクトル機能が自動的に有効になる。
 
 ### LLM 統合（Consolidation）
 
@@ -274,6 +317,7 @@ Claude Code を起動する。初回は `.wasurenagusa/` ディレクトリが�
 ├── dont.md             ← 会話から自動蓄積
 ├── decisions.md        ← 会話から自動蓄積
 ├── snippets.md         ← 会話から自動蓄積
+├── vectors.json        ← 768次元ベクトルインデックス（自動生成）
 └── logs/               ← 日付別ログ
 ```
 
@@ -334,8 +378,9 @@ Claude Code を起動する。初回は `.wasurenagusa/` ディレクトリが�
 
 | コマンド | 用途 | 呼び出し元 |
 |---------|------|-----------|
-| `wasurenagusa-context` | config + dont をstdoutに出力 | SessionStart Hook / PreCompact Hook |
+| `wasurenagusa-context` | config + dont + ベクトル関連記憶をstdoutに出力 | SessionStart Hook / PreCompact Hook |
 | `wasurenagusa-analyze` | 会話を LLM 分析し自動保存 | Stop Hook |
+| `wasurenagusa-backfill` | ベクトル未生成エントリの embedding を生成 | バックグラウンド（自動起動） |
 | `wasurenagusa-rebuild` | 壊れたメモリデータの修復（重複排除・ログ再配置） | 手動 |
 | `wasurenagusa-spec-update` | Spec ドキュメント自動更新 | cron / systemd timer |
 
