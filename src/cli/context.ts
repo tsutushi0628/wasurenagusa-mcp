@@ -31,6 +31,9 @@ import {
   formatConsolidatedConfig,
 } from "../consolidator/index.js";
 import { loadOwnerProfile, getOwnerProfilePath } from "../utils/owner-profile.js";
+import { EmbeddingService } from "../vector/embedding-service.js";
+import { VectorStore } from "../vector/vector-store.js";
+import { TIER_THRESHOLDS } from "../vector/memory-tier.js";
 
 interface HookInput {
   session_id: string;
@@ -58,6 +61,20 @@ function spawnConsolidationBackground(memoryPath: string, projectRoot: string): 
   if (!config.geminiApiKey && !config.openaiApiKey && !config.anthropicApiKey) return;
 
   const scriptPath = new URL("./consolidate-worker.js", import.meta.url).pathname;
+  const child = spawn(process.execPath, [scriptPath, memoryPath, projectRoot], {
+    detached: true,
+    stdio: "ignore",
+    env: process.env,
+  });
+  child.unref();
+}
+
+/**
+ * embedding backfillをdetachedプロセスとして非同期実行する。
+ * embedding未生成のメモリエントリを最大backfillBatchSize件ずつ埋める。
+ */
+function spawnBackfillBackground(memoryPath: string, projectRoot: string): void {
+  const scriptPath = new URL("./backfill-worker.js", import.meta.url).pathname;
   const child = spawn(process.execPath, [scriptPath, memoryPath, projectRoot], {
     detached: true,
     stdio: "ignore",
@@ -187,6 +204,12 @@ async function main() {
     spawnConsolidationBackground(memoryPath, projectRoot);
   }
 
+  // embedding backfill: API keyがあればバックグラウンドで未生成分を埋める
+  const embeddingServiceForBackfill = new EmbeddingService(config.geminiApiKey);
+  if (embeddingServiceForBackfill.isAvailable()) {
+    spawnBackfillBackground(memoryPath, projectRoot);
+  }
+
   // 統合レイヤー経由で取得（統合版があればそれを、なければ生データを注入）
   const [configContent, dontContent] = await Promise.all([
     getConfigContent(storage, currentProject, memoryPath),
@@ -221,6 +244,41 @@ async function main() {
 
   if (output.length === 1) {
     output.push("（まだメモリがありません）");
+  }
+
+  // ベクトル検索による関連記憶注入
+  const embeddingService = new EmbeddingService(config.geminiApiKey);
+  if (embeddingService.isAvailable()) {
+    try {
+      const vectorStore = new VectorStore(memoryPath);
+      const queryEmbedding = await embeddingService.embed(currentProject);
+      const vectorResults = await vectorStore.search(
+        queryEmbedding,
+        TIER_THRESHOLDS.short,
+        5
+      );
+
+      if (vectorResults.length > 0) {
+        const ids = vectorResults.map(r => r.id);
+        const details = await storage.getDetail({ ids });
+
+        const lines: string[] = ["\n## 関連する記憶（自動検索）\n"];
+        for (const entry of details.entries) {
+          lines.push(`### ${entry.title}`);
+          let snippet = entry.content;
+          if (snippet.length > 200) {
+            snippet = snippet.substring(0, 200) + "...";
+          }
+          lines.push(snippet);
+          lines.push("");
+        }
+
+        process.stdout.write(lines.join("\n"));
+      }
+    } catch (error) {
+      // ベクトル検索失敗は静かにスキップ（SessionStartのタイムアウトを守る）
+      console.error("[vector] context注入時ベクトル検索失敗:", error);
+    }
   }
 
   // 能動検索の指示を末尾に追加

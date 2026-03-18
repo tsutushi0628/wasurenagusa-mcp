@@ -1,6 +1,10 @@
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { MarkdownStorage } from "../storage/index.js";
-import { SearchParams, MemoryCategory } from "../types.js";
+import { SearchParams, MemoryCategory, MemoryIndexEntry } from "../types.js";
+import { EmbeddingService } from "../vector/embedding-service.js";
+import { VectorStore } from "../vector/vector-store.js";
+import { TIER_THRESHOLDS, shouldPromoteToCritical } from "../vector/memory-tier.js";
+import { config, getMemoryPath } from "../config.js";
 
 export const memorySearchTool: Tool = {
   name: "memory_search",
@@ -51,6 +55,85 @@ export async function handleMemorySearch(
   };
 
   const result = await storage.search(params);
+  const limit = params.limit || 20;
+
+  // ベクトル検索（APIキーがある場合のみ）
+  const embeddingService = new EmbeddingService(config.geminiApiKey);
+  if (embeddingService.isAvailable()) {
+    try {
+      const memoryPath = getMemoryPath(projectRoot);
+      const vectorStore = new VectorStore(memoryPath);
+      const queryEmbedding = await embeddingService.embed(params.query);
+      const vectorResults = await vectorStore.search(
+        queryEmbedding,
+        TIER_THRESHOLDS.medium,
+        limit
+      );
+
+      // キーワード結果のIDセット
+      const keywordIds = new Set(result.results.map(r => r.id));
+
+      // ベクトルのみの結果ID
+      const vectorOnlyIds: string[] = [];
+      for (const vr of vectorResults) {
+        if (!keywordIds.has(vr.id)) {
+          vectorOnlyIds.push(vr.id);
+        }
+      }
+
+      // アクセスカウント更新
+      const allVectorIds = vectorResults.map(vr => vr.id);
+      if (allVectorIds.length > 0) {
+        await vectorStore.incrementAccessCount(allVectorIds);
+      }
+
+      // critical昇格チェック
+      for (const vr of vectorResults) {
+        if (shouldPromoteToCritical(vr.accessCount + 1)) {
+          try {
+            const detail = await storage.getDetail({ ids: [vr.id] });
+            if (detail.entries.length > 0) {
+              const entry = detail.entries[0];
+              if (entry.importance !== "critical") {
+                await storage.save({
+                  category: entry.category,
+                  content: entry.content,
+                  title: entry.title,
+                  tags: entry.tags,
+                  project: entry.project,
+                  scope: entry.scope,
+                  importance: "critical",
+                  replaceId: entry.id,
+                });
+              }
+            }
+          } catch {
+            // 昇格失敗は無視
+          }
+        }
+      }
+
+      // ベクトルのみの結果をマージ（MarkdownStorageから詳細取得してインデックス化）
+      if (vectorOnlyIds.length > 0) {
+        const detail = await storage.getDetail({ ids: vectorOnlyIds });
+        const vectorIndexEntries: MemoryIndexEntry[] = detail.entries.map(entry => ({
+          id: entry.id,
+          timestamp: entry.timestamp,
+          category: entry.category,
+          title: entry.title,
+          tags: entry.tags,
+          project: entry.project,
+          scope: entry.scope,
+          importance: entry.importance,
+        }));
+        result.results.push(...vectorIndexEntries);
+        result.totalCount += vectorIndexEntries.length;
+      }
+    } catch (error) {
+      console.error("[vector] ベクトル検索失敗:", error);
+      // ベクトル検索失敗はキーワード結果に影響しない
+    }
+  }
 
   return JSON.stringify(result, null, 2);
 }

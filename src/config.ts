@@ -59,7 +59,13 @@ export const config = {
     decision: "decisions.md",
     log: "logs",  // logsはディレクトリ
     snippet: "snippets.md"
-  } as const
+  } as const,
+
+  // ベクトル記憶層設定
+  vectorStoreFile: "vectors.json",
+  embeddingModel: "gemini-embedding-001",
+  embeddingDimensions: 768,
+  backfillBatchSize: 20,
 };
 
 export function getMemoryPath(projectRoot: string): string {

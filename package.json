@@ -9,7 +9,8 @@
     "wasurenagusa-context": "./dist/cli/context.js",
     "wasurenagusa-analyze": "./dist/cli/analyze.js",
     "wasurenagusa-spec-update": "./dist/cli/spec-update.js",
-    "wasurenagusa-rebuild": "./dist/cli/rebuild.js"
+    "wasurenagusa-rebuild": "./dist/cli/rebuild.js",
+    "wasurenagusa-backfill": "./dist/cli/backfill-worker.js"
   },
   "scripts": {
     "build": "tsc && chmod +x dist/cli/*.js dist/index.js",

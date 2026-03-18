@@ -2,6 +2,9 @@ import { basename } from "path";
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { MarkdownStorage } from "../storage/index.js";
 import { SaveParams, MemoryCategory, MemoryImportance } from "../types.js";
+import { EmbeddingService } from "../vector/embedding-service.js";
+import { VectorStore } from "../vector/vector-store.js";
+import { config, getMemoryPath } from "../config.js";
 
 export const memorySaveTool: Tool = {
   name: "memory_save",
@@ -84,6 +87,26 @@ export async function handleMemorySave(
   };
 
   const result = await storage.save(params);
+
+  // Embedding生成（APIキーがある場合のみ）
+  const embeddingService = new EmbeddingService(config.geminiApiKey);
+  if (embeddingService.isAvailable()) {
+    try {
+      const memoryPath = getMemoryPath(projectRoot);
+      // replaceId指定時は旧embeddingを削除
+      if (params.replaceId) {
+        const vectorStore = new VectorStore(memoryPath);
+        await vectorStore.delete([params.replaceId]);
+      }
+      const vectorStore = new VectorStore(memoryPath);
+      const textToEmbed = params.title + " " + params.content;
+      const embedding = await embeddingService.embed(textToEmbed);
+      await vectorStore.upsert(result.id, embedding);
+    } catch (error) {
+      console.error("[vector] embedding生成失敗:", error);
+      // embedding失敗はメモリ保存結果に影響しない
+    }
+  }
 
   return JSON.stringify(result, null, 2);
 }
