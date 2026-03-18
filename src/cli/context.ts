@@ -108,14 +108,7 @@ async function getDontContent(
   // dontエントリを1回だけ読み込む
   const dontEntries = await storage.readDontEntries(currentProject);
 
-  // 層2: criticalエントリ（永続的な禁止事項）
-  const criticalEntries = dontEntries.filter(e => e.importance === "critical");
-  if (criticalEntries.length > 0) {
-    const criticalLines = criticalEntries.map(e => `- **${e.title}**: ${e.content}`).join("\n");
-    layers.push("### 絶対禁止（critical）\n\n" + criticalLines);
-  }
-
-  // 層3: 直近30日の未統合normalエントリ
+  // 層3: 直近30日の未統合エントリ
   const thirtyDaysAgo = new Date();
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
@@ -134,7 +127,6 @@ async function getDontContent(
   }
 
   const recentEntries = dontEntries.filter(e => {
-    if (e.importance === "critical") return false;
     if (consolidatedSourceIds.has(e.id)) return false;
     const entryDate = new Date(e.timestamp);
     return entryDate >= thirtyDaysAgo;

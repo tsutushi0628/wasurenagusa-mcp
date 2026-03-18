@@ -1,7 +1,7 @@
 import { basename } from "path";
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { MarkdownStorage } from "../storage/index.js";
-import { SaveParams, MemoryCategory, MemoryImportance } from "../types.js";
+import { SaveParams, MemoryCategory } from "../types.js";
 import { EmbeddingService } from "../vector/embedding-service.js";
 import { VectorStore } from "../vector/vector-store.js";
 import { config, getMemoryPath } from "../config.js";
@@ -41,10 +41,9 @@ titleには検索しやすい具体的な名詞を含めること。`,
         type: "string",
         description: "スコープ（オプション）。推奨候補: frontend, backend, infra, design, spec, ai, general。自由入力も可"
       },
-      importance: {
-        type: "string",
-        enum: ["critical", "normal"],
-        description: "記憶の強弱（オプション）。critical: 統合から除外され永続保持される重要な記憶。normal: 通常の記憶（デフォルト）"
+      intensity: {
+        type: "number",
+        description: "怒られ度（オプション、1〜5の整数）。5=激怒・諦め, 4=強い不満, 3=明確な指摘, 2=軽い注意, 1=提案。指定時はLLM自動判定より優先される"
       }
     },
     required: ["category", "title", "content"]
@@ -76,6 +75,15 @@ export async function handleMemorySave(
 ): Promise<string> {
   const storage = new MarkdownStorage(projectRoot);
 
+  let intensity: number | undefined;
+  if (args.intensity !== undefined && args.intensity !== null) {
+    const raw = Number(args.intensity);
+    if (!isNaN(raw)) {
+      const rounded = Math.round(raw);
+      intensity = Math.min(5, Math.max(1, rounded));
+    }
+  }
+
   const params: SaveParams = {
     category: args.category as MemoryCategory,
     title: args.title as string,
@@ -83,7 +91,7 @@ export async function handleMemorySave(
     tags: normalizeTags(args.tags),
     project: basename(projectRoot),
     scope: args.scope as string | undefined,
-    importance: args.importance as MemoryImportance | undefined,
+    intensity,
   };
 
   const result = await storage.save(params);

@@ -1,4 +1,4 @@
-import { MemoryCategory, MemoryEntry, MemoryImportance } from "../types.js";
+import { MemoryCategory, MemoryEntry } from "../types.js";
 
 /**
  * MarkdownコンテンツをパースしてMemoryEntry配列に変換する
@@ -18,7 +18,7 @@ export function parseMarkdown(content: string, category: MemoryCategory): Memory
   let entryContent = "";
   let project: string | undefined;
   let scope: string | undefined;
-  let importance: MemoryImportance | undefined;
+  let intensity: number | undefined;
   let inContent = false;
   let contentLines: string[] = [];
 
@@ -39,7 +39,7 @@ export function parseMarkdown(content: string, category: MemoryCategory): Memory
       };
       if (project) { entry.project = project; }
       if (scope) { entry.scope = scope; }
-      if (importance) { entry.importance = importance; }
+      if (intensity !== undefined) { entry.intensity = intensity; }
       entries.push(entry);
     }
     currentTitle = "";
@@ -49,7 +49,7 @@ export function parseMarkdown(content: string, category: MemoryCategory): Memory
     entryContent = "";
     project = undefined;
     scope = undefined;
-    importance = undefined;
+    intensity = undefined;
   }
 
   for (const line of lines) {
@@ -88,9 +88,17 @@ export function parseMarkdown(content: string, category: MemoryCategory): Memory
     } else if (trimmed.startsWith("- **scope**:")) {
       scope = trimmed.replace("- **scope**:", "").trim();
     } else if (trimmed.startsWith("- **importance**:")) {
+      // マイグレーション: importance → intensity
       const value = trimmed.replace("- **importance**:", "").trim();
-      if (value === "critical" || value === "normal") {
-        importance = value;
+      if (value === "critical") {
+        intensity = 3;
+      } else {
+        intensity = 2;
+      }
+    } else if (trimmed.startsWith("- **intensity**:")) {
+      const value = parseInt(trimmed.replace("- **intensity**:", "").trim(), 10);
+      if (!isNaN(value)) {
+        intensity = value;
       }
     } else if (trimmed.startsWith("- **tags**:")) {
       tags = trimmed.replace("- **tags**:", "").trim().split(",").map(t => t.trim()).filter(Boolean);

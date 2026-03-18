@@ -118,7 +118,7 @@ async function main() {
       project: basename(projectRoot),
       scope: analysis.scope || undefined,
       replaceId,
-      importance: analysis.importance,
+      intensity: analysis.intensity,
     };
 
     await storage.save(saveParams);

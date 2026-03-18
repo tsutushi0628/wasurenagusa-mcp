@@ -16,8 +16,8 @@ export function formatEntry(entry: MemoryEntry): string {
     ? `- **scope**: ${entry.scope}\n`
     : "";
 
-  const importanceStr = entry.importance === "critical"
-    ? `- **importance**: critical\n`
+  const intensityStr = entry.intensity !== undefined
+    ? `- **intensity**: ${entry.intensity}\n`
     : "";
 
   return `## ${entry.title}
@@ -25,7 +25,7 @@ export function formatEntry(entry: MemoryEntry): string {
 - **id**: ${entry.id}
 - **timestamp**: ${entry.timestamp}
 - **category**: ${entry.category}
-${projectStr}${scopeStr}${importanceStr}${tagsStr}- **content**: ${entry.content}
+${projectStr}${scopeStr}${intensityStr}${tagsStr}- **content**: ${entry.content}
 
 ---
 

@@ -3,8 +3,17 @@ import { ConsolidatedDont, ConsolidatedConfig } from "../types.js";
 export function formatConsolidatedDont(consolidated: ConsolidatedDont): string {
   if (consolidated.principles.length === 0) return "";
 
-  const sections = consolidated.principles.map((p, i) => {
-    return `### ${i + 1}. ${p.theme} (${p.sourceCount}件の教訓)
+  // score降順でソート
+  const sorted = [...consolidated.principles].sort((a, b) => {
+    return b.score - a.score;
+  });
+
+  // 上位25%の閾値を算出
+  const top25Index = Math.ceil(sorted.length * 0.25);
+
+  const sections = sorted.map((p, i) => {
+    const prefix = i < top25Index ? "⚠ " : "";
+    return `### ${prefix}${i + 1}. ${p.theme} (${p.sourceCount}件, 最大強度${p.maxIntensity})
 ${p.rule}
 [tags: ${p.tags.join(", ")}]`;
   });

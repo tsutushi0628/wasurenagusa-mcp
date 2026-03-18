@@ -21,7 +21,7 @@ export class DontConsolidator {
       const template = await loadPrompt("consolidate.txt");
 
       const entriesList = entries
-        .map(e => `- id: ${e.id} | title: ${e.title} | content: ${e.content}`)
+        .map(e => `- id: ${e.id} | title: ${e.title} | intensity: ${e.intensity ?? 2} | content: ${e.content}`)
         .join("\n");
 
       const prompt = template.replace("{{dontEntries}}", escapePromptVariable(entriesList));
@@ -32,6 +32,30 @@ export class DontConsolidator {
       if (!jsonMatch) return null;
 
       const parsed = JSON.parse(jsonMatch[0]);
+
+      // エントリをIDでルックアップできるMapを構築
+      const entryMap = new Map<string, MemoryEntry>();
+      for (const entry of entries) {
+        entryMap.set(entry.id, entry);
+      }
+
+      // 各principleにscore, maxIntensityを算出
+      for (const principle of parsed.principles) {
+        const sourceIds: string[] = principle.sourceIds;
+        let maxIntensity = 2;
+        for (const sourceId of sourceIds) {
+          const sourceEntry = entryMap.get(sourceId);
+          if (!sourceEntry) {
+            continue;
+          }
+          const entryIntensity = sourceEntry.intensity ?? 2;
+          if (entryIntensity > maxIntensity) {
+            maxIntensity = entryIntensity;
+          }
+        }
+        principle.maxIntensity = maxIntensity;
+        principle.score = principle.sourceCount * maxIntensity;
+      }
 
       const now = new Date();
       const jstOffset = 9 * 60 * 60 * 1000;

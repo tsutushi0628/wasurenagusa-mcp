@@ -77,7 +77,7 @@ describe("formatEntry", () => {
     expect(result).toContain("- **scope**: frontend");
   });
 
-  it("importance: 'critical' のエントリはimportance行が出力される", () => {
+  it("intensity: 3 のエントリはintensity行が出力される", () => {
     const entry: MemoryEntry = {
       id: "test-id-imp-001",
       timestamp: "2026-02-06T16:00:00.000+09:00",
@@ -85,31 +85,16 @@ describe("formatEntry", () => {
       title: "絶対禁止事項",
       content: "テスト内容です",
       tags: ["test"],
-      importance: "critical",
+      intensity: 3,
     };
 
     const result = formatEntry(entry);
-    expect(result).toContain("- **importance**: critical");
+    expect(result).toContain("- **intensity**: 3");
   });
 
-  it("importance: 'normal' のエントリはimportance行が出力されない", () => {
+  it("intensity: undefined のエントリはintensity行が出力されない", () => {
     const entry: MemoryEntry = {
       id: "test-id-imp-002",
-      timestamp: "2026-02-06T16:00:00.000+09:00",
-      category: "dont",
-      title: "通常事項",
-      content: "テスト内容です",
-      tags: ["test"],
-      importance: "normal",
-    };
-
-    const result = formatEntry(entry);
-    expect(result).not.toContain("- **importance**:");
-  });
-
-  it("importance: undefined のエントリはimportance行が出力されない", () => {
-    const entry: MemoryEntry = {
-      id: "test-id-imp-003",
       timestamp: "2026-02-06T16:00:00.000+09:00",
       category: "dont",
       title: "未設定事項",
@@ -118,10 +103,10 @@ describe("formatEntry", () => {
     };
 
     const result = formatEntry(entry);
-    expect(result).not.toContain("- **importance**:");
+    expect(result).not.toContain("- **intensity**:");
   });
 
-  it("importance: 'critical' はscopeの後、tagsの前に配置される", () => {
+  it("intensity はscopeの後、tagsの前に配置される", () => {
     const entry: MemoryEntry = {
       id: "test-id-imp-004",
       timestamp: "2026-02-06T16:00:00.000+09:00",
@@ -130,18 +115,18 @@ describe("formatEntry", () => {
       content: "テスト内容です",
       tags: ["test"],
       scope: "backend",
-      importance: "critical",
+      intensity: 4,
     };
 
     const result = formatEntry(entry);
     const lines = result.split("\n");
 
     const scopeIndex = lines.findIndex(l => l.includes("- **scope**:"));
-    const importanceIndex = lines.findIndex(l => l.includes("- **importance**:"));
+    const intensityIndex = lines.findIndex(l => l.includes("- **intensity**:"));
     const tagsIndex = lines.findIndex(l => l.includes("- **tags**:"));
 
-    expect(scopeIndex).toBeLessThan(importanceIndex);
-    expect(importanceIndex).toBeLessThan(tagsIndex);
+    expect(scopeIndex).toBeLessThan(intensityIndex);
+    expect(intensityIndex).toBeLessThan(tagsIndex);
   });
 
   it("project/scopeはcategory行の後に出力される", () => {

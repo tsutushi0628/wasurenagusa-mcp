@@ -96,7 +96,7 @@ export async function handleMemorySearch(
             const detail = await storage.getDetail({ ids: [vr.id] });
             if (detail.entries.length > 0) {
               const entry = detail.entries[0];
-              if (entry.importance !== "critical") {
+              if (entry.intensity === undefined || entry.intensity < 5) {
                 await storage.save({
                   category: entry.category,
                   content: entry.content,
@@ -104,7 +104,7 @@ export async function handleMemorySearch(
                   tags: entry.tags,
                   project: entry.project,
                   scope: entry.scope,
-                  importance: "critical",
+                  intensity: 5,
                   replaceId: entry.id,
                 });
               }
@@ -126,7 +126,7 @@ export async function handleMemorySearch(
           tags: entry.tags,
           project: entry.project,
           scope: entry.scope,
-          importance: entry.importance,
+          intensity: entry.intensity,
         }));
         result.results.push(...vectorIndexEntries);
         result.totalCount += vectorIndexEntries.length;
@@ -198,7 +198,7 @@ export async function handleMemorySearch(
                 tags: entry.tags,
                 project: entry.project,
                 scope: entry.scope,
-                importance: entry.importance,
+                intensity: entry.intensity,
               }));
               result.results.push(...projVectorEntries);
               result.totalCount += projVectorEntries.length;

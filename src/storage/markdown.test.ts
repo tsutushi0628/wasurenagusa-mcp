@@ -774,8 +774,8 @@ describe("MarkdownStorage", () => {
     });
   });
 
-  describe("importance - 保存→読み込み→フィルタの統合テスト", () => {
-    it("importance: 'critical' のdontエントリを保存→readDontEntries→importanceが反映される", async () => {
+  describe("intensity - 保存→読み込み→フィルタの統合テスト", () => {
+    it("intensity: 3 のdontエントリを保存→readDontEntries→intensityが反映される", async () => {
       const storage = new MarkdownStorage(tempDir);
 
       await storage.save({
@@ -783,16 +783,16 @@ describe("MarkdownStorage", () => {
         title: "絶対禁止事項",
         content: "これは絶対にやってはいけない",
         tags: ["critical-test"],
-        importance: "critical",
+        intensity: 3,
       });
 
       const entries = await storage.readDontEntries();
       expect(entries).toHaveLength(1);
-      expect(entries[0].importance).toBe("critical");
+      expect(entries[0].intensity).toBe(3);
       expect(entries[0].title).toBe("絶対禁止事項");
     });
 
-    it("importance: 'normal' のdontエントリを保存→readDontEntries→importanceが反映される", async () => {
+    it("intensity: 2 のdontエントリを保存→readDontEntries→intensityが反映される", async () => {
       const storage = new MarkdownStorage(tempDir);
 
       await storage.save({
@@ -800,52 +800,51 @@ describe("MarkdownStorage", () => {
         title: "通常注意事項",
         content: "これは注意すべきこと",
         tags: ["normal-test"],
-        importance: "normal",
+        intensity: 2,
       });
 
       const entries = await storage.readDontEntries();
       expect(entries).toHaveLength(1);
-      // normalはformatterで出力されないのでundefinedに戻る
-      expect(entries[0].importance).toBeUndefined();
+      expect(entries[0].intensity).toBe(2);
       expect(entries[0].title).toBe("通常注意事項");
     });
 
-    it("critical/normalの混在でフィルタリングが正しく動作する", async () => {
+    it("異なるintensityの混在でフィルタリングが正しく動作する", async () => {
       const storage = new MarkdownStorage(tempDir);
 
       await storage.save({
         category: "dont",
         title: "絶対禁止A",
         content: "内容A",
-        importance: "critical",
+        intensity: 4,
       });
       await storage.save({
         category: "dont",
         title: "通常注意B",
         content: "内容B",
-        importance: "normal",
+        intensity: 2,
       });
       await storage.save({
         category: "dont",
         title: "絶対禁止C",
         content: "内容C",
-        importance: "critical",
+        intensity: 5,
       });
 
       const entries = await storage.readDontEntries();
       expect(entries).toHaveLength(3);
 
-      const criticals = entries.filter(e => e.importance === "critical");
-      expect(criticals).toHaveLength(2);
-      expect(criticals.map(e => e.title)).toContain("絶対禁止A");
-      expect(criticals.map(e => e.title)).toContain("絶対禁止C");
+      const highIntensity = entries.filter(e => e.intensity !== undefined && e.intensity >= 4);
+      expect(highIntensity).toHaveLength(2);
+      expect(highIntensity.map(e => e.title)).toContain("絶対禁止A");
+      expect(highIntensity.map(e => e.title)).toContain("絶対禁止C");
 
-      const nonCriticals = entries.filter(e => e.importance !== "critical");
-      expect(nonCriticals).toHaveLength(1);
-      expect(nonCriticals[0].title).toBe("通常注意B");
+      const lowIntensity = entries.filter(e => e.intensity !== undefined && e.intensity < 4);
+      expect(lowIntensity).toHaveLength(1);
+      expect(lowIntensity[0].title).toBe("通常注意B");
     });
 
-    it("importance付きエントリがsearch()のMemoryIndexEntryにも反映される", async () => {
+    it("intensity付きエントリがsearch()のMemoryIndexEntryにも反映される", async () => {
       const storage = new MarkdownStorage(tempDir);
 
       await storage.save({
@@ -853,7 +852,7 @@ describe("MarkdownStorage", () => {
         title: "検索テスト禁止事項",
         content: "検索テスト内容",
         tags: ["search-test"],
-        importance: "critical",
+        intensity: 4,
       });
 
       const result = await storage.search({
@@ -862,21 +861,21 @@ describe("MarkdownStorage", () => {
       });
 
       expect(result.results).toHaveLength(1);
-      expect(result.results[0].importance).toBe("critical");
+      expect(result.results[0].intensity).toBe(4);
     });
 
-    it("importance未指定のエントリは後方互換性を維持する", async () => {
+    it("intensity未指定のエントリは後方互換性を維持する", async () => {
       const storage = new MarkdownStorage(tempDir);
 
       await storage.save({
         category: "dont",
         title: "旧式エントリ",
-        content: "importanceなしの既存エントリ",
+        content: "intensityなしの既存エントリ",
       });
 
       const entries = await storage.readDontEntries();
       expect(entries).toHaveLength(1);
-      expect(entries[0].importance).toBeUndefined();
+      expect(entries[0].intensity).toBeUndefined();
     });
   });
 

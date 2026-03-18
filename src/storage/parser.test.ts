@@ -128,7 +128,7 @@ describe("parseMarkdown", () => {
     expect(entries[1].scope).toBe("backend");
   });
 
-  it("importance行ありのMarkdownをパースしてimportanceを取得できる", () => {
+  it("旧importance: critical をパースするとintensity: 3に変換される", () => {
     const markdown = `## 絶対禁止事項
 
 - **id**: test-imp-001
@@ -145,13 +145,52 @@ describe("parseMarkdown", () => {
     const entries = parseMarkdown(markdown, "dont");
 
     expect(entries).toHaveLength(1);
-    expect(entries[0].importance).toBe("critical");
+    expect(entries[0].intensity).toBe(3);
   });
 
-  it("importance行なしのMarkdownではimportanceがundefined", () => {
+  it("旧importance: normal をパースするとintensity: 2に変換される", () => {
     const markdown = `## 通常事項
 
 - **id**: test-imp-002
+- **timestamp**: 2026-02-06T16:00:00.000+09:00
+- **category**: dont
+- **importance**: normal
+- **tags**: test
+- **content**: 通常の注意事項
+
+---
+`;
+
+    const entries = parseMarkdown(markdown, "dont");
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0].intensity).toBe(2);
+  });
+
+  it("新intensity行をパースしてintensityを取得できる", () => {
+    const markdown = `## 強い指摘事項
+
+- **id**: test-int-001
+- **timestamp**: 2026-02-06T16:00:00.000+09:00
+- **category**: dont
+- **scope**: backend
+- **intensity**: 4
+- **tags**: test
+- **content**: これは強く指摘された
+
+---
+`;
+
+    const entries = parseMarkdown(markdown, "dont");
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0].intensity).toBe(4);
+  });
+
+  it("intensity行なしのMarkdownではintensityがundefined", () => {
+    const markdown = `## 通常事項
+
+- **id**: test-imp-003
 - **timestamp**: 2026-02-06T16:00:00.000+09:00
 - **category**: dont
 - **tags**: test
@@ -163,7 +202,7 @@ describe("parseMarkdown", () => {
     const entries = parseMarkdown(markdown, "dont");
 
     expect(entries).toHaveLength(1);
-    expect(entries[0].importance).toBeUndefined();
+    expect(entries[0].intensity).toBeUndefined();
   });
 
   it("content内に ## を含むエントリを正しくパースできる", () => {
