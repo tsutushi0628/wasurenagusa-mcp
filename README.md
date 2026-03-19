@@ -24,7 +24,7 @@ wasurenagusa is an MCP server that doesn't just *remember* — it **learns**.
 2. **Distills lessons into principles** — LLM compresses hundreds of raw entries into a handful of actionable rules
 3. **Compresses config into themes** — LLM groups scattered settings into coherent summaries, preserving facts like ports and paths
 4. **Injects only what matters** — Consolidated wisdom + active settings only. No template bloat, no duplicate entries.
-5. **Semantic memory with vector search** — Gemini embeddings power meaning-based retrieval across short/medium/long-term memory tiers. Frequently accessed memories auto-promote to critical.
+5. **Semantic memory with vector search** — Gemini embeddings power meaning-based retrieval across short/medium/long-term memory tiers. Frequently accessed memories auto-promote to highest intensity.
 
 **Fully automated via Claude Code hooks — zero configuration after setup.**
 
@@ -69,7 +69,7 @@ It's not a memory bank. It's a **learning system**.
 | Auto-consolidate (LLM) | Yes (dont→principles, config→themes) | No | Yes (decay-based) | No |
 | Vector semantic search | Yes (Gemini embeddings, 768-dim) | No | Yes (ChromaDB) | No |
 | Memory tiers (short/mid/long) | Yes (cosine distance thresholds) | No | No | No |
-| Auto-promotion to critical | Yes (access count-based) | No | No | No |
+| Auto-promotion (intensity) | Yes (access count → intensity 5) | No | No | No |
 | Zero-effort via hooks | Yes | Yes | No | No |
 | Human-readable storage | Yes (Markdown + JSON vectors) | No (SQLite) | No (ChromaDB) | Yes |
 | Multi-LLM support | Gemini / OpenAI / Anthropic | Claude only | Local embeddings | N/A |
@@ -86,15 +86,15 @@ Session Start (Hook)
   → Checks if consolidation is stale
   → Spawns background LLM worker if needed (non-blocking)
   → Spawns background embedding backfill worker (non-blocking)
-  → Injects consolidated config + principles (layer 1) + critical permanent entries (layer 2) + recent 30-day entries (layer 3) + owner profile
-  → Vector search injects semantically related short-term memories (layer 4)
-  → Cross-project vector search injects related memories from other active projects (layer 5)
+  → Injects consolidated config + principles (layer 1) + recent 30-day entries (layer 2) + owner profile
+  → Vector search injects semantically related short-term memories (layer 3)
+  → Cross-project vector search injects related memories from other active projects (layer 4)
   → Only customized settings injected (defaults stripped)
 
 During Session
   → memory_save auto-generates 768-dim embedding via Gemini
   → memory_search merges keyword + vector semantic results
-  → Vector hits increment access counts → auto-promote to critical at threshold
+  → Vector hits increment access counts → auto-promote to intensity 5 at threshold
 
 Session End (Hook)
   → LLM analyzes the conversation
@@ -261,6 +261,8 @@ Launch Claude Code. That's it.
 | `wasurenagusa-backfill` | Generate embeddings for entries without vectors | Background (auto-spawned) |
 | `wasurenagusa-rebuild` | Repair corrupted memory data (dedup, re-sort logs) | Manual |
 | `wasurenagusa-spec-update` | Auto-update spec documents | cron / systemd timer |
+| `wasurenagusa-consolidate-all` | Run consolidation across all active projects | Manual / Scheduler |
+| `wasurenagusa-scheduler` | Install/uninstall/status nightly consolidation scheduler | Manual |
 
 ---
 
@@ -278,7 +280,7 @@ wasurenagusa introduces a biologically-inspired memory system powered by Gemini 
 | **Medium-term** | ≤ 0.45 | Contextually related — surfaced during `memory_search` |
 | **Long-term** | ≤ 0.7 | Loosely related — discoverable but not proactively shown |
 
-**Automatic promotion:** Every time a memory is retrieved via vector search, its access count increments. After 5 retrievals, the memory auto-promotes to `importance: "critical"` — ensuring frequently-needed knowledge is permanently injected every session. Long-dormant memories can be "woken up" by relevance and eventually earn critical status through repeated access.
+**Automatic promotion:** Every time a memory is retrieved via vector search, its access count increments. After 5 retrievals, the memory auto-promotes to `intensity: 5` — ensuring frequently-needed knowledge gets maximum weight in consolidation. Long-dormant memories can be "woken up" by relevance and eventually earn top intensity through repeated access.
 
 **How it works:**
 
@@ -319,23 +321,30 @@ No configuration needed — works automatically after two or more projects have 
 
 When memory entries accumulate, the LLM automatically compresses them into compact summaries:
 
-- **Dont entries** → 5-9 behavioral principles (e.g., 1,581 raw entries → 7 principles). Entries marked `importance: "critical"` are **excluded from consolidation** and preserved as-is permanently.
+- **Dont entries** → 5-9 behavioral principles scored by `sourceCount × maxIntensity`. All entries are consolidated — high-intensity lessons naturally surface at the top.
 - **Config entries** → 4-5 thematic summaries (e.g., 29 entries → 5 themes preserving all ports, paths, URLs)
 
-Consolidation runs as a detached background process during session start — no latency impact. Results are cached as JSON and used from the next session onward. Staleness is detected by comparing file modification times and entry counts.
+Consolidation runs as a detached background process during session start, and optionally as a **nightly scheduled job** (2:00 AM). Results are cached as JSON and used from the next session onward. Staleness is detected by comparing file modification times and entry counts.
 
 Raw entries are always preserved. The consolidated version is injected at session start; original entries remain searchable via `memory_search`.
 
-#### Memory Strength (importance)
+#### Memory Intensity (1-5)
 
-Dont entries support two importance levels:
+Every dont entry carries an **intensity** score (1-5) representing the severity of the lesson:
 
-| importance | Meaning | Consolidation | Injection |
-|-----------|---------|--------------|-----------|
-| `critical` | Strong prohibitions, peak anger, repeated issues | **Excluded (permanent)** | Injected verbatim every session |
-| `normal` | Standard learning records | Consolidated | Injected as principles |
+| Intensity | Meaning | Example |
+|-----------|---------|---------|
+| 5 | Rage / resignation — user nearly gave up | "I told you 10 times, STOP doing this" |
+| 4 | Strong frustration — explicit anger | "No! Don't do that!" |
+| 3 | Clear correction — firm but calm | "That's wrong, do it this way" |
+| 2 | Mild note — gentle guidance | "Next time, prefer X over Y" |
+| 1 | Suggestion — informational | "FYI, we usually do it like this" |
 
-Set manually via `memory_save`. Auto-saved entries are judged by the LLM based on emotional intensity and expression strength.
+**Auto-detection:** The LLM analyzes user messages for emotional signals (exclamation marks, strong language, repeated corrections) and assigns intensity automatically. Conversation metadata (turns since last positive feedback, message length ratio) provides additional boost signals.
+
+**Manual override:** Pass `intensity: N` to `memory_save` to set or adjust the score.
+
+**Scoring formula:** During consolidation, each principle gets `score = sourceCount × maxIntensity`. Principles are sorted by score descending — frequently repeated, high-anger lessons appear first with stronger wording.
 
 ### Auto-Archiving
 
@@ -354,6 +363,23 @@ Submit tasks via `task_submit` and wasurenagusa runs them using Claude CLI as a 
 On first run, an `owner-profile.md` template is generated. Fill it in to teach the AI your decision-making preferences for autonomous task execution.
 
 Only sections you've actually customized are injected — default selections and empty fields are automatically stripped, keeping injection minimal.
+
+### Nightly Consolidation Scheduler
+
+Instead of only consolidating at session start, you can schedule nightly consolidation across all active projects — like "sleeping on it overnight."
+
+```bash
+# Install (macOS: launchd, Linux: crontab)
+wasurenagusa-scheduler install
+
+# Check status
+wasurenagusa-scheduler status
+
+# Remove
+wasurenagusa-scheduler uninstall
+```
+
+Runs daily at **2:00 AM**, consolidating dont and config entries for all recently active projects. This ensures your AI starts every morning with freshly organized principles, even if you never close your sessions.
 
 ---
 
