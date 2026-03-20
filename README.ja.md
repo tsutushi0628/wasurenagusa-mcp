@@ -104,6 +104,36 @@ wasurenagusa-analyze 実行
 
 ---
 
+## 出力モード（Output Mode）
+
+SessionStart Hook の出力形式をプロジェクトごとに切り替えられます。`.wasurenagusa/config.json` で設定します。
+
+| モード | 説明 | 推奨環境 |
+|--------|------|----------|
+| **injection**（デフォルト） | 記憶の全文をセッション開始時に注入 | サブエージェント非対応環境（Cursor、Windsurf 等） |
+| **agent** | タイトルインデックスのみ注入。詳細はサブエージェント経由で `memory_get_detail` を使って取得 | Claude Code + Agent Teams |
+
+### 設定方法
+
+プロジェクトの `.wasurenagusa/config.json` に `outputMode` を追加:
+
+```json
+{
+  "outputMode": "agent"
+}
+```
+
+ファイルが存在しない場合や `outputMode` が未設定の場合は `"injection"`（完全な後方互換性）。
+
+### agent モード利用時の推奨 CLAUDE.md ルール
+
+```markdown
+- 記憶操作はサブエージェント経由で読み書きする（memory_search / memory_get_detail / memory_save）
+- メインコンテキストに記憶の生データを持ち込まない
+```
+
+---
+
 ## 主要機能
 
 ### 自動記憶（Hooks 連携）

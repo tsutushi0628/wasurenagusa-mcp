@@ -266,6 +266,38 @@ Launch Claude Code. That's it.
 
 ---
 
+## Output Mode
+
+wasurenagusa supports two output modes for the SessionStart Hook, configurable per project via `.wasurenagusa/config.json`.
+
+| Mode | Description | Best for |
+|------|-------------|----------|
+| **injection** (default) | Injects full memory text at session start | Environments without sub-agents (Cursor, Windsurf, etc.) |
+| **agent** | Injects title index only. Details are retrieved on-demand via sub-agents using `memory_get_detail` | Claude Code + Agent Teams |
+
+### Configuration
+
+Add `outputMode` to your project's `.wasurenagusa/config.json`:
+
+```json
+{
+  "outputMode": "agent"
+}
+```
+
+If the file doesn't exist or `outputMode` is not set, the default is `"injection"` (full backward compatibility).
+
+### Recommended CLAUDE.md rules for agent mode
+
+When using `"agent"` mode with Claude Code Agent Teams, add these rules to your project's `CLAUDE.md`:
+
+```markdown
+- Read/write memories via sub-agents (memory_search / memory_get_detail / memory_save)
+- Do not bring raw memory data into the main context
+```
+
+---
+
 ## Advanced Features
 
 ### Vector Memory Tiers
