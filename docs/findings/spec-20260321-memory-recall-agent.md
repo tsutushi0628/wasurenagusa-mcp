@@ -47,8 +47,12 @@ SessionStart Hookでの大量コンテキスト注入をやめ、outputMode=agen
 7. 記憶保存（memory_save） → メインが直接実行（判断はメインにしかできない）
 
 ## 実装タスク
-1. wasurenagusa-mcp: agentモードのSessionStart出力をdont+config+owner-profileのみに変更
-2. wasurenagusa-mcp: UserPromptSubmit Hook用のCLIスクリプト（wasurenagusa-recall）を新設
-3. CLAUDE.md: 記憶想起Agentの起動ルールを追加
-4. Hookの設定ドキュメント更新（user-prompt-submit Hook追加）
-5. README更新
+1. [x] wasurenagusa-mcp: agentモードのSessionStart出力をdont+config+owner-profileのみに変更 → b6d98a9
+2. [x] wasurenagusa-mcp: wasurenagusa-context内にUserPromptSubmit分岐を追加（wasurenagusa-recall新設は不要）
+3. [x] CLAUDE.md: 記憶想起Agentの起動ルールを追加
+4. [x] README更新（UserPromptSubmit Hook設定・agentモードフロー追記）
+
+## 実装判断メモ
+- wasurenagusa-recall CLI新設は不要。既存wasurenagusa-contextのhook_event_name分岐で対応
+- UserPromptSubmit Hookの出力は1行リマインドのみ（コンテキスト汚損防止）
+- 記憶想起Agentの起動判断はメインAgentに委ねる（「必要と判断した場合」）

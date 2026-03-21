@@ -2,6 +2,7 @@
 /**
  * wasurenagusa-context CLI
  * SessionStart Hook用: config/dontを読み込んで標準出力に出力
+ * UserPromptSubmit Hook用: 記憶想起リマインドテキストを出力
  *
  * 使い方: wasurenagusa-context
  * Hooks設定で呼び出される（stdoutがClaudeのコンテキストに注入される）
@@ -243,19 +244,31 @@ async function getConfigContent(
   return context.config;
 }
 
+async function handleUserPromptSubmit(): Promise<void> {
+  console.log("ユーザーの発言に関連する記憶があるかもしれません。必要と判断した場合、サブエージェントを起動してmemory_searchで関連記憶を検索してください。");
+}
+
 async function main() {
   // stdinからHook入力JSONを読み取る
   let cwd: string;
+  let hookEventName: string = "SessionStart";
   try {
     const inputData = await readStdin();
     if (inputData.trim()) {
       const hookInput: HookInput = JSON.parse(inputData);
       cwd = hookInput.cwd;
+      hookEventName = hookInput.hook_event_name || "SessionStart";
     } else {
       cwd = process.cwd();
     }
   } catch {
     cwd = process.cwd();
+  }
+
+  // UserPromptSubmit: 記憶想起リマインドのみ出力
+  if (hookEventName === "UserPromptSubmit") {
+    await handleUserPromptSubmit();
+    return;
   }
 
   // cwdからプロジェクトルートを探索

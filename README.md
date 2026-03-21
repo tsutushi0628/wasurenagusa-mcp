@@ -82,7 +82,7 @@ It's not a memory bank. It's a **learning system**.
 ## How It Works
 
 ```
-Session Start (Hook)
+Session Start (Hook) — injection mode
   → Checks if consolidation is stale
   → Spawns background LLM worker if needed (non-blocking)
   → Spawns background embedding backfill worker (non-blocking)
@@ -90,6 +90,16 @@ Session Start (Hook)
   → Vector search injects semantically related short-term memories (layer 3)
   → Cross-project vector search injects related memories from other active projects (layer 4)
   → Only customized settings injected (defaults stripped)
+
+Session Start (Hook) — agent mode
+  → Injects dont summary + config index + owner profile (minimal footprint)
+  → No vector search at startup (deferred to on-demand recall)
+
+User Prompt (Hook) — agent mode
+  → Injects 1-line reminder: "search memory if relevant"
+  → Main agent spawns memory-recall sub-agent as needed
+  → Sub-agent runs memory_search → returns summary only (no raw data in main context)
+  → Survives compaction (re-injected on every user message)
 
 During Session
   → memory_save auto-generates 768-dim embedding via Gemini
@@ -186,6 +196,17 @@ Add to `~/.claude/settings.json` (or `settings.local.json` if you prefer to keep
         ]
       }
     ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "wasurenagusa-context",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
@@ -256,7 +277,7 @@ Launch Claude Code. That's it.
 
 | Command | Purpose | Invoked by |
 |---------|---------|------------|
-| `wasurenagusa-context` | Output config + dont + vector memories to stdout | SessionStart Hook / PreCompact Hook |
+| `wasurenagusa-context` | Output config + dont + vector memories to stdout | SessionStart / UserPromptSubmit / PreCompact Hook |
 | `wasurenagusa-analyze` | LLM-analyze conversation and auto-save | Stop Hook |
 | `wasurenagusa-backfill` | Generate embeddings for entries without vectors | Background (auto-spawned) |
 | `wasurenagusa-rebuild` | Repair corrupted memory data (dedup, re-sort logs) | Manual |
@@ -273,7 +294,7 @@ wasurenagusa supports two output modes for the SessionStart Hook, configurable p
 | Mode | Description | Best for |
 |------|-------------|----------|
 | **injection** (default) | Injects full memory text at session start | Environments without sub-agents (Cursor, Windsurf, etc.) |
-| **agent** | Injects title index only. Details are retrieved on-demand via sub-agents using `memory_get_detail` | Claude Code + Agent Teams |
+| **agent** | Injects minimal index at session start + memory-recall reminder on each user message. Details retrieved on-demand via sub-agents | Claude Code + Agent Teams |
 
 ### Configuration
 
@@ -294,6 +315,7 @@ When using `"agent"` mode with Claude Code Agent Teams, add these rules to your 
 ```markdown
 - Read/write memories via sub-agents (memory_search / memory_get_detail / memory_save)
 - Do not bring raw memory data into the main context
+- When system-reminder suggests memory recall, spawn a sub-agent to run memory_search and return summary only
 ```
 
 ---
