@@ -119,7 +119,17 @@ async function getDontContent(
     if (consolidated && consolidated.principles.length > 0) {
       const sorted = [...consolidated.principles].sort((a, b) => b.score - a.score);
       const principleLines = sorted.map(
-        p => `- [統合済み] ${p.theme}（${p.sourceCount}件, 強度${p.maxIntensity}）`
+        p => {
+          // ruleの❌部分（💡の手前まで）を1行要約として抽出
+          let summary = p.rule;
+          const pivotIndex = summary.indexOf("💡");
+          if (pivotIndex > 0) {
+            summary = summary.substring(0, pivotIndex).trim();
+          }
+          // 先頭の❌マークを除去して要約文のみにする
+          summary = summary.replace(/^❌\s*/, "");
+          return `- [統合済み] ${p.theme}（${p.sourceCount}件, 強度${p.maxIntensity}）\n  → ${summary}`;
+        }
       );
       layers.push("### 行動原則（統合済み）\n" + principleLines.join("\n"));
     }
