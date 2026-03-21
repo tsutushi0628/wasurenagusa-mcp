@@ -22,9 +22,10 @@ wasurenagusa is an MCP server that doesn't just *remember* — it **learns**.
 
 1. **Detects mistakes automatically** — Catches retry patterns, user frustration, and repeated failures
 2. **Distills lessons into principles** — LLM compresses hundreds of raw entries into a handful of actionable rules
-3. **Compresses config into themes** — LLM groups scattered settings into coherent summaries, preserving facts like ports and paths
-4. **Injects only what matters** — Consolidated wisdom + active settings only. No template bloat, no duplicate entries.
-5. **Semantic memory with vector search** — Gemini embeddings power meaning-based retrieval across short/medium/long-term memory tiers. Frequently accessed memories auto-promote to highest intensity.
+3. **Converts negatives to positives** — Generates `positiveRule` alongside each principle: "don't do X" becomes "do Y instead." Research shows LLMs follow affirmative instructions significantly better than prohibitions ([Pink Elephant problem](https://arxiv.org/abs/2404.15154))
+4. **Compresses config into themes** — LLM groups scattered settings into coherent summaries, preserving facts like ports and paths
+5. **Injects only what matters** — Consolidated wisdom + active settings only. No template bloat, no duplicate entries.
+6. **Semantic memory with vector search** — Gemini embeddings power meaning-based retrieval across short/medium/long-term memory tiers. Frequently accessed memories auto-promote to highest intensity.
 
 **Fully automated via Claude Code hooks — zero configuration after setup.**
 
@@ -33,9 +34,10 @@ wasurenagusa is an MCP server that doesn't just *remember* — it **learns**.
 From the author's daily use across 8 production projects (with cross-project memory sharing between them):
 
 ```
-1,581 "dont" entries   →  5-9 principles per project (LLM consolidation)
-29 config entries      →  4-5 thematic summaries     (LLM consolidation)
-21,800 chars raw data  →  6,200 chars injected        (71% reduction)
+1,581 "dont" entries   →  5-9 principles per project    (LLM consolidation)
+  each with positiveRule  →  affirmative-only injection  (Pink Elephant fix)
+29 config entries      →  4-5 thematic summaries        (LLM consolidation)
+21,800 chars raw data  →  6,200 chars injected           (71% reduction)
 ```
 
 ---
@@ -375,12 +377,23 @@ No configuration needed — works automatically after two or more projects have 
 
 When memory entries accumulate, the LLM automatically compresses them into compact summaries:
 
-- **Dont entries** → 5-9 behavioral principles scored by `sourceCount × maxIntensity`. All entries are consolidated — high-intensity lessons naturally surface at the top.
+- **Dont entries** → 5-9 behavioral principles scored by `sourceCount × maxIntensity`. Each principle includes both the original `rule` (❌→💡→✅ format) and a `positiveRule` (affirmative-only phrasing). The `positiveRule` is injected by default — research on the [Pink Elephant problem](https://arxiv.org/abs/2404.15154) shows LLMs struggle with negation in instructions.
 - **Config entries** → 4-5 thematic summaries (e.g., 29 entries → 5 themes preserving all ports, paths, URLs)
 
 Consolidation runs as a detached background process during session start, and optionally as a **nightly scheduled job** (2:00 AM). Results are cached as JSON and used from the next session onward. Staleness is detected by comparing file modification times and entry counts.
 
 Raw entries are always preserved. The consolidated version is injected at session start; original entries remain searchable via `memory_search`.
+
+#### Positive Rule Conversion
+
+Every consolidated principle stores two forms:
+
+| Field | Format | Purpose |
+|-------|--------|---------|
+| `rule` | ❌ Bad pattern → 💡 Why it's bad → ✅ Correct behavior | Full context for `memory_get_detail` |
+| `positiveRule` | Affirmative-only action statement ("do X", "use Y") | Injected into LLM context |
+
+**Why?** LLM attention mechanisms activate concepts mentioned in negations — "don't use innerHTML" still activates "innerHTML." Affirmative instructions ("use textContent") activate only the desired behavior. The raw user feedback (`dont.md`) is preserved unchanged; conversion happens only at the consolidation layer.
 
 #### Memory Intensity (1-5)
 
