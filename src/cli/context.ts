@@ -322,7 +322,7 @@ async function main() {
     }
 
     if (dontContent) {
-      output.push("### dont（行動原則）");
+      output.push("### 行動原則（過去のフィードバック由来）");
       output.push(dontContent);
       output.push("");
     }
