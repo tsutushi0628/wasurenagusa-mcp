@@ -1,4 +1,4 @@
-export { isConsolidationStale, readConsolidatedDont, writeConsolidatedDont } from "./staleness.js";
+export { isConsolidationStale, readConsolidatedDont, writeConsolidatedDont, readDontSummary, writeDontSummary } from "./staleness.js";
 export { isConfigConsolidationStale, readConsolidatedConfig, writeConsolidatedConfig } from "./staleness.js";
 export { DontConsolidator } from "./dont-consolidator.js";
 export { ConfigConsolidator } from "./config-consolidator.js";

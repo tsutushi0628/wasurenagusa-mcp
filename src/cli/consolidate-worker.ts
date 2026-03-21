@@ -17,6 +17,7 @@ import { ConfigConsolidator } from "../consolidator/config-consolidator.js";
 import {
   writeConsolidatedDont,
   writeConsolidatedConfig,
+  writeDontSummary,
   isConsolidationStale,
   isConfigConsolidationStale,
 } from "../consolidator/staleness.js";
@@ -43,6 +44,10 @@ async function main() {
       const result = await consolidator.consolidate(dontEntries);
       if (result) {
         await writeConsolidatedDont(memoryPath, result);
+
+        // サマリ生成・保存
+        const summary = await consolidator.generateSummary(result);
+        await writeDontSummary(memoryPath, summary);
       }
     }
   }

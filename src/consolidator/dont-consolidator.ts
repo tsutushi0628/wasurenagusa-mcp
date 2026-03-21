@@ -2,6 +2,7 @@ import { ConsolidatedDont, MemoryEntry } from "../types.js";
 import { loadPrompt } from "../analyzer/prompt-loader.js";
 import { escapePromptVariable } from "../utils/prompt-escape.js";
 import { GenerateTextFn, createGenerateTextFn } from "../llm/provider.js";
+import { formatConsolidatedDont } from "./formatter.js";
 
 export class DontConsolidator {
   private generateText: GenerateTextFn;
@@ -71,5 +72,16 @@ export class DontConsolidator {
     } catch {
       return null;
     }
+  }
+
+  async generateSummary(consolidated: ConsolidatedDont): Promise<string> {
+    const formatted = formatConsolidatedDont(consolidated);
+
+    const prompt = `以下の行動原則を500字程度の日本語で要約してください。オーナーが何を重視し、何を禁止しているかが一読でわかるように。
+
+${escapePromptVariable(formatted)}`;
+
+    const text = await this.generateText(prompt);
+    return text.trim();
   }
 }

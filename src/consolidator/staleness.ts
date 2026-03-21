@@ -5,6 +5,8 @@ import { config } from "../config.js";
 import { ConsolidatedDont, ConsolidatedConfig } from "../types.js";
 import { parseMarkdown } from "../storage/parser.js";
 
+const CONSOLIDATED_DONT_SUMMARY_FILE = "consolidated-dont-summary.md";
+
 export async function isConsolidationStale(memoryPath: string): Promise<boolean> {
   const dontPath = join(memoryPath, config.categoryFiles.dont);
   const consolidatedPath = join(memoryPath, config.consolidatedDontFile);
@@ -85,4 +87,24 @@ export async function readConsolidatedConfig(memoryPath: string): Promise<Consol
 export async function writeConsolidatedConfig(memoryPath: string, data: ConsolidatedConfig): Promise<void> {
   const consolidatedPath = join(memoryPath, config.consolidatedConfigFile);
   await writeFile(consolidatedPath, JSON.stringify(data, null, 2), "utf-8");
+}
+
+// === Dont Summary ===
+
+export async function readDontSummary(memoryPath: string): Promise<string | null> {
+  const summaryPath = join(memoryPath, CONSOLIDATED_DONT_SUMMARY_FILE);
+  if (!existsSync(summaryPath)) return null;
+
+  try {
+    const content = await readFile(summaryPath, "utf-8");
+    if (content.trim().length === 0) return null;
+    return content;
+  } catch {
+    return null;
+  }
+}
+
+export async function writeDontSummary(memoryPath: string, summary: string): Promise<void> {
+  const summaryPath = join(memoryPath, CONSOLIDATED_DONT_SUMMARY_FILE);
+  await writeFile(summaryPath, summary, "utf-8");
 }

@@ -29,6 +29,7 @@ import {
   isConfigConsolidationStale,
   readConsolidatedDont,
   readConsolidatedConfig,
+  readDontSummary,
   formatConsolidatedDont,
   formatConsolidatedConfig,
 } from "../consolidator/index.js";
@@ -114,55 +115,46 @@ async function getDontContent(
   const layers: string[] = [];
 
   if (outputMode === "agent") {
-    // agentモード: タイトル+件数+強度のインデックスのみ
-    const consolidated = await readConsolidatedDont(memoryPath);
-    if (consolidated && consolidated.principles.length > 0) {
-      const sorted = [...consolidated.principles].sort((a, b) => b.score - a.score);
-      const principleLines = sorted.map(
-        p => {
-          // ruleの❌部分（💡の手前まで）を1行要約として抽出
-          let summary = p.rule;
-          const pivotIndex = summary.indexOf("💡");
-          if (pivotIndex > 0) {
-            summary = summary.substring(0, pivotIndex).trim();
+    // agentモード: サマリファイルがあればサマリ注入
+    const summary = await readDontSummary(memoryPath);
+    if (summary) {
+      layers.push("### 行動原則（サマリ）\n" + summary);
+
+      // 統合済みに含まれない直近エントリのみ追加
+      const consolidated = await readConsolidatedDont(memoryPath);
+      const dontEntries = await storage.readDontEntries(currentProject);
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+      const consolidatedSourceIds = new Set<string>();
+      if (consolidated) {
+        for (const principle of consolidated.principles) {
+          for (const sourceId of principle.sourceIds) {
+            consolidatedSourceIds.add(sourceId);
           }
-          // 先頭の❌マークを除去して要約文のみにする
-          summary = summary.replace(/^❌\s*/, "");
-          return `- [統合済み] ${p.theme}（${p.sourceCount}件, 強度${p.maxIntensity}）\n  → ${summary}`;
-        }
-      );
-      layers.push("### 行動原則（統合済み）\n" + principleLines.join("\n"));
-    }
-
-    const dontEntries = await storage.readDontEntries(currentProject);
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-
-    const consolidatedSourceIds = new Set<string>();
-    if (consolidated) {
-      for (const principle of consolidated.principles) {
-        for (const sourceId of principle.sourceIds) {
-          consolidatedSourceIds.add(sourceId);
         }
       }
+
+      const recentEntries = dontEntries
+        .filter(e => {
+          if (consolidatedSourceIds.has(e.id)) return false;
+          const entryDate = new Date(e.timestamp);
+          return entryDate >= thirtyDaysAgo;
+        })
+        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+        .slice(0, 5);
+
+      if (recentEntries.length > 0) {
+        const recentLines = recentEntries.map(e => `- ${e.title}`);
+        layers.push("### 直近の注意事項（最新5件）\n" + recentLines.join("\n"));
+      }
+
+      if (layers.length === 0) return "";
+      return layers.join("\n\n");
     }
 
-    const recentEntries = dontEntries
-      .filter(e => {
-        if (consolidatedSourceIds.has(e.id)) return false;
-        const entryDate = new Date(e.timestamp);
-        return entryDate >= thirtyDaysAgo;
-      })
-      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-      .slice(0, 5);
-
-    if (recentEntries.length > 0) {
-      const recentLines = recentEntries.map(e => `- ${e.title}`);
-      layers.push("### 直近の注意事項（最新5件）\n" + recentLines.join("\n"));
-    }
-
-    if (layers.length === 0) return "";
-    return layers.join("\n\n");
+    // サマリファイルがない場合: injectionモードと同じ全文出力にフォールバック
+    // （以下のinjectionモード処理にそのまま流れる）
   }
 
   // injectionモード: 全文注入
@@ -334,105 +326,8 @@ async function main() {
       output.push("");
     }
 
-    // ベクトル検索による関連記憶 → タイトルのみ
-    const embeddingService = new EmbeddingService(config.geminiApiKey);
-    if (embeddingService.isAvailable()) {
-      try {
-        const vectorStore = new VectorStore(memoryPath);
-
-        let queryEmbedding: number[];
-        const topicPath = join(memoryPath, "last-session-topic.json");
-        try {
-          const topicRaw = await readFile(topicPath, "utf-8");
-          const topicData = JSON.parse(topicRaw);
-          if (topicData.embedding && Array.isArray(topicData.embedding)) {
-            queryEmbedding = topicData.embedding;
-          } else {
-            queryEmbedding = await embeddingService.embed(currentProject);
-          }
-        } catch {
-          queryEmbedding = await embeddingService.embed(currentProject);
-        }
-
-        const vectorResults = await vectorStore.search(
-          queryEmbedding,
-          TIER_THRESHOLDS.medium,
-          5
-        );
-
-        if (vectorResults.length > 0) {
-          const ids = vectorResults.map(r => r.id);
-          const details = await storage.getDetail({ ids });
-
-          output.push("### 関連する記憶（自動検索）");
-          for (const entry of details.entries) {
-            output.push(`- [ID:${entry.id}] ${entry.title}`);
-          }
-          output.push("");
-        }
-      } catch (error) {
-        console.error("[vector] context注入時ベクトル検索失敗:", error);
-      }
-    }
-
-    // 他プロジェクト横断検索 → タイトルのみ
-    try {
-      const crossEmbeddingService = new EmbeddingService(config.geminiApiKey);
-      if (crossEmbeddingService.isAvailable()) {
-        const { ActiveProjectsTracker } = await import("../active-projects.js");
-        const schedulerDir = join(homedir(), ".wasurenagusa", "scheduler");
-        const activeTracker = new ActiveProjectsTracker(schedulerDir);
-        const otherProjects = await activeTracker.getOtherActiveProjects(currentProject);
-
-        if (otherProjects.length > 0) {
-          let crossQueryEmbedding: number[];
-          const crossTopicPath = join(memoryPath, "last-session-topic.json");
-          try {
-            const topicRaw = await readFile(crossTopicPath, "utf-8");
-            const topicData = JSON.parse(topicRaw);
-            if (topicData.embedding && Array.isArray(topicData.embedding)) {
-              crossQueryEmbedding = topicData.embedding;
-            } else {
-              crossQueryEmbedding = await crossEmbeddingService.embed(currentProject);
-            }
-          } catch {
-            crossQueryEmbedding = await crossEmbeddingService.embed(currentProject);
-          }
-
-          const crossTitles: string[] = [];
-
-          for (const proj of otherProjects) {
-            try {
-              const projMemoryPath = getMemoryPath(proj.path);
-              const projVectorStore = new VectorStore(projMemoryPath);
-
-              const crossResults = await projVectorStore.search(crossQueryEmbedding, TIER_THRESHOLDS.short, 3);
-
-              if (crossResults.length > 0) {
-                const projStorage = new MarkdownStorage(proj.path);
-                const crossDetail = await projStorage.getDetail({
-                  ids: crossResults.map(r => r.id),
-                });
-
-                for (const entry of crossDetail.entries) {
-                  crossTitles.push(`- [${proj.name}] ${entry.title}`);
-                }
-              }
-            } catch {
-              continue;
-            }
-          }
-
-          if (crossTitles.length > 0) {
-            output.push("### 他プロジェクトの関連記憶");
-            output.push(...crossTitles);
-            output.push("");
-          }
-        }
-      }
-    } catch {
-      // 横断検索の失敗は握りつぶす
-    }
+    // agentモードではベクトル検索・他プロジェクト横断検索を省略
+    // （コンテキスト効率のため。必要時はサブエージェント経由でmemory_searchを使う）
 
     // メモリ活用ルール（サブエージェント委譲前提）
     output.push("## メモリ活用ルール");
