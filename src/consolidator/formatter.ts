@@ -13,8 +13,9 @@ export function formatConsolidatedDont(consolidated: ConsolidatedDont): string {
 
   const sections = sorted.map((p, i) => {
     const prefix = i < top25Index ? "⚠ " : "";
+    const displayRule = p.positiveRule || p.rule;
     return `### ${prefix}${i + 1}. ${p.theme} (${p.sourceCount}件, 最大強度${p.maxIntensity})
-${p.rule}
+${displayRule}
 [tags: ${p.tags.join(", ")}]`;
   });
 

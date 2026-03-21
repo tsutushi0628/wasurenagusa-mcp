@@ -357,7 +357,7 @@ async function main() {
     }
 
     if (dontContent && dontContent !== "（ルールなし）") {
-      output.push("## やってはいけないこと（dont）\n");
+      output.push("## 行動原則（dont由来）\n");
       output.push(dontContent);
     }
 

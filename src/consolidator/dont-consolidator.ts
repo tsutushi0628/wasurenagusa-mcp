@@ -77,7 +77,7 @@ export class DontConsolidator {
   async generateSummary(consolidated: ConsolidatedDont): Promise<string> {
     const formatted = formatConsolidatedDont(consolidated);
 
-    const prompt = `以下の行動原則を500字程度の日本語で要約してください。オーナーが何を重視し、何を禁止しているかが一読でわかるように。
+    const prompt = `以下の行動原則を500字程度の日本語で要約してください。オーナーが何を重視し、どう行動すべきかが一読でわかるように。
 
 ${escapePromptVariable(formatted)}`;
 

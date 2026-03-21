@@ -132,6 +132,7 @@ export interface AnalysisInput {
 export interface ConsolidatedPrinciple {
   theme: string;            // テーマ名（5-10文字）
   rule: string;             // ❌→💡→✅形式の統合ルール
+  positiveRule: string;     // 肯定形に変換された行動原則（注入用）
   tags: string[];           // memory_search用タグ
   sourceCount: number;      // 元エントリ数
   sourceIds: string[];      // 元エントリID一覧
