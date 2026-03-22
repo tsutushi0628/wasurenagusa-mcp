@@ -5,6 +5,7 @@
 [![npm version](https://img.shields.io/npm/v/wasurenagusa-mcp)](https://www.npmjs.com/package/wasurenagusa-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-support-FF5E5B?style=flat&logo=ko-fi)](https://ko-fi.com/tsutushi0628)
 
 > *wasurenagusa* (forget-me-not) — a Japanese flower whose name means "don't forget me."
 

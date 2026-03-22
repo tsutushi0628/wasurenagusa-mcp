@@ -493,3 +493,9 @@ MIT
 ---
 
 [English README](./README.md)
+
+---
+
+## Support
+
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-support-FF5E5B?style=flat&logo=ko-fi)](https://ko-fi.com/tsutushi0628)
