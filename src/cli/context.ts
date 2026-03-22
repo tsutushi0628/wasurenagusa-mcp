@@ -38,6 +38,7 @@ import { loadOwnerProfile, getOwnerProfilePath } from "../utils/owner-profile.js
 import { EmbeddingService } from "../vector/embedding-service.js";
 import { VectorStore } from "../vector/vector-store.js";
 import { TIER_THRESHOLDS } from "../vector/memory-tier.js";
+import type { MemoryEntry } from "../types.js";
 
 type OutputMode = "injection" | "agent";
 
@@ -136,14 +137,36 @@ async function getDontContent(
         }
       }
 
-      const recentEntries = dontEntries
+      // 重要度の高いdontエントリ上位3件を原文付きで注入
+      // intensityフィールドがあればそれで降順ソート、なければ直近順
+      const allDontEntries = [...dontEntries].sort((a, b) => {
+        const intensityA = a.intensity ?? 0;
+        const intensityB = b.intensity ?? 0;
+        if (intensityB !== intensityA) return intensityB - intensityA;
+        return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+      });
+      const top3Entries = allDontEntries.slice(0, 3);
+      const top3Ids = new Set(top3Entries.map(e => e.id));
+
+      if (top3Entries.length > 0) {
+        const top3Lines = top3Entries.map(e => {
+          const intensityLabel = e.intensity ? ` [重要度:${e.intensity}]` : "";
+          return `- **${e.title}**${intensityLabel}\n  ${e.content}`;
+        });
+        layers.push("### 怒られトップ3（原文）\n" + top3Lines.join("\n"));
+      }
+
+      const recentCandidates = dontEntries
         .filter(e => {
           if (consolidatedSourceIds.has(e.id)) return false;
+          if (top3Ids.has(e.id)) return false;
           const entryDate = new Date(e.timestamp);
           return entryDate >= thirtyDaysAgo;
         })
-        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-        .slice(0, 5);
+        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+      // 直近エントリのタイトル重複排除（類似タイトルは新しい方だけ残す）
+      const recentEntries = deduplicateByTitle(recentCandidates).slice(0, 5);
 
       if (recentEntries.length > 0) {
         const recentLines = recentEntries.map(e => `- ${e.title}`);
@@ -497,6 +520,52 @@ async function main() {
 
   // stdoutに出力（Hooksがこれをコンテキストに注入する）
   console.log(output.join("\n"));
+}
+
+/**
+ * タイトルのトークン重複率でエントリを重複排除する。
+ * 既に追加済みエントリとタイトルトークンが50%以上重複していたら除外。
+ * 入力順を維持する（先にあるものを優先）。
+ */
+function deduplicateByTitle(entries: MemoryEntry[]): MemoryEntry[] {
+  if (entries.length <= 1) return entries;
+
+  const kept: MemoryEntry[] = [];
+  const keptTokensList: string[][] = [];
+
+  for (const entry of entries) {
+    const tokens = extractTitleTokens(entry.title);
+    const isDuplicate = keptTokensList.some(keptTokens => {
+      if (tokens.length === 0 || keptTokens.length === 0) return false;
+      const overlap = tokens.filter(t => keptTokens.includes(t));
+      return overlap.length >= 2 && overlap.length >= tokens.length * 0.5;
+    });
+    if (!isDuplicate) {
+      kept.push(entry);
+      keptTokensList.push(tokens);
+    }
+  }
+  return kept;
+}
+
+/**
+ * タイトルからトークンを抽出（漢字bigram + カタカナ + 英数字）
+ */
+function extractTitleTokens(title: string): string[] {
+  const tokens: string[] = [];
+  const kanjiSequences = title.match(/[\u4E00-\u9FFF]{2,}/g);
+  if (kanjiSequences) {
+    for (const seq of kanjiSequences) {
+      for (let i = 0; i + 1 < seq.length; i += 2) {
+        tokens.push(seq.substring(i, i + 2));
+      }
+    }
+  }
+  const kata = title.match(/[\u30A0-\u30FF]{2,}/g);
+  if (kata) tokens.push(...kata);
+  const en = title.match(/[a-zA-Z0-9][-a-zA-Z0-9]{1,}/g);
+  if (en) tokens.push(...en.map(s => s.toLowerCase()));
+  return tokens;
 }
 
 main().catch(console.error);

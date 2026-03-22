@@ -43,7 +43,7 @@ titleには検索しやすい具体的な名詞を含めること。`,
       },
       intensity: {
         type: "number",
-        description: "怒られ度（オプション、1〜5の整数）。5=激怒・諦め, 4=強い不満, 3=明確な指摘, 2=軽い注意, 1=提案。指定時はLLM自動判定より優先される"
+        description: "怒られ度（オプション、1〜10の整数）。1=提案, 2=軽い注意, 3=明確な指摘, 4=強い不満, 5=激怒・諦め。6以上は手動ピン留め用（数値が大きいほどcontext注入で優先される）。指定時はLLM自動判定より優先される"
       }
     },
     required: ["category", "title", "content"]
@@ -80,7 +80,7 @@ export async function handleMemorySave(
     const raw = Number(args.intensity);
     if (!isNaN(raw)) {
       const rounded = Math.round(raw);
-      intensity = Math.min(5, Math.max(1, rounded));
+      intensity = Math.min(10, Math.max(1, rounded));
     }
   }
 

@@ -7,3 +7,4 @@ export { taskSubmitTool, handleTaskSubmit } from "./taskSubmit.js";
 export { taskStatusTool, handleTaskStatus } from "./taskStatus.js";
 export { taskActionListTool, handleTaskActionList } from "./taskActionList.js";
 export { projectInitTool, handleProjectInit } from "./projectInit.js";
+export { memoryUpdateIntensityTool, handleMemoryUpdateIntensity } from "./updateIntensity.js";

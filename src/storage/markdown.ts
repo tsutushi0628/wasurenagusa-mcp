@@ -287,6 +287,41 @@ export class MarkdownStorage {
       : dontEntries;
   }
 
+  async updateIntensity(id: string, intensity: number): Promise<{ success: boolean; id: string; category: MemoryCategory }> {
+    await this.initialize();
+
+    const categories: MemoryCategory[] = ["config", "dont", "decision", "log", "snippet"];
+
+    for (const category of categories) {
+      const entries = await this.readCategory(category);
+      const targetIndex = entries.findIndex(e => e.id === id);
+      if (targetIndex === -1) { continue; }
+
+      // intensityを更新
+      entries[targetIndex].intensity = intensity;
+
+      // ファイルを再構築
+      if (category === "log") {
+        const date = entries[targetIndex].timestamp.split("T")[0];
+        const filePath = join(this.memoryPath, "logs", `${date}.md`);
+        const header = `# Log: ${date}\n\n---\n\n`;
+        // 同じ日付のエントリだけで再構築
+        const sameDateEntries = entries.filter(e => e.timestamp.split("T")[0] === date);
+        const body = sameDateEntries.map(e => formatEntry(e)).join("");
+        await writeFile(filePath, header + body, "utf-8");
+      } else {
+        const filePath = join(this.memoryPath, config.categoryFiles[category]);
+        const header = getFileHeader(config.categoryFiles[category]);
+        const body = entries.map(e => formatEntry(e)).join("");
+        await writeFile(filePath, header + body, "utf-8");
+      }
+
+      return { success: true, id, category };
+    }
+
+    throw new Error(`Entry not found: ${id}`);
+  }
+
   private async replaceEntry(category: MemoryCategory, targetId: string, newEntry: MemoryEntry): Promise<boolean> {
     const entries = await this.readCategory(category);
     const targetIndex = entries.findIndex(e => e.id === targetId);

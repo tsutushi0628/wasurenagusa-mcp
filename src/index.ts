@@ -27,6 +27,8 @@ import {
   handleTaskActionList,
   projectInitTool,
   handleProjectInit,
+  memoryUpdateIntensityTool,
+  handleMemoryUpdateIntensity,
 } from "./tools/index.js";
 import { findProjectRoot } from "./utils/projectRoot.js";
 import { ensureOwnerProfileExists } from "./utils/owner-profile.js";
@@ -50,7 +52,7 @@ const server = new Server(
   }
 );
 
-// ツール一覧（9ツール: 既存5 + 自律タスク4）
+// ツール一覧（10ツール: メモリ6 + 自律タスク3 + プロジェクト1）
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
@@ -63,6 +65,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       taskStatusTool,
       taskActionListTool,
       projectInitTool,
+      memoryUpdateIntensityTool,
     ],
   };
 });
@@ -101,6 +104,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "project_init":
         result = await handleProjectInit(args || {});
+        break;
+      case "memory_update_intensity":
+        result = await handleMemoryUpdateIntensity(args || {}, PROJECT_ROOT);
         break;
       default:
         throw new Error(`Unknown tool: ${name}`);

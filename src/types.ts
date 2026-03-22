@@ -14,7 +14,7 @@ export interface MemoryEntry {
   title: string;         // 内容の要約（1行）
   project?: string;      // プロジェクト名（cwdのディレクトリ名）
   scope?: string;        // スコープ（frontend/backend/infra/design/spec/ai/general等）
-  intensity?: number;    // 怒られ度（1〜5）。1=提案, 2=軽い注意, 3=明確な指摘, 4=強い不満, 5=激怒・諦め
+  intensity?: number;    // 怒られ度（1〜10）。1=提案〜5=激怒。6以上=手動ピン留め
 }
 
 // メモリエントリ（軽量インデックス - 動的取得用）
@@ -26,7 +26,7 @@ export interface MemoryIndexEntry {
   tags: string[];
   project?: string;      // プロジェクト名
   scope?: string;        // スコープ
-  intensity?: number;    // 怒られ度（1〜5）
+  intensity?: number;    // 怒られ度（1〜10）
 }
 
 // 保存パラメータ
@@ -38,7 +38,7 @@ export interface SaveParams {
   project?: string;      // プロジェクト名（自動付与）
   scope?: string;        // スコープ（Gemini自動判定 or 手動指定）
   replaceId?: string;    // 指定時: 既存エントリを置換（重複排除用）
-  intensity?: number;    // 怒られ度（1〜5、手動指定 or LLM自動判定）
+  intensity?: number;    // 怒られ度（1〜10、手動指定 or LLM自動判定）
 }
 
 // 保存結果
@@ -92,7 +92,7 @@ export interface AnalysisResult {
   reason: string;
   scope?: string;        // Geminiが判定したスコープ
   replaceId?: string;    // 重複エントリのID（置換対象）
-  intensity?: number;      // LLMが判定した怒られ度（1〜5）
+  intensity?: number;      // LLMが判定した怒られ度（1〜10）
   sessionTopic?: string;   // セッションのトピック要約（shouldSaveに関係なく毎回出力）
 }
 
