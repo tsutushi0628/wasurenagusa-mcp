@@ -69,12 +69,12 @@ It's not a memory bank. It's a **learning system**.
 |---|---|---|---|---|
 | Auto-detect mistakes | Yes (retry + sentiment) | No | No | No |
 | Auto-consolidate (LLM) | Yes (dont→principles, config→themes) | No | Yes (decay-based) | No |
-| Vector semantic search | Yes (Gemini embeddings, 768-dim) | No | Yes (ChromaDB) | No |
+| Vector semantic search | Yes (Gemini embeddings, 768-dim) | Yes (ChromaDB) | Yes (SQLite-vec / ChromaDB) | No |
 | Memory tiers (short/mid/long) | Yes (cosine distance thresholds) | No | No | No |
 | Auto-promotion (intensity) | Yes (access count → intensity 5) | No | No | No |
-| Zero-effort via hooks | Yes | Yes | No | No |
-| Human-readable storage | Yes (Markdown + JSON vectors) | No (SQLite) | No (ChromaDB) | Yes |
-| Multi-LLM support | Gemini / OpenAI / Anthropic | Claude only | Local embeddings | N/A |
+| Zero-effort via hooks | Yes | Yes | Partial | No |
+| Human-readable storage | Yes (Markdown + JSON vectors) | No (SQLite) | No (SQLite-vec) | Yes |
+| Multi-LLM support | Gemini / OpenAI / Anthropic | Claude only | Local (MiniLM-L6-v2) | N/A |
 | Token-efficient retrieval | Yes (index → detail, 70-90% savings) | Yes (3-layer) | N/A | No |
 | Cross-project memory | Yes (top 5 active projects) | No | No | No |
 | License | MIT | AGPL-3.0 | Apache-2.0 | N/A |
