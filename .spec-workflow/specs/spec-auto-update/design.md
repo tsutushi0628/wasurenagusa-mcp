@@ -190,7 +190,7 @@ graph TD
     maxConcurrentTasks: number;    // デフォルト: 3（タスク並列実行上限）
     activeHourStart?: number;      // 廃止（後方互換のためoptionalで残置）
     activeHourEnd?: number;        // 廃止（後方互換のためoptionalで残置）
-    subProjectParents?: string[];  // サブプロジェクト持ち親ディレクトリ名（例: ["bengo4-labo"]）
+    subProjectParents?: string[];  // サブプロジェクト持ち親ディレクトリ名（例: ["my-org"]）
   }
   ```
 

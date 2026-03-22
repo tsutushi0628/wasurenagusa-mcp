@@ -47,7 +47,7 @@
   - テスト: @google/generative-aiをモックしてembed/embedBatchの入出力を検証
   - Purpose: 外部API依存を1箇所に集約
   - _Requirements: REQ-1_
-  - _Prompt: Role: TypeScript Developer with API integration expertise | Task: Implement EmbeddingService using @google/generative-ai (GoogleGenerativeAI class, NOT @google/genai). Model: gemini-embedding-001, 768 dimensions. Constructor takes apiKey. isAvailable() checks apiKey existence. embed() calls embedContent and returns values array. embedBatch() calls embed() sequentially. Reference: bengo4-labo EmbeddingService pattern but adapted for @google/generative-ai | Restrictions: Do not add new dependencies. Use existing @google/generative-ai package. Throw on API failure (no fallback). No ternary operators | Success: Mock tests verify correct API call parameters. isAvailable returns false when apiKey is empty_
+  - _Prompt: Role: TypeScript Developer with API integration expertise | Task: Implement EmbeddingService using @google/generative-ai (GoogleGenerativeAI class, NOT @google/genai). Model: gemini-embedding-001, 768 dimensions. Constructor takes apiKey. isAvailable() checks apiKey existence. embed() calls embedContent and returns values array. embedBatch() calls embed() sequentially. Reference: existing project EmbeddingService pattern but adapted for @google/generative-ai | Restrictions: Do not add new dependencies. Use existing @google/generative-ai package. Throw on API failure (no fallback). No ternary operators | Success: Mock tests verify correct API call parameters. isAvailable returns false when apiKey is empty_
 
 - [ ] 6. memory_saveハンドラへのembedding生成統合
   - File: src/tools/memory-save.ts（既存ファイル修正）

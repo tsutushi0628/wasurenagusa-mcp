@@ -7,7 +7,7 @@ describe("sanitizeErrorMessage", () => {
   });
 
   it("/Users/... 形式のパスを [path] に置換する", () => {
-    const msg = "ENOENT: no such file or directory, open '/Users/tsukamoto/projects/wasurenagusa-mcp/data.json'";
+    const msg = "ENOENT: no such file or directory, open '/Users/testuser/projects/wasurenagusa-mcp/data.json'";
     const result = sanitizeErrorMessage(msg);
     expect(result).not.toContain("/Users/");
     expect(result).toContain("[path]");

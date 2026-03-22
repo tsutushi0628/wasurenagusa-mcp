@@ -484,17 +484,17 @@ describe("MarkdownStorage", () => {
         category: "config",
         title: "motoe-evalのポート番号設定",
         content: "Functionsは5013",
-        project: "bengo4-labo",
+        project: "my-project",
       });
       // 新しいエントリ（タイトルが類似）
       await storage.save({
         category: "config",
         title: "motoe-evalのポート番号定義",
         content: "Functionsは5013、Viteは8010",
-        project: "bengo4-labo",
+        project: "my-project",
       });
 
-      const context = await storage.getContext("bengo4-labo");
+      const context = await storage.getContext("my-project");
 
       // 新しい方が残る
       expect(context.config).toContain("motoe-evalのポート番号定義");
@@ -531,17 +531,17 @@ describe("MarkdownStorage", () => {
       await storage.save({
         category: "config",
         title: "contract-checker構成情報",
-        content: "Bundle ID: com.bengo4.contractchecker",
-        project: "bengo4-labo",
+        content: "Bundle ID: com.example.myapp",
+        project: "my-project",
       });
       await storage.save({
         category: "config",
         title: "contract-checker配信要件",
         content: "6.9インチスクリーンショット必須",
-        project: "bengo4-labo",
+        project: "my-project",
       });
 
-      const context = await storage.getContext("bengo4-labo");
+      const context = await storage.getContext("my-project");
 
       // トークン重複は"contract-checker"の1つだけ → 2未満なので両方残る
       expect(context.config).toContain("contract-checker構成情報");

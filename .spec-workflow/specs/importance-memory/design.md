@@ -151,7 +151,7 @@ interface MemoryEntry {
 - **id**: m1abc-1234
 - **timestamp**: 2026-03-10T15:30:00.000+09:00
 - **category**: dont
-- **project**: bengo4-labo
+- **project**: my-project
 - **importance**: critical
 - **tags**: エミュレータ, 禁止
 - **content**: ❌ エミュレータを勝手に再起動した...

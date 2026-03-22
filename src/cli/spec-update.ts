@@ -45,7 +45,7 @@ const DEFAULT_CONFIG: SchedulerConfig = {
   rotationThresholdDays: 7,
   idleThresholdMinutes: 150,
   maxConcurrentTasks: 3,
-  subProjectParents: ["bengo4-labo", "bl-labo"],
+  subProjectParents: ["my-org", "my-org-v2"],
 };
 
 /**

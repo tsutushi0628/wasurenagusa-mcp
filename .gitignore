@@ -26,3 +26,6 @@ dist/
 .spec-workflow/archive/
 .spec-workflow/.DS_Store
 .spec-workflow/**/Implementation Logs/
+
+# Findings (local investigation notes)
+docs/findings/

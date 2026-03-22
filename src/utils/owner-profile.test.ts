@@ -210,7 +210,7 @@ AIが自律タスクを実行する際、ここに書かれた基準で判断を
       expect(result).toContain("テスト駆動開発");
     });
 
-    it("実際のbengo4-laboプロファイルで大幅に圧縮される", () => {
+    it("実際のプロファイルで大幅に圧縮される", () => {
       // 全部デフォルトのプロファイル → ほぼ空になるはず
       const fullProfile = `# Owner Profile
 

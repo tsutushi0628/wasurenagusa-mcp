@@ -360,7 +360,7 @@ export interface EvaluationInput {
 }
 
 export interface ProjectEntry {
-  name: string;        // プロジェクト名（例: "agent-teams-labo" or "bengo4-labo/ai-motoe"）
+  name: string;        // プロジェクト名（例: "my-project" or "my-org/sub-project"）
   path: string;        // 絶対パス
   type: "standalone" | "subproject";
 }

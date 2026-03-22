@@ -23,8 +23,8 @@ wasurenagusa-mcpの既存Markdownベース記憶システムにベクトルembed
 - **provider.ts** (`src/llm/provider.ts`): Genkit/GoogleAIの初期化パターンを参照。ただしembeddingは@google/generative-aiを直接使用（Genkitにembedding APIがないため）
 
 ### Reference Implementations
-- **EmbeddingService** (`bengo4-labo/ai-motoe/functions/src/services/EmbeddingService.ts`): Gemini embedding-001の呼び出しパターン。`@google/genai`のGoogleGenAIクラスを使用
-- **RetrievalService** (`bengo4-labo/ai-motoe/functions/src/services/RetrievalService.ts`): コサイン距離検索、閾値フィルタリング、重複排除パターン
+- **EmbeddingService** (`my-org/sub-project/functions/src/services/EmbeddingService.ts`): Gemini embedding-001の呼び出しパターン。`@google/genai`のGoogleGenAIクラスを使用
+- **RetrievalService** (`my-org/sub-project/functions/src/services/RetrievalService.ts`): コサイン距離検索、閾値フィルタリング、重複排除パターン
 - **CeoXPostingService** (`ai-management-dx`): DISTANCE_THRESHOLD=0.45、閾値内シャッフルパターン
 
 ### Integration Points
@@ -71,7 +71,7 @@ SessionStart ──→ VectorStore.search(short-term) ──→ inject context
   }
   ```
 - **Dependencies:** `@google/generative-ai` (既存dependency)
-- **Reuses:** `config.geminiApiKey` を使用。EmbeddingServiceのパターンはbengo4-laboのEmbeddingServiceを踏襲。ただし`@google/genai`ではなく既存の`@google/generative-ai`を使用（依存追加を避ける）
+- **Reuses:** `config.geminiApiKey` を使用。EmbeddingServiceのパターンは既存プロジェクトのEmbeddingServiceを踏襲。ただし`@google/genai`ではなく既存の`@google/generative-ai`を使用（依存追加を避ける）
 
 ### Component 2: VectorStore (`src/vector/vector-store.ts`)
 - **Purpose:** ベクトルデータのローカルJSON保存・検索・削除

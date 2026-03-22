@@ -237,12 +237,12 @@ export interface SchedulerConfig {
   maxConcurrentTasks: number; // タスク並列実行上限。デフォルト: 3
   activeHourStart?: number;   // 廃止（後方互換のためoptionalで残置）
   activeHourEnd?: number;     // 廃止（後方互換のためoptionalで残置）
-  subProjectParents?: string[]; // サブプロジェクト持ち親ディレクトリ名（例: ["bengo4-labo", "bl-labo"]）
+  subProjectParents?: string[]; // サブプロジェクト持ち親ディレクトリ名（例: ["my-org", "my-org-v2"]）
 }
 
 // プロジェクトスキャン結果
 export interface ProjectEntry {
-  name: string;        // "agent-teams-labo" or "bengo4-labo/ai-motoe"
+  name: string;        // "my-project" or "my-org/sub-project"
   path: string;        // 絶対パス
   type: "standalone" | "subproject";
 }
