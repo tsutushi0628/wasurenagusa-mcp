@@ -278,6 +278,8 @@ MCP サーバー初回起動時に `.wasurenagusa/owner-profile.md` が自動生
 
 ## セットアップ
 
+> **💡 おすすめ:** この README を Claude Code に読ませて「wasurenagusa をセットアップして」と頼んでみてください。以下の手順をすべて自動でやってくれます。
+
 ### 前提条件
 
 - Node.js 18+

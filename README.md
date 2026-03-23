@@ -127,6 +127,8 @@ Background (async workers)
 
 ## Quick Start
 
+> **💡 Recommended:** Paste this README into Claude Code and ask it to set up wasurenagusa for you. It'll handle everything below automatically.
+
 ### Prerequisites
 
 - Node.js 18+
