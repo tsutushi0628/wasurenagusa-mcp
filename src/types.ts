@@ -138,6 +138,8 @@ export interface ConsolidatedPrinciple {
   sourceIds: string[];      // 元エントリID一覧
   score: number;            // sourceCount × maxIntensity
   maxIntensity: number;     // 統合元エントリの intensity 最大値
+  guardPattern?: string;    // 検出パターン（正規表現文字列）
+  guardMessage?: string;    // ガード違反時にClaudeに返すメッセージ
 }
 
 // dont統合結果

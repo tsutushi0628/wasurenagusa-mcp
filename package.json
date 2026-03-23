@@ -1,6 +1,6 @@
 {
   "name": "wasurenagusa-mcp",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "MCP server that gives AI coding agents persistent memory — auto-detect mistakes, consolidate lessons, inject context on session start",
   "funding": {
     "type": "ko-fi",
@@ -16,7 +16,8 @@
     "wasurenagusa-rebuild": "./dist/cli/rebuild.js",
     "wasurenagusa-backfill": "./dist/cli/backfill-worker.js",
     "wasurenagusa-consolidate-all": "./dist/cli/consolidate-all.js",
-    "wasurenagusa-scheduler": "./dist/cli/scheduler-setup.js"
+    "wasurenagusa-scheduler": "./dist/cli/scheduler-setup.js",
+    "wasurenagusa-guard": "./dist/cli/guard.js"
   },
   "scripts": {
     "build": "tsc && chmod +x dist/cli/*.js dist/index.js",
