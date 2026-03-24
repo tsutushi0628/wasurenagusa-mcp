@@ -151,9 +151,22 @@ async function getDontContent(
       if (top3Entries.length > 0) {
         const top3Lines = top3Entries.map(e => {
           const intensityLabel = e.intensity ? ` [重要度:${e.intensity}]` : "";
+          // 統合済みprincipleから対応するpositiveRuleを検索
+          let positiveRule: string | undefined;
+          if (consolidated) {
+            const matchedPrinciple = consolidated.principles.find(p =>
+              p.sourceIds.includes(e.id)
+            );
+            if (matchedPrinciple) {
+              positiveRule = matchedPrinciple.positiveRule;
+            }
+          }
+          if (positiveRule) {
+            return `- **${e.title}**${intensityLabel}\n  ${positiveRule}\n  ※経緯: ${e.content}`;
+          }
           return `- **${e.title}**${intensityLabel}\n  ${e.content}`;
         });
-        layers.push("### 怒られトップ3（原文）\n" + top3Lines.join("\n"));
+        layers.push("### 重要な行動原則 トップ3\n" + top3Lines.join("\n"));
       }
 
       const recentCandidates = dontEntries
