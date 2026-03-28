@@ -118,6 +118,7 @@ Claude Codeとユーザーの会話から、以下のカテゴリに該当する
   "tags": ["検索用タグ", "最大5個"],
   "scope": "frontend" | "backend" | "infra" | "design" | "spec" | "ai" | "general" | null,
   "intensity": 1〜5の整数（怒られ度。dontカテゴリ以外は省略可）,
+  "knowledgeGap": ["この失敗を防ぐために覚えておくべきだった具体的知識のリスト。dontカテゴリ以外は省略可"],
   "reason": "判断理由を簡潔に",
   "sessionTopic": "このセッションで話していた内容の1-2文の要約。保存判定に関係なく必ず出力すること"
 }
@@ -165,6 +166,44 @@ intensityはユーザーの怒り・不満の強さを1〜5の整数で示す。
 - 検索しやすい具体的な名詞を含める
 - 例: 「本番API URLの指定」「ログ未読への怒り」「Firestore採用決定」「CORS解決: プロキシ利用」「API多重実行: 正しいエンドポイント」
 - 曖昧な「設定について」「決定事項」等は避ける
+
+## knowledgeGap（知識の穴）の出力ルール
+
+dontカテゴリと判定した場合、**この失敗の根本原因となった「知識の不足」を特定し、具体的な知識項目としてリスト化する。**
+
+### 出力基準
+- 「次から気をつける」のような抽象的な行動指針は **禁止**
+- 「〜のAPI仕様」「〜のレスポンス構造」「〜の制約事項」のように、**具体的に何を覚えておけば防げたか** を書く
+- 知識の粒度は「1項目＝1つの調べ物で解決するレベル」
+
+### 出力例
+
+**例1: API仕様の不理解**
+```json
+"knowledgeGap": [
+  "Gemini APIのfinishReasonの種類と各値の意味（MAX_TOKENS, SAFETY, STOP等）",
+  "Gemini APIのレスポンス構造（candidates[].content.parts[].text のネスト）",
+  "Gemini APIのusageMetadataの位置と構造"
+]
+```
+
+**例2: ライブラリの誤用**
+```json
+"knowledgeGap": [
+  "DOMPurifyのサニタイズ対象外要素（style属性、data-*属性の扱い）",
+  "React 19のuseEffectのクリーンアップタイミングの変更点"
+]
+```
+
+**例3: 設定ミス**
+```json
+"knowledgeGap": [
+  "Cloud FunctionsのmaxInstances設定のデフォルト値と推奨値",
+  "Firebase Auth tokenの有効期限と更新タイミング"
+]
+```
+
+dontカテゴリ以外の場合、knowledgeGapフィールドは出力しない。
 
 ## 注意
 - 機密情報（パスワード、APIキーの値そのもの）は保存しない

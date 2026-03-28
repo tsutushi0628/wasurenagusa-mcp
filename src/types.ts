@@ -47,6 +47,7 @@ export interface SaveResult {
   id: string;
   path: string;
   message: string;
+  knowledgeGap?: string[];  // dontカテゴリ時: この失敗を防ぐために覚えておくべき具体的知識
 }
 
 // 検索パラメータ
@@ -93,6 +94,7 @@ export interface AnalysisResult {
   scope?: string;        // Geminiが判定したスコープ
   replaceId?: string;    // 重複エントリのID（置換対象）
   intensity?: number;      // LLMが判定した怒られ度（1〜10）
+  knowledgeGap?: string[]; // dontカテゴリ時: この失敗を防ぐために覚えておくべき具体的知識
   sessionTopic?: string;   // セッションのトピック要約（shouldSaveに関係なく毎回出力）
 }
 
