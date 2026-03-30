@@ -1,9 +1,14 @@
+import { spawn } from "child_process";
+import { fileURLToPath } from "url";
 import { basename } from "path";
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { MarkdownStorage } from "../storage/index.js";
 import { SaveParams, MemoryCategory } from "../types.js";
 import { EmbeddingService } from "../vector/embedding-service.js";
 import { VectorStore } from "../vector/vector-store.js";
+import { TagEnricher } from "../vector/tag-enricher.js";
+import { formatWeightedTags } from "../vector/weighted-tag.js";
+import { ThemeRegistry } from "../vector/theme-registry.js";
 import { config, getMemoryPath } from "../config.js";
 
 export const memorySaveTool: Tool = {
@@ -69,6 +74,16 @@ function normalizeTags(raw: unknown): string[] {
   return [];
 }
 
+function spawnRetagWorker(newThemes: string[], projectRoot: string): void {
+  const scriptPath = fileURLToPath(new URL("../cli/retag-worker.js", import.meta.url));
+  const child = spawn(process.execPath, [scriptPath, JSON.stringify(newThemes), projectRoot], {
+    detached: true,
+    stdio: "ignore",
+    env: process.env,
+  });
+  child.unref();
+}
+
 export async function handleMemorySave(
   args: Record<string, unknown>,
   projectRoot: string
@@ -94,25 +109,68 @@ export async function handleMemorySave(
     intensity,
   };
 
+  const embeddingService = new EmbeddingService(config.geminiApiKey);
+  const apiAvailable = embeddingService.isAvailable();
+
+  // Phase 1: タグ拡張 + Embedding生成を並列実行（APIキーがある場合のみ）
+  let embedding: number[] | null = null;
+  if (apiAvailable) {
+    const tagEnricher = new TagEnricher(config.geminiApiKey);
+    const textToEmbed = params.title + " " + params.content;
+
+    const [enrichResult, embeddingResult] = await Promise.allSettled([
+      tagEnricher.enrich(params.title, params.content, params.tags ?? [], []),
+      embeddingService.embed(textToEmbed),
+    ]);
+
+    // タグ拡張結果を適用
+    if (enrichResult.status === "fulfilled") {
+      params.tags = formatWeightedTags(enrichResult.value.tags);
+
+      // Phase 2: 新テーマ検出 → RetagWorker spawn（非同期・非ブロッキング）
+      if (enrichResult.value.newThemes.length > 0) {
+        try {
+          const memoryPath = getMemoryPath(projectRoot);
+          const themeRegistry = new ThemeRegistry(memoryPath);
+          const trulyNewThemes: string[] = [];
+          for (const theme of enrichResult.value.newThemes) {
+            if (await themeRegistry.isNewTheme(theme)) {
+              trulyNewThemes.push(theme);
+            }
+          }
+          if (trulyNewThemes.length > 0) {
+            await themeRegistry.addThemes(trulyNewThemes);
+            spawnRetagWorker(trulyNewThemes, projectRoot);
+          }
+        } catch (error) {
+          console.error("[save] テーマ登録失敗:", error);
+        }
+      }
+    }
+    // enrichment失敗時はparams.tagsは元のまま
+
+    if (embeddingResult.status === "fulfilled") {
+      embedding = embeddingResult.value;
+    } else {
+      console.error("[vector] embedding生成失敗:", embeddingResult.reason);
+    }
+  }
+
+  // 保存（enriched tagsで）
   const result = await storage.save(params);
 
-  // Embedding生成（APIキーがある場合のみ）
-  const embeddingService = new EmbeddingService(config.geminiApiKey);
-  if (embeddingService.isAvailable()) {
+  // Embedding upsert
+  if (embedding) {
     try {
       const memoryPath = getMemoryPath(projectRoot);
-      // replaceId指定時は旧embeddingを削除
       if (params.replaceId) {
         const vectorStore = new VectorStore(memoryPath);
         await vectorStore.delete([params.replaceId]);
       }
       const vectorStore = new VectorStore(memoryPath);
-      const textToEmbed = params.title + " " + params.content;
-      const embedding = await embeddingService.embed(textToEmbed);
       await vectorStore.upsert(result.id, embedding);
     } catch (error) {
-      console.error("[vector] embedding生成失敗:", error);
-      // embedding失敗はメモリ保存結果に影響しない
+      console.error("[vector] embedding保存失敗:", error);
     }
   }
 

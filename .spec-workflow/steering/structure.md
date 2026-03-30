@@ -15,10 +15,14 @@ wasurenagusa-mcp/
 │   ├── types.ts              # 型定義
 │   ├── config.ts             # 設定管理
 │   ├── cli/
-│   │   ├── context.ts        # wasurenagusa-context CLI【SessionStart Hook用】
+│   │   ├── context.ts        # wasurenagusa-context CLI【SessionStart/UserPromptSubmit/PreCompact Hook用】
 │   │   ├── analyze.ts        # wasurenagusa-analyze CLI【Stop Hook用】
 │   │   ├── spec-update.ts    # wasurenagusa-spec-update CLI【cron/systemd timer用】
 │   │   ├── consolidate-worker.ts # dont統合バックグラウンドワーカー（context.tsからspawn）
+│   │   ├── consolidate-all.ts   # wasurenagusa-consolidate-all CLI【全アクティブプロジェクトの統合実行】
+│   │   ├── backfill-worker.ts   # wasurenagusa-backfill CLI【ベクトル埋め込みバックフィル】
+│   │   ├── scheduler-setup.ts   # wasurenagusa-scheduler CLI【夜間統合スケジューラのinstall/uninstall】
+│   │   ├── guard.ts             # wasurenagusa-guard CLI【Stop Hook用】intensity 5ルール強制チェック
 │   │   ├── rebuild.ts           # wasurenagusa-rebuild CLI【メンテナンス用】メモリデータの修復・重複除去
 │   │   └── transcript-reader.ts # トランスクリプトJSONLパーサー（テスト可能な独立モジュール）
 │   ├── tools/
@@ -31,7 +35,8 @@ wasurenagusa-mcp/
 │   │   ├── taskSubmit.ts     # task_submit ツール【自律タスク投入】
 │   │   ├── taskStatus.ts     # task_status ツール【自律タスク状態確認】
 │   │   ├── taskActionList.ts # task_action_list ツール【人間アクションリスト】
-│   │   └── projectInit.ts    # project_init ツール【プロジェクト初期設定】
+│   │   ├── projectInit.ts    # project_init ツール【プロジェクト初期設定】
+│   │   └── updateIntensity.ts # memory_update_intensity ツール【手動】重要度変更
 │   ├── storage/
 │   │   ├── index.ts          # ストレージインターフェース
 │   │   ├── markdown.ts       # Markdown読み書き実装
@@ -39,13 +44,13 @@ wasurenagusa-mcp/
 │   │   └── formatter.ts      # MemoryEntryのMarkdownフォーマッター
 │   ├── analyzer/
 │   │   ├── index.ts              # Gemini連携エクスポート
-│   │   ├── gemini.ts             # Gemini API呼び出し・判定
-│   │   ├── gemini-client.ts      # Gemini API初期化ヘルパー（createGeminiModel）
+│   │   ├── gemini.ts             # LLM呼び出し・判定（genkit経由）
 │   │   ├── prompt-loader.ts      # プロンプトファイル読み込み
 │   │   └── conversation-meta.ts  # 会話メタ情報計算（諦め検知用）
 │   ├── consolidator/
 │   │   ├── index.ts              # 統合モジュールエクスポート
-│   │   ├── dont-consolidator.ts  # dontエントリのGemini統合（原則化）
+│   │   ├── dont-consolidator.ts  # dontエントリのLLM統合（原則化）
+│   │   ├── config-consolidator.ts # configエントリのLLM統合（テーマ化）
 │   │   ├── staleness.ts          # 統合キャッシュの鮮度チェック・読み書き
 │   │   └── formatter.ts          # 統合結果のMarkdownフォーマッター
 │   ├── scheduler/
@@ -63,14 +68,26 @@ wasurenagusa-mcp/
 │   │   ├── notifier.ts           # Slack通知（サイクルサマリー/人間エスカレーション/リトライ上限到達/デイリーサマリー）
 │   │   ├── project-scanner.ts    # ~/projects/配下のプロジェクト自動検出
 │   │   └── task-markdown.ts      # tasks.mdパーサー＆ライター
+│   ├── llm/
+│   │   └── provider.ts           # マルチLLMプロバイダー（genkit経由、Gemini/OpenAI/Anthropic切替）
+│   ├── vector/
+│   │   ├── embedding-service.ts  # Gemini Embedding生成（768次元）
+│   │   ├── vector-store.ts       # ベクトルデータストア（vectors.json、ブルートフォース検索）
+│   │   ├── memory-tier.ts        # 記憶階層フィルタリング（短期≤0.2/中期≤0.45/長期≤0.7）
+│   │   └── cosine-distance.ts    # コサイン距離計算
+│   ├── active-projects.ts        # アクティブプロジェクト追跡（上位5プロジェクト）
 │   └── utils/
 │       ├── projectRoot.ts    # .git探索ロジック
 │       ├── owner-profile.ts  # オーナープロフィール管理（自動配置・読み込み）
-│       └── zombie-reaper.ts  # ゾンビプロセス自動掃除（孤児化防止）+ 兄弟MCPプロセス巻き添え終了
+│       ├── zombie-reaper.ts  # ゾンビプロセス自動掃除（孤児化防止）+ 兄弟MCPプロセス巻き添え終了
+│       ├── prompt-escape.ts  # プロンプトエスケープユーティリティ
+│       ├── sanitize-error.ts # エラーサニタイズユーティリティ
+│       └── validate-webhook-url.ts # Webhook URL検証
 ├── prompts/
-│   ├── analysis.txt              # Gemini分析プロンプト（外部化）
+│   ├── analysis.txt              # LLM分析プロンプト（外部化）
 │   ├── duplicate-check.txt       # 重複チェックプロンプト（外部化）
 │   ├── consolidate.txt           # dont統合プロンプト（外部化）
+│   ├── consolidate-config.txt    # config統合プロンプト（外部化）
 │   ├── spec-update.txt           # Spec更新プロンプトテンプレート
 │   ├── spec-rotation.txt         # ローテーション更新プロンプトテンプレート
 │   ├── task-command.txt          # 自律タスク命令文生成プロンプト
@@ -89,7 +106,9 @@ wasurenagusa-mcp/
 │       ├── wasurenagusa-mcp/        # コアMCP機能
 │       ├── project-scope-memory/    # project/scope拡張
 │       ├── spec-auto-update/        # Spec自動更新
-│       └── autonomous-task-execution/ # 自律タスク実行
+│       ├── autonomous-task-execution/ # 自律タスク実行
+│       ├── importance-memory/       # intensity（重要度）記憶
+│       └── vector-memory-tier/      # ベクトル記憶階層
 ├── package.json
 ├── tsconfig.json
 ├── vitest.config.ts          # Vitestテスト設定
@@ -155,7 +174,7 @@ wasurenagusa-mcp/
 
 ### MCPツール名
 - `snake_case`（MCP規約に従う）
-- 例: `memory_save`, `memory_search`, `memory_get_detail`, `memory_get_context`, `memory_delete`, `task_submit`, `task_status`, `task_action_list`, `project_init`
+- 例: `memory_save`, `memory_search`, `memory_get_detail`, `memory_get_context`, `memory_delete`, `memory_update_intensity`, `task_submit`, `task_status`, `task_action_list`, `project_init`
 
 ## Import Patterns
 
@@ -222,7 +241,7 @@ export async function handleMemorySearch(
 #!/usr/bin/env node
 // 1. インポート
 import { readFile } from "fs/promises";
-import { GeminiAnalyzer } from "../analyzer/index.js";
+import { Analyzer } from "../analyzer/index.js";
 import { MarkdownStorage } from "../storage/index.js";
 import { findProjectRoot } from "../utils/projectRoot.js";
 
@@ -256,7 +275,10 @@ export class MarkdownStorage {
   async getDetail(params: GetDetailParams): Promise<GetDetailResult> { ... }
   async delete(params: DeleteParams): Promise<DeleteResult> { ... }
   async getContext(currentProject?: string): Promise<ContextResult> { ... }
+  async readConfigEntries(currentProject?: string): Promise<MemoryEntry[]> { ... }
   async readDontEntries(currentProject?: string): Promise<MemoryEntry[]> { ... }
+  async updateIntensity(id: string, intensity: number): Promise<{success, id, category}> { ... }
+  deduplicateConfigEntries(entries: MemoryEntry[]): MemoryEntry[] { ... }
 
   // プライベートヘルパー
   private generateId(): string { ... }
@@ -298,18 +320,27 @@ export class MarkdownStorage {
 ### CLIスクリプト（Hooks連携用）
 
 **自動実行（type: "command" で呼び出し）**
-- `wasurenagusa-context` - SessionStart Hook用、config/dontを標準出力
+- `wasurenagusa-context` - SessionStart/UserPromptSubmit/PreCompact Hook用、config/dontを標準出力（UserPromptSubmitでは何も出力しない。記憶想起はプロジェクト側hooksに移譲）
 - `wasurenagusa-analyze` - Stop Hook用、会話分析・自動保存 + 変更ファイルログ記録
+- `wasurenagusa-guard` - Stop Hook用、intensity 5ルール強制チェック
 
 ### CLIスクリプト（Scheduler用）
 
 **バッチ実行（cron/systemd timerで呼び出し）**
 - `wasurenagusa-spec-update` - タスクキュー確認 → Claude Code CLI実行 or ping
 
-### CLIスクリプト（メンテナンス用）
+### CLIスクリプト（メンテナンス用・スケジューラ用）
 
 **手動実行**
 - `wasurenagusa-rebuild` - メモリデータの修復・重複除去（破損したMarkdownファイルの再構築）
+- `wasurenagusa-consolidate-all` - 全アクティブプロジェクトのdont/config統合を実行
+- `wasurenagusa-scheduler` - 夜間統合スケジューラのinstall/uninstall/status（launchd/cron対応）
+
+**Stop Hook用**
+- `wasurenagusa-guard` - intensity 5ルールの強制チェック（Stop Hook連携）
+
+**バックグラウンド（自動起動）**
+- `wasurenagusa-backfill` - ベクトル埋め込みバックフィルワーカー（SessionStart時に自動spawn）
 
 ### Public API（MCPツール）
 
@@ -321,6 +352,7 @@ export class MarkdownStorage {
 **手動（オプション）**
 - `memory_save` - 明示的な保存
 - `memory_delete` - エントリ削除（ID指定、複数一括可）
+- `memory_update_intensity` - エントリの重要度（intensity）変更
 
 **自律タスク管理**
 - `task_submit` - タスク投入（WHY/WHAT/DONE/PROJECT）
@@ -330,13 +362,17 @@ export class MarkdownStorage {
 
 ### Internal（外部から直接呼ばない）
 - `MarkdownStorage` クラス
-- `GeminiAnalyzer` クラス
-- `DontConsolidator` クラス（dontエントリのGemini統合）
+- `Analyzer` クラス（旧GeminiAnalyzer）
+- `DontConsolidator` クラス（dontエントリのLLM統合）
+- `ConfigConsolidator` クラス（configエントリのLLM統合）
 - `parseMarkdown` 関数（Markdownパーサー）
 - `formatEntry` / `getFileHeader` 関数（Markdownフォーマッター）
 - `readTranscript` 関数（トランスクリプトJSONLパーサー）
 - `findProjectRoot` 関数
-- `createGeminiModel` 関数（Gemini API初期化ヘルパー）
+- `createGenerateTextFn` 関数（マルチLLMプロバイダー初期化、genkit経由）
+- `EmbeddingService` クラス（Gemini Embedding生成）
+- `VectorStore` クラス（ベクトルデータストア）
+- `ActiveProjectsTracker` クラス（アクティブプロジェクト追跡）
 - `ChangeLogger` クラス（変更ログ記録）
 - `TaskQueue` クラス（タスクキュー管理）
 - `Executor` クラス（Claude Code CLI実行）
@@ -351,6 +387,7 @@ export class MarkdownStorage {
 - `TaskMarkdownAdapter` クラス（tasks.mdパーサー＆ライター）
 - `ensureOwnerProfileExists` / `loadOwnerProfile` 関数（オーナープロフィール管理）
 - `startZombieReaper` 関数（ゾンビプロセス自動掃除：stdin close検知・親プロセス生存確認・孤児プロセスkill・兄弟MCPプロセス巻き添え終了）
+- `validateWebhookUrl` 関数（Slack Webhook URLバリデーション）
 
 ## Code Size Guidelines
 

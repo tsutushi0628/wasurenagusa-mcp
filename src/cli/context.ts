@@ -281,7 +281,7 @@ async function getConfigContent(
 }
 
 async function handleUserPromptSubmit(): Promise<void> {
-  console.log("ユーザーの発言に関連する記憶があるかもしれません。必要と判断した場合、サブエージェントを起動してmemory_searchで関連記憶を検索してください。");
+  // UserPromptSubmitの記憶想起はプロジェクト側のhooksで管理する
 }
 
 async function main() {

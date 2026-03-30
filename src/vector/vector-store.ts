@@ -117,6 +117,21 @@ export class VectorStore {
     return missing;
   }
 
+  async getEntryMetadata(ids: string[]): Promise<Map<string, { lastAccessedAt: string; accessCount: number }>> {
+    const data = await this.load();
+    const result = new Map<string, { lastAccessedAt: string; accessCount: number }>();
+    for (const id of ids) {
+      const entry = data.entries[id];
+      if (entry) {
+        result.set(id, {
+          lastAccessedAt: entry.lastAccessedAt,
+          accessCount: entry.accessCount,
+        });
+      }
+    }
+    return result;
+  }
+
   async getEntryCount(): Promise<number> {
     const data = await this.load();
     return Object.keys(data.entries).length;
