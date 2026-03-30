@@ -8,7 +8,7 @@
 
 ### Technical Standards (tech.md)
 
-- **TypeScript ESM + Node.js 20.x** の既存パターンに従う
+- **TypeScript ESM + Node.js 18以上** の既存パターンに従う
 - **STDIO Transport** のMCPサーバー構成は変更なし
 - **Markdownストレージ** のフォーマットを拡張（project/scopeフィールド追加）
 - **Gemini分析プロンプト** にscope判定を追加
@@ -29,7 +29,7 @@
 
 - **MarkdownStorage**: 既存のsave/search/getContext/readCategoryメソッドをそのまま拡張。新規クラス不要
 - **parseMarkdown / formatEntry**: 既存のMarkdownパース・フォーマットロジックにproject/scope対応を追加
-- **GeminiAnalyzer**: 既存のanalyze()メソッドとANALYSIS_PROMPTを拡張してscope判定を追加
+- **Analyzer**: 既存のanalyze()メソッドとANALYSIS_PROMPTを拡張してscope判定を追加
 - **findProjectRoot**: プロジェクトルート探索はそのまま利用
 
 ### Integration Points
@@ -253,6 +253,7 @@ export interface MemoryEntry {
   title: string;
   project?: string;   // 追加: プロジェクト名（cwdのディレクトリ名）
   scope?: string;      // 追加: スコープ（frontend/backend/infra/design/spec/ai/general）
+  intensity?: number;  // 追加: 怒られ度（1-10）
 }
 ```
 
@@ -267,6 +268,7 @@ export interface MemoryIndexEntry {
   tags: string[];
   project?: string;   // 追加
   scope?: string;      // 追加
+  intensity?: number;  // 追加
 }
 ```
 
@@ -280,6 +282,8 @@ export interface SaveParams {
   tags?: string[];
   project?: string;   // 追加
   scope?: string;      // 追加
+  replaceId?: string;  // 追加: 重複エントリの置換
+  intensity?: number;  // 追加: 怒られ度（1-10）
 }
 ```
 
@@ -305,7 +309,11 @@ export interface AnalysisResult {
   summary: string | null;
   tags: string[];
   reason: string;
-  scope?: string;     // 追加
+  scope?: string;        // 追加
+  replaceId?: string;    // 追加: 重複エントリのID
+  intensity?: number;    // 追加: 怒られ度（1-5、dontのみ。LLM自動判定）
+  knowledgeGap?: string[]; // 追加: dontカテゴリ時の知識の穴（具体的知識項目リスト）
+  sessionTopic?: string; // 追加: セッションのトピック要約
 }
 ```
 
@@ -329,6 +337,7 @@ export type MemoryScope = "frontend" | "backend" | "infra" | "design" | "spec" |
 - **category**: config
 - **project**: yakusoku
 - **scope**: backend
+- **intensity**: 3
 - **tags**: API, URL, config
 - **content**: 内容テキスト
 

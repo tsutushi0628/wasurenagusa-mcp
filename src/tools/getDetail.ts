@@ -1,6 +1,8 @@
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { MarkdownStorage } from "../storage/index.js";
 import { GetDetailParams } from "../types.js";
+import { VectorStore } from "../vector/vector-store.js";
+import { getMemoryPath } from "../config.js";
 
 export const memoryGetDetailTool: Tool = {
   name: "memory_get_detail",
@@ -30,6 +32,18 @@ export async function handleMemoryGetDetail(
   };
 
   const result = await storage.getDetail(params);
+
+  // アクセスカウント更新（再浮上メカニズム）
+  const foundIds = result.entries.map(e => e.id);
+  if (foundIds.length > 0) {
+    try {
+      const memoryPath = getMemoryPath(projectRoot);
+      const vectorStore = new VectorStore(memoryPath);
+      await vectorStore.incrementAccessCount(foundIds);
+    } catch (error) {
+      console.error("[getDetail] アクセスカウント更新失敗:", error);
+    }
+  }
 
   return JSON.stringify(result, null, 2);
 }

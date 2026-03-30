@@ -353,6 +353,14 @@ async function executeAutonomousTask(
 }
 
 async function runCommand(): Promise<void> {
+  // activeHourチェック: JST 2:00-5:00 のみ実行
+  const nowJST = new Date(Date.now() + 9 * 60 * 60 * 1000);
+  const hourJST = nowJST.getUTCHours();
+  if (hourJST < 2 || hourJST >= 5) {
+    console.log(`[ActiveHour] Current JST hour: ${hourJST}. Outside active window (2:00-5:00). Skipping.`);
+    return;
+  }
+
   const locked = await acquireLock();
   if (!locked) {
     console.error("Another instance is already running. Exiting.");

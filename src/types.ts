@@ -4,6 +4,13 @@ export type MemoryCategory = "config" | "dont" | "decision" | "log" | "snippet";
 // スコープ候補（推奨値。実際のscopeフィールドはstring型で自由入力も可）
 export type MemoryScope = "frontend" | "backend" | "infra" | "design" | "spec" | "ai" | "general";
 
+// 重み付きタグ
+export interface WeightedTag {
+  tag: string;       // タグ文字列
+  weight: number;    // 0.0〜1.0の重み
+}
+
+
 // メモリエントリ（フル）
 export interface MemoryEntry {
   id: string;            // ユニークID（タイムスタンプベース）

@@ -13,7 +13,7 @@ MCPサーバー（Model Context Protocol Server）- Claude Codeの機能を拡�
 
 ### Primary Language(s)
 - **Language**: TypeScript 5.x
-- **Runtime**: Node.js 20.x（ES2022ターゲット）
+- **Runtime**: Node.js 18以上（ES2022ターゲット）
 - **Module System**: ESM（NodeNext）
 
 ### Key Dependencies/Libraries
@@ -21,7 +21,11 @@ MCPサーバー（Model Context Protocol Server）- Claude Codeの機能を拡�
 | ライブラリ | バージョン | 用途 |
 |-----------|-----------|------|
 | **@modelcontextprotocol/sdk** | ^1.0.0 | MCPサーバー実装の基盤 |
-| **@google/generative-ai** | ^0.21.0 | Gemini API呼び出し（自動判定） |
+| **@google/generative-ai** | ^0.24.1 | Gemini API呼び出し（自動判定） |
+| **genkit** | ^1.29.0 | マルチLLM抽象化基盤 |
+| **@genkit-ai/google-genai** | ^1.29.0 | Geminiプロバイダー（genkit用） |
+| **@genkit-ai/compat-oai** | ^1.29.0 | OpenAIプロバイダー（genkit用） |
+| **@genkit-ai/anthropic** | ^0.2.0 | Anthropicプロバイダー（genkit用） |
 | **dotenv** | ^16.4.0 | 環境変数管理 |
 
 ### Application Architecture
@@ -34,7 +38,9 @@ MCPサーバー（Model Context Protocol Server）- Claude Codeの機能を拡�
 │  ┌──────────────────┐  ┌────────────────────────────────────┐  │
 │  │    Hooks Engine  │  │         MCP Client                 │  │
 │  │  - SessionStart  │  │                                    │  │
+│  │  - UserPromptSubmit│                                     │  │
 │  │  - Stop          │  │                                    │  │
+│  │  - PreCompact    │  │                                    │  │
 │  └────────┬─────────┘  └──────────────┬─────────────────────┘  │
 └───────────┼───────────────────────────┼────────────────────────┘
             │ type: "command"           │ STDIO
@@ -43,10 +49,10 @@ MCPサーバー（Model Context Protocol Server）- Claude Codeの機能を拡�
 │                    wasurenagusa-mcp                            │
 │  ┌─────────────────────────────────────────────────────────┐   │
 │  │   CLI Scripts（Hooks用）                                │   │
-│  │  【自動】wasurenagusa-context ← SessionStart Hook       │   │
+│  │  【自動】wasurenagusa-context ← SessionStart/UserPromptSubmit/PreCompact Hook │
 │  │  【自動】wasurenagusa-analyze ← Stop Hook               │   │
 │  ├─────────────────────────────────────────────────────────┤   │
-│  │   MCP Tool Handlers（9ツール）                            │   │
+│  │   MCP Tool Handlers（10ツール）                           │   │
 │  │  【AI自律】memory_get_context← コンテキスト取得          │   │
 │  │  【手動】memory_save       ← オプション                  │   │
 │  │  【AI自律】memory_search   ← AIが必要時に呼び出し        │   │
@@ -56,6 +62,7 @@ MCPサーバー（Model Context Protocol Server）- Claude Codeの機能を拡�
 │  │  【手動】task_status       ← タスク状態確認              │   │
 │  │  【手動】task_action_list  ← 人間アクションリスト        │   │
 │  │  【手動】project_init      ← プロジェクト初期設定        │   │
+│  │  【手動】memory_update_intensity ← 重要度変更            │   │
 │  └─────────────────────────────────────────────────────────┘   │
 │                              │                                 │
 │  ┌───────────────────────────▼─────────────────────────────┐   │
@@ -64,8 +71,8 @@ MCPサーバー（Model Context Protocol Server）- Claude Codeの機能を拡�
 │  └───────────────────────────┬─────────────────────────────┘   │
 │                              │                                 │
 │  ┌───────────────────────────▼─────────────────────────────┐   │
-│  │   Analyzer (Gemini API)                                 │   │
-│  │   会話分析・カテゴリ判定・リトライ検出                    │   │
+│  │   Analyzer (LLM Provider: Gemini/OpenAI/Anthropic)      │   │
+│  │   会話分析・カテゴリ判定・リトライ検出（Genkit経由）       │   │
 │  └─────────────────────────────────────────────────────────┘   │
 └────────────────────────────────────────────────────────────────┘
 ```
@@ -75,6 +82,10 @@ MCPサーバー（Model Context Protocol Server）- Claude Codeの機能を拡�
 [セッション開始]
     ↓ SessionStart Hook（type: "command"）
 wasurenagusa-context → config全文 + dont（統合版） + オーナープロフィール + 能動検索指示を標準出力 → コンテキスト注入
+    ↓
+[ユーザー発言時（agentモード）]
+    ↓ UserPromptSubmit Hook（type: "command"）
+wasurenagusa-context → 何も出力しない（記憶想起はプロジェクト側hooksに移譲）
     ↓
 [会話中: AIが「あ、この話はbackendだな」と判断]
     ↓ AIが自律的にMCPツール呼び出し
@@ -105,10 +116,12 @@ wasurenagusa-spec-update
 2. **Transport Layer**: STDIO（標準入出力）でMCPプロトコル通信
 3. **Tool Layer**: MCPツール定義とハンドラー
 4. **Storage Layer**: Markdownファイルの読み書き
-5. **Analyzer Layer**: Gemini APIによる自動判定・リトライ検出
-6. **Consolidator Layer**: dontエントリのGemini統合（多数のdont→少数の行動原則に集約）
-7. **Scheduler Layer**: cron/systemd timerによるバッチ実行（Spec自動更新・Keep-Alive）
-8. **Autonomous Layer**: 自律タスク実行（タスクストア、命令文生成、評価者、プロジェクト初期設定、Slack通知）
+5. **Analyzer Layer**: LLMプロバイダー（Genkit経由: Gemini/OpenAI/Anthropic）による自動判定・リトライ検出
+6. **Consolidator Layer**: dont/configエントリのLLM統合（多数のエントリ→少数の原則/テーマに集約）
+7a. **LLM Layer**: genkit経由のマルチLLMプロバイダー（Gemini/OpenAI/Anthropic、`LLM_PROVIDER`環境変数で切替）
+7b. **Vector Layer**: Gemini Embeddingによるセマンティック検索（短期・中期・長期の3層記憶）
+8. **Scheduler Layer**: cron/systemd timerによるバッチ実行（Spec自動更新・Keep-Alive）
+9. **Autonomous Layer**: 自律タスク実行（タスクストア、命令文生成、評価者、プロジェクト初期設定、Slack通知）
 
 ### Data Storage
 
@@ -141,9 +154,10 @@ wasurenagusa-spec-update
 | 統合先 | プロトコル | 認証方式 | 用途 |
 |--------|-----------|---------|------|
 | **Claude Code** | MCP over STDIO | なし（ローカル） | ツール呼び出し |
-| **Claude Code Hooks** | SessionStart/Stop (type: "command") | なし（ローカル） | 自律動作トリガー |
+| **Claude Code Hooks** | SessionStart/UserPromptSubmit/Stop/PreCompact (type: "command") | なし（ローカル） | 自律動作トリガー |
 | **Claude Code CLI** | `claude -p` (ヘッドレス) | なし（ローカル） | Spec自動更新・自律タスク実行・Keep-Alive |
-| **Google Gemini API** | HTTPS/REST | API Key | 会話分析・自動判定・リトライ検出 |
+| **LLMプロバイダー** | HTTPS/REST (genkit経由) | API Key | 会話分析・自動判定・リトライ検出（Gemini/OpenAI/Anthropic切替可能） |
+| **Google Gemini Embedding API** | HTTPS/REST | API Key | ベクトル埋め込み生成（セマンティック検索用、768次元） |
 | **OS Scheduler** | cron (Linux) / launchd (macOS) | なし | 5h5mサイクル実行 |
 | **Slack Webhook** | HTTPS POST | Webhook URL | サイクルサマリー/人間エスカレーション/リトライ上限到達/デイリーサマリーの通知 |
 
@@ -172,7 +186,7 @@ wasurenagusa-spec-update
 
 - **Target Platform(s)**: ローカル（macOS, Linux, Windows with Node.js）
 - **Distribution Method**: npm install（ローカル）または claude mcp add
-- **Installation Requirements**: Node.js 20.x, npm, Gemini API Key
+- **Installation Requirements**: Node.js 18以上, npm, Gemini API Key
 - **Update Mechanism**: git pull + npm install + npm run build
 
 **Claude Code登録コマンド**:
@@ -203,7 +217,7 @@ claude mcp add wasurenagusa node /path/to/wasurenagusa-mcp/dist/index.js
 ### Compatibility Requirements
 
 - **Platform Support**: macOS, Linux, Windows（Node.js動作環境）
-- **Node.js Version**: 20.x 以上
+- **Node.js Version**: 18.x 以上
 - **MCP SDK Version**: 1.0.0 以上
 
 ### Security & Compliance
@@ -253,10 +267,10 @@ claude mcp add wasurenagusa node /path/to/wasurenagusa-mcp/dist/index.js
    - **実装**: SessionStart時はconfig全文+dont（統合版）+オーナープロフィールを注入。AIが必要に応じてmemory_search → memory_get_detailで動的取得
    - **トレードオフ**: AIが適切に検索する判断力が必要（ただしdont/configは事前注入で安全）
 
-6. **Gemini API採用（会話分析）**
-   - **理由**: 高速（gemini-3-flash-preview）、コスト効率、日本語対応
-   - **代替案**: OpenAI、ローカルLLM、ルールベース
-   - **トレードオフ**: 外部API依存
+6. **GenkitによるマルチプロバイダーLLM採用（会話分析）**
+   - **理由**: Gemini/OpenAI/Anthropicを統一APIで切り替え可能。デフォルトはGemini（高速・低コスト）
+   - **代替案**: Gemini直接呼び出し（旧方式）、ローカルLLM、ルールベース
+   - **トレードオフ**: Genkitフレームワーク依存。ただしプロバイダー切り替えが容易
 
 7. **プロジェクトルート探索（.git基準）**
    - **理由**: Claude Codeがサブディレクトリから実行される場合に対応

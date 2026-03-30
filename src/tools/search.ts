@@ -4,6 +4,8 @@ import { SearchParams, MemoryCategory, MemoryIndexEntry } from "../types.js";
 import { EmbeddingService } from "../vector/embedding-service.js";
 import { VectorStore } from "../vector/vector-store.js";
 import { TIER_THRESHOLDS, shouldPromoteToCritical } from "../vector/memory-tier.js";
+import { SearchScorer } from "../vector/search-scorer.js";
+import { parseWeightedTags } from "../vector/weighted-tag.js";
 import { config, getMemoryPath } from "../config.js";
 import { homedir } from "os";
 import { join } from "path";
@@ -42,6 +44,30 @@ export const memorySearchTool: Tool = {
   }
 };
 
+function computeDaysSinceAccess(lastAccessedAt: string): number {
+  const lastAccess = new Date(lastAccessedAt).getTime();
+  const now = Date.now();
+  return Math.max(0, (now - lastAccess) / (1000 * 60 * 60 * 24));
+}
+
+function matchQueryToTags(query: string, tags: string[]): number[] {
+  const queryTerms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const weightedTags = parseWeightedTags(tags);
+  const matchedWeights: number[] = [];
+
+  for (const wt of weightedTags) {
+    const tagLower = wt.tag.toLowerCase();
+    for (const term of queryTerms) {
+      if (tagLower.includes(term) || term.includes(tagLower)) {
+        matchedWeights.push(wt.weight);
+        break;
+      }
+    }
+  }
+
+  return matchedWeights;
+}
+
 export async function handleMemorySearch(
   args: Record<string, unknown>,
   projectRoot: string
@@ -59,18 +85,27 @@ export async function handleMemorySearch(
   const result = await storage.search(params);
   const limit = params.limit || 20;
 
+  // ベクトル検索結果のdistanceマップ
+  const vectorDistanceMap = new Map<string, number>();
+
   // ベクトル検索（APIキーがある場合のみ）
   const embeddingService = new EmbeddingService(config.geminiApiKey);
+  let vectorStore: VectorStore | null = null;
   if (embeddingService.isAvailable()) {
     try {
       const memoryPath = getMemoryPath(projectRoot);
-      const vectorStore = new VectorStore(memoryPath);
+      vectorStore = new VectorStore(memoryPath);
       const queryEmbedding = await embeddingService.embed(params.query);
       const vectorResults = await vectorStore.search(
         queryEmbedding,
         TIER_THRESHOLDS.medium,
         limit
       );
+
+      // distanceマップ構築
+      for (const vr of vectorResults) {
+        vectorDistanceMap.set(vr.id, vr.distance);
+      }
 
       // キーワード結果のIDセット
       const keywordIds = new Set(result.results.map(r => r.id));
@@ -134,6 +169,40 @@ export async function handleMemorySearch(
     } catch (error) {
       console.error("[vector] ベクトル検索失敗:", error);
       // ベクトル検索失敗はキーワード結果に影響しない
+    }
+  }
+
+  // SearchScorerによるランキング
+  if (vectorStore && result.results.length > 0) {
+    try {
+      const allIds = result.results.map(r => r.id);
+      const metadata = await vectorStore.getEntryMetadata(allIds);
+
+      const scored = result.results.map(entry => {
+        const meta = metadata.get(entry.id);
+        const distance = vectorDistanceMap.get(entry.id);
+        const vectorSimilarity = distance !== undefined ? 1 - distance : 1.0;
+        const daysSinceLastAccess = meta
+          ? computeDaysSinceAccess(meta.lastAccessedAt)
+          : 0;
+        const accessCount = meta ? meta.accessCount : 0;
+        const matchedTagWeights = matchQueryToTags(params.query, entry.tags);
+
+        const score = SearchScorer.score({
+          vectorSimilarity,
+          matchedTagWeights,
+          daysSinceLastAccess,
+          accessCount,
+        });
+
+        return { entry, score };
+      });
+
+      scored.sort((a, b) => b.score - a.score);
+      result.results = scored.map(s => s.entry);
+    } catch (error) {
+      console.error("[search] スコアリング失敗:", error);
+      // スコアリング失敗時は既存順序を維持
     }
   }
 

@@ -10,7 +10,7 @@ wasurenagusa-mcpに自律型AIタスク実行システムを追加する。人�
 
 ### Technical Standards (tech.md)
 - TypeScript 5.x + ESM（NodeNext）、既存パターン踏襲
-- Gemini API: `gemini-3-flash-preview`、`@google/generative-ai`
+- LLM API: Genkit経由マルチプロバイダー（Gemini/OpenAI/Anthropic）
 - STDIO Transport（MCPツール）
 - プロンプト外部化（`prompts/`ディレクトリ）
 - テスト: Vitest
@@ -72,7 +72,7 @@ wasurenagusa-mcpに自律型AIタスク実行システムを追加する。人�
 │                                                              │
 │  ┌── analyzer/ (既存) ───────────────────────────────────┐  │
 │  │ loadPrompt() ← プロンプト読み込み共有                   │  │
-│  │ createGeminiModel() ← Gemini初期化共有 【新規ヘルパー】│  │
+│  │ createGenerateTextFn() ← LLM初期化共有 【llm/provider】│  │
 │  └───────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
           │
@@ -87,7 +87,7 @@ wasurenagusa-mcpに自律型AIタスク実行システムを追加する。人�
 ### Modular Design Principles
 - **Single File Responsibility**: 各ファイルは1つの明確な責務（TaskStore=永続化、CommandGenerator=命令文生成、TaskEvaluator=評価）
 - **既存モジュール非破壊**: `src/scheduler/`の既存ファイルは改修しない。`Executor`は共有利用
-- **Gemini初期化共通化**: `createGeminiModel()`ヘルパー関数を`src/analyzer/`に追加し、既存GeminiAnalyzerと新クラスで共有
+- **LLM初期化共通化**: `createGenerateTextFn()`ヘルパー関数を`src/llm/provider.ts`に配置し、既存Analyzerと新クラスで共有
 - **プロンプト外部化**: 3つのプロンプトを`prompts/`に配置、`loadPrompt()`で読み込み
 
 ## Components and Interfaces
@@ -114,14 +114,14 @@ wasurenagusa-mcpに自律型AIタスク実行システムを追加する。人�
 - **Purpose:** WHY/WHAT/DONE + ProjectMetaからClaude Code向け命令文を生成
 - **Interfaces:**
   - `generate(input: CommandGenerationInput): Promise<string>` — Geminiで命令文生成
-- **Dependencies:** `analyzer/prompt-loader.ts`（loadPrompt）、`analyzer/gemini-client.ts`（createGeminiModel）
+- **Dependencies:** `analyzer/prompt-loader.ts`（loadPrompt）、`llm/provider.ts`（createGenerateTextFn）
 - **Prompt:** `prompts/task-command.txt`
 
 ### 3. TaskEvaluator (`src/autonomous/evaluator.ts`)
 - **Purpose:** Claude CLI実行結果をDone条件に照らして評価
 - **Interfaces:**
   - `evaluate(input: EvaluationInput): Promise<EvaluatorResult>` — OK/NG/human-required判定
-- **Dependencies:** `analyzer/prompt-loader.ts`、`analyzer/gemini-client.ts`
+- **Dependencies:** `analyzer/prompt-loader.ts`、`llm/provider.ts`
 - **Prompt:** `prompts/task-evaluation.txt`
 - **Note:** retryCount閾値（3回→human-required）のロジックはこのクラスの外（オーケストレーター側）で制御
 
@@ -133,7 +133,7 @@ wasurenagusa-mcpに自律型AIタスク実行システムを追加する。人�
   - `loadProjectMeta(projectName: string): Promise<ProjectMeta | null>` — メタ情報読み込み
   - `loadProjectMetaOrDefault(projectName: string, projectPath: string): Promise<ProjectMeta>` — メタ情報読み込み（未設定時はデフォルト値を返却）
   - `updateProjectMeta(projectName: string, updates: Partial<ProjectMeta>): Promise<ProjectMeta>` — PDCA更新
-- **Dependencies:** `analyzer/prompt-loader.ts`、`analyzer/gemini-client.ts`、`fs/promises`
+- **Dependencies:** `analyzer/prompt-loader.ts`、`llm/provider.ts`、`fs/promises`
 - **Prompt:** `prompts/project-initialize.txt`
 - **Storage:** `~/.wasurenagusa/scheduler/projects/{project-name}/meta.json`
 
@@ -181,12 +181,13 @@ wasurenagusa-mcpに自律型AIタスク実行システムを追加する。人�
 - **Dependencies:** `fs/promises`、`analyzer/prompt-loader.ts`
 - **Template:** `prompts/owner-profile-template.md`
 
-### 10. Gemini Client Helper (`src/analyzer/gemini-client.ts`) 【新規】
-- **Purpose:** Gemini API初期化の共通化（DRY原則）
+### 10. LLM Provider (`src/llm/provider.ts`)
+- **Purpose:** LLMプロバイダー抽象化（DRY原則、マルチプロバイダー対応）
 - **Interfaces:**
-  - `createGeminiModel(): GenerativeModel` — APIキー取得+モデル生成
-- **Dependencies:** `@google/generative-ai`、`config.ts`
-- **Reuses:** 既存`src/analyzer/gemini.ts`の初期化ロジックを抽出
+  - `createGenerateTextFn(): GenerateTextFn` — Genkit経由でLLMテキスト生成関数を返却
+  - `resetLLMCache(): void` — テスト用キャッシュリセット
+- **Dependencies:** `genkit`、`@genkit-ai/google-genai`、`@genkit-ai/anthropic`、`@genkit-ai/compat-oai`、`config.ts`
+- **Note:** Gemini/OpenAI/Anthropicを統一APIで切り替え可能。`LLM_PROVIDER`/`LLM_MODEL`環境変数で制御
 
 ### 11. MCPツール（4つ新規）
 
@@ -521,15 +522,13 @@ TaskStore.resolveAction(taskId, action)
 | `ProjectScanner` | `project-scanner.test.ts` | `mkdtemp` |
 | `TaskMarkdownAdapter` | `task-markdown.test.ts` | `mkdtemp` |
 
-#### Gemini APIモックパターン（共通）
-`createGeminiModel()`ヘルパーをモックすることで、`@google/generative-ai`の内部構造に依存しない。
+#### LLMモックパターン（共通）
+`createGenerateTextFn()`をモックすることで、LLMプロバイダーの内部構造に依存しない。
 ```typescript
-vi.mock("../analyzer/gemini-client.js", () => ({
-  createGeminiModel: vi.fn().mockReturnValue({
-    generateContent: vi.fn().mockResolvedValue({
-      response: { text: () => '{"verdict":"ok","reason":"done"}' }
-    })
-  })
+vi.mock("../llm/provider.js", () => ({
+  createGenerateTextFn: vi.fn().mockReturnValue(
+    vi.fn().mockResolvedValue('{"verdict":"ok","reason":"done"}')
+  )
 }));
 ```
 
