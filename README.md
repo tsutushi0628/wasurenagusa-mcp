@@ -27,6 +27,7 @@ wasurenagusa is an MCP server that doesn't just *remember* — it **learns**.
 4. **Compresses config into themes** — LLM groups scattered settings into coherent summaries, preserving facts like ports and paths
 5. **Injects only what matters** — Consolidated wisdom + active settings only. No template bloat, no duplicate entries.
 6. **Semantic memory with vector search** — Gemini embeddings power meaning-based retrieval across short/medium/long-term memory tiers. Frequently accessed memories auto-promote to highest intensity.
+7. **Smart tag retrieval** — LLM-generated weighted tags + composite scoring (freshness, tag weight, access frequency) optimize retrieval priority without discarding any data.
 
 **Fully automated via Claude Code hooks — zero configuration after setup.**
 
@@ -106,7 +107,9 @@ User Prompt (Hook) — agent mode
 
 During Session
   → memory_save auto-generates 768-dim embedding via Gemini
-  → memory_search merges keyword + vector semantic results
+  → memory_save enriches tags with LLM-assigned weights (0.0-1.0)
+  → Theme shift triggers background re-tagging of related past entries
+  → memory_search merges keyword + vector semantic + tag-weighted results
   → Vector hits increment access counts → auto-promote to intensity 5 at threshold
 
 Session End (Hook)
@@ -361,6 +364,16 @@ SessionStart Hook
 **Zero new dependencies** — uses the existing `@google/generative-ai` package. Vectors are stored locally in `vectors.json` (brute-force search, ~6MB per 1,000 entries). No external database required.
 
 **Graceful degradation** — without a Gemini API key, everything works exactly as before (keyword search only). Vector features activate automatically when `GEMINI_API_KEY` is set.
+
+### Smart Tag Retrieval
+
+Smart Tag Retrieval improves search precision through three mechanisms — without ever deleting or forgetting data:
+
+1. **Weighted tag enrichment at save time** — When you save a memory, the LLM generates descriptive tags and assigns each a weight (0.0-1.0). Concrete facts like port numbers or API endpoints receive high weights; generic categories receive low weights.
+2. **Background re-tagging on theme shift** — When a new topic is detected, a background worker updates tags on related past entries so they stay discoverable under the new context.
+3. **Composite scoring** — Search results are ranked by a blend of freshness, tag weight, and access frequency — surfacing the most relevant memories first.
+
+All memories are preserved at full fidelity. Smart Tag Retrieval only optimizes *retrieval priority*, never discards data.
 
 ### Cross-Project Memory
 
