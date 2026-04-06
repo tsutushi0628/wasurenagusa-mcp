@@ -24,6 +24,7 @@ wasurenagusa-mcp/
 │   │   ├── scheduler-setup.ts   # wasurenagusa-scheduler CLI【夜間統合スケジューラのinstall/uninstall】
 │   │   ├── guard.ts             # wasurenagusa-guard CLI【Stop Hook用】intensity 5ルール強制チェック
 │   │   ├── rebuild.ts           # wasurenagusa-rebuild CLI【メンテナンス用】メモリデータの修復・重複除去
+│   │   ├── retag-worker.ts      # 再タグ付けバックグラウンドワーカー（新テーマ検出時にdetached起動）
 │   │   └── transcript-reader.ts # トランスクリプトJSONLパーサー（テスト可能な独立モジュール）
 │   ├── tools/
 │   │   ├── index.ts          # ツール定義のエクスポート
@@ -74,7 +75,11 @@ wasurenagusa-mcp/
 │   │   ├── embedding-service.ts  # Gemini Embedding生成（768次元）
 │   │   ├── vector-store.ts       # ベクトルデータストア（vectors.json、ブルートフォース検索）
 │   │   ├── memory-tier.ts        # 記憶階層フィルタリング（短期≤0.2/中期≤0.45/長期≤0.7）
-│   │   └── cosine-distance.ts    # コサイン距離計算
+│   │   ├── cosine-distance.ts    # コサイン距離計算
+│   │   ├── tag-enricher.ts       # タグ拡張（Gemini APIで重み付きタグ生成）
+│   │   ├── search-scorer.ts      # 検索スコアリング（freshness・タグ重み・アクセス頻度の複合スコア）
+│   │   ├── theme-registry.ts     # テーマレジストリ（既知テーマの管理）
+│   │   └── weighted-tag.ts       # 重み付きタグのパース・フォーマット
 │   ├── active-projects.ts        # アクティブプロジェクト追跡（上位5プロジェクト）
 │   └── utils/
 │       ├── projectRoot.ts    # .git探索ロジック
@@ -90,6 +95,7 @@ wasurenagusa-mcp/
 │   ├── consolidate-config.txt    # config統合プロンプト（外部化）
 │   ├── spec-update.txt           # Spec更新プロンプトテンプレート
 │   ├── spec-rotation.txt         # ローテーション更新プロンプトテンプレート
+│   ├── tag-enrichment.txt        # タグ拡張プロンプト（重み付きタグ生成用）
 │   ├── task-command.txt          # 自律タスク命令文生成プロンプト
 │   ├── task-evaluation.txt       # 自律タスク評価プロンプト
 │   ├── project-initialize.txt    # プロジェクト初期設定プロンプト
@@ -108,7 +114,8 @@ wasurenagusa-mcp/
 │       ├── spec-auto-update/        # Spec自動更新
 │       ├── autonomous-task-execution/ # 自律タスク実行
 │       ├── importance-memory/       # intensity（重要度）記憶
-│       └── vector-memory-tier/      # ベクトル記憶階層
+│       ├── vector-memory-tier/      # ベクトル記憶階層
+│       └── smart-tag-retrieval/     # Smart Tag Retrieval（タグ拡張+スコアリング最適化）
 ├── package.json
 ├── tsconfig.json
 ├── vitest.config.ts          # Vitestテスト設定
@@ -341,6 +348,7 @@ export class MarkdownStorage {
 
 **バックグラウンド（自動起動）**
 - `wasurenagusa-backfill` - ベクトル埋め込みバックフィルワーカー（SessionStart時に自動spawn）
+- `retag-worker` - 再タグ付けワーカー（新テーマ検出時にmemory_saveからdetached spawn）
 
 ### Public API（MCPツール）
 
@@ -372,6 +380,10 @@ export class MarkdownStorage {
 - `createGenerateTextFn` 関数（マルチLLMプロバイダー初期化、genkit経由）
 - `EmbeddingService` クラス（Gemini Embedding生成）
 - `VectorStore` クラス（ベクトルデータストア）
+- `TagEnricher` クラス（重み付きタグ拡張）
+- `SearchScorer` クラス（検索スコアリング）
+- `ThemeRegistry` クラス（テーマレジストリ管理）
+- `parseWeightedTag` / `formatWeightedTag` 関数（重み付きタグパース・フォーマット）
 - `ActiveProjectsTracker` クラス（アクティブプロジェクト追跡）
 - `ChangeLogger` クラス（変更ログ記録）
 - `TaskQueue` クラス（タスクキュー管理）

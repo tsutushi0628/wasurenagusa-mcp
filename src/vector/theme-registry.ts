@@ -1,57 +1,21 @@
-import { readFile, writeFile, mkdir } from "fs/promises";
-import { join, dirname } from "path";
-
-interface ThemeRegistryData {
-  themes: string[];
-  updatedAt: string;
-}
-
-function nowJST(): string {
-  return new Date().toLocaleString("sv-SE", { timeZone: "Asia/Tokyo" }).replace(" ", "T") + "+09:00";
-}
+import { SQLiteStorage } from "../storage/sqlite.js";
 
 export class ThemeRegistry {
-  private filePath: string;
+  private storage: SQLiteStorage;
 
-  constructor(memoryPath: string) {
-    this.filePath = join(memoryPath, "themes.json");
+  constructor(storage: SQLiteStorage) {
+    this.storage = storage;
   }
 
-  async getThemes(): Promise<string[]> {
-    const data = await this.load();
-    return data.themes;
+  getThemes(): string[] {
+    return this.storage.getThemes();
   }
 
-  async addThemes(themes: string[]): Promise<void> {
-    const data = await this.load();
-    const existing = new Set(data.themes);
-    for (const theme of themes) {
-      existing.add(theme);
-    }
-    data.themes = [...existing];
-    data.updatedAt = nowJST();
-    await this.save(data);
+  addThemes(themes: string[]): void {
+    this.storage.addThemes(themes);
   }
 
-  async isNewTheme(theme: string): Promise<boolean> {
-    const data = await this.load();
-    return !data.themes.includes(theme);
-  }
-
-  private async load(): Promise<ThemeRegistryData> {
-    try {
-      const content = await readFile(this.filePath, "utf-8");
-      return JSON.parse(content);
-    } catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        return { themes: [], updatedAt: nowJST() };
-      }
-      throw error;
-    }
-  }
-
-  private async save(data: ThemeRegistryData): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true });
-    await writeFile(this.filePath, JSON.stringify(data, null, 2), "utf-8");
+  isNewTheme(theme: string): boolean {
+    return this.storage.isNewTheme(theme);
   }
 }

@@ -13,7 +13,8 @@ import { homedir } from "os";
 import { mkdir, writeFile } from "fs/promises";
 import { fileURLToPath } from "url";
 import { Analyzer } from "../analyzer/index.js";
-import { MarkdownStorage } from "../storage/index.js";
+import { SQLiteStorage } from "../storage/index.js";
+import { getMemoryPath, config } from "../config.js";
 import { findProjectRoot } from "../utils/projectRoot.js";
 import { SaveParams } from "../types.js";
 import { computeConversationMeta } from "../analyzer/conversation-meta.js";
@@ -78,18 +79,21 @@ async function main() {
   // 保存が必要な場合
   if (analysis.shouldSave && analysis.category && analysis.title && analysis.summary) {
     const projectRoot = findProjectRoot(hookInput.cwd);
-    const storage = new MarkdownStorage(projectRoot);
+    const memoryPath = getMemoryPath(projectRoot);
+    const dbPath = join(memoryPath, config.sqliteFile);
+    const storage = new SQLiteStorage(dbPath);
+    storage.initialize(memoryPath);
 
     // 重複チェック: 同カテゴリの既存エントリと比較
     let replaceId: string | undefined;
     try {
-      const existingSearch = await storage.search({
+      const existingSearch = storage.search({
         query: analysis.title,
         category: analysis.category,
         limit: 50,
       });
       if (existingSearch.totalCount > 0) {
-        const detail = await storage.getDetail({
+        const detail = storage.getDetail({
           ids: existingSearch.results.map(r => r.id),
         });
         const existingEntries = detail.entries.map(e => ({
@@ -121,7 +125,8 @@ async function main() {
       intensity: analysis.intensity,
     };
 
-    await storage.save(saveParams);
+    storage.save(saveParams);
+    storage.close();
   }
 
   // 変更ログ記録（Stop Hook相乗り）

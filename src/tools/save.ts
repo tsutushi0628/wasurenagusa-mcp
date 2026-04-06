@@ -1,14 +1,12 @@
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
-import { basename } from "path";
+import { basename, join } from "path";
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { MarkdownStorage } from "../storage/index.js";
+import { SQLiteStorage } from "../storage/sqlite.js";
 import { SaveParams, MemoryCategory } from "../types.js";
-import { EmbeddingService } from "../vector/embedding-service.js";
-import { VectorStore } from "../vector/vector-store.js";
+import { LocalEmbedding } from "../vector/local-embedding.js";
 import { TagEnricher } from "../vector/tag-enricher.js";
 import { formatWeightedTags } from "../vector/weighted-tag.js";
-import { ThemeRegistry } from "../vector/theme-registry.js";
 import { config, getMemoryPath } from "../config.js";
 
 export const memorySaveTool: Tool = {
@@ -59,7 +57,6 @@ function normalizeTags(raw: unknown): string[] {
   if (!raw) return [];
   if (Array.isArray(raw)) return raw.map(String);
   if (typeof raw === "string") {
-    // JSON配列文字列 or カンマ区切り
     const trimmed = raw.trim();
     if (trimmed.startsWith("[")) {
       try {
@@ -88,7 +85,10 @@ export async function handleMemorySave(
   args: Record<string, unknown>,
   projectRoot: string
 ): Promise<string> {
-  const storage = new MarkdownStorage(projectRoot);
+  const memoryPath = getMemoryPath(projectRoot);
+  const dbPath = join(memoryPath, config.sqliteFile);
+  const storage = new SQLiteStorage(dbPath);
+  storage.initialize(memoryPath);
 
   let intensity: number | undefined;
   if (args.intensity !== undefined && args.intensity !== null) {
@@ -109,70 +109,100 @@ export async function handleMemorySave(
     intensity,
   };
 
-  const embeddingService = new EmbeddingService(config.geminiApiKey);
-  const apiAvailable = embeddingService.isAvailable();
+  // LocalEmbedding初期化
+  const modelsDir = join(memoryPath, config.modelsDir);
+  const localEmbedding = new LocalEmbedding(modelsDir);
+  let embeddingAvailable = false;
+  try {
+    await localEmbedding.initialize();
+    embeddingAvailable = localEmbedding.isAvailable();
+  } catch (error) {
+    console.error("[save] LocalEmbedding初期化失敗:", error);
+  }
 
-  // Phase 1: タグ拡張 + Embedding生成を並列実行（APIキーがある場合のみ）
+  // Phase 1: タグ拡張 + Embedding生成を並列実行
   let embedding: number[] | null = null;
-  if (apiAvailable) {
-    const tagEnricher = new TagEnricher(config.geminiApiKey);
+  const tagEnricher = new TagEnricher(config.geminiApiKey);
+  const tagEnricherAvailable = !!config.geminiApiKey;
+
+  const promises: Promise<unknown>[] = [];
+
+  // タグ拡張（LLMのAPIキーが必要）
+  if (tagEnricherAvailable) {
+    promises.push(
+      tagEnricher.enrich(params.title, params.content, params.tags ?? [], []).catch((error) => {
+        console.error("[save] タグ拡張失敗:", error);
+        return null;
+      })
+    );
+  } else {
+    promises.push(Promise.resolve(null));
+  }
+
+  // Embedding生成（ローカル）
+  if (embeddingAvailable) {
     const textToEmbed = params.title + " " + params.content;
+    promises.push(
+      localEmbedding.embed(textToEmbed).catch((error) => {
+        console.error("[save] embedding生成失敗:", error);
+        return null;
+      })
+    );
+  } else {
+    promises.push(Promise.resolve(null));
+  }
 
-    const [enrichResult, embeddingResult] = await Promise.allSettled([
-      tagEnricher.enrich(params.title, params.content, params.tags ?? [], []),
-      embeddingService.embed(textToEmbed),
-    ]);
+  const [enrichResult, embeddingResult] = await Promise.all(promises);
 
-    // タグ拡張結果を適用
-    if (enrichResult.status === "fulfilled") {
-      params.tags = formatWeightedTags(enrichResult.value.tags);
+  // タグ拡張結果を適用
+  if (enrichResult && typeof enrichResult === "object" && "tags" in enrichResult) {
+    const enriched = enrichResult as { tags: { tag: string; weight: number }[]; newThemes: string[] };
+    params.tags = formatWeightedTags(enriched.tags);
 
-      // Phase 2: 新テーマ検出 → RetagWorker spawn（非同期・非ブロッキング）
-      if (enrichResult.value.newThemes.length > 0) {
-        try {
-          const memoryPath = getMemoryPath(projectRoot);
-          const themeRegistry = new ThemeRegistry(memoryPath);
-          const trulyNewThemes: string[] = [];
-          for (const theme of enrichResult.value.newThemes) {
-            if (await themeRegistry.isNewTheme(theme)) {
-              trulyNewThemes.push(theme);
-            }
+    // Phase 2: 新テーマ検出 → RetagWorker spawn
+    if (enriched.newThemes.length > 0) {
+      try {
+        const trulyNewThemes: string[] = [];
+        for (const theme of enriched.newThemes) {
+          if (storage.isNewTheme(theme)) {
+            trulyNewThemes.push(theme);
           }
-          if (trulyNewThemes.length > 0) {
-            await themeRegistry.addThemes(trulyNewThemes);
-            spawnRetagWorker(trulyNewThemes, projectRoot);
-          }
-        } catch (error) {
-          console.error("[save] テーマ登録失敗:", error);
         }
+        if (trulyNewThemes.length > 0) {
+          storage.addThemes(trulyNewThemes);
+          spawnRetagWorker(trulyNewThemes, projectRoot);
+        }
+      } catch (error) {
+        console.error("[save] テーマ登録失敗:", error);
       }
-    }
-    // enrichment失敗時はparams.tagsは元のまま
-
-    if (embeddingResult.status === "fulfilled") {
-      embedding = embeddingResult.value;
-    } else {
-      console.error("[vector] embedding生成失敗:", embeddingResult.reason);
     }
   }
 
-  // 保存（enriched tagsで）
-  const result = await storage.save(params);
+  if (embeddingResult && Array.isArray(embeddingResult)) {
+    embedding = embeddingResult as number[];
+  }
+
+  // replaceId指定時: 古いベクトルを削除
+  if (params.replaceId) {
+    try {
+      storage.deleteVectors([params.replaceId]);
+    } catch (error) {
+      console.error("[save] 旧ベクトル削除失敗:", error);
+    }
+  }
+
+  // 保存
+  const result = storage.save(params);
 
   // Embedding upsert
   if (embedding) {
     try {
-      const memoryPath = getMemoryPath(projectRoot);
-      if (params.replaceId) {
-        const vectorStore = new VectorStore(memoryPath);
-        await vectorStore.delete([params.replaceId]);
-      }
-      const vectorStore = new VectorStore(memoryPath);
-      await vectorStore.upsert(result.id, embedding);
+      storage.upsertVector(result.id, embedding);
     } catch (error) {
-      console.error("[vector] embedding保存失敗:", error);
+      console.error("[save] embedding保存失敗:", error);
     }
   }
 
+  storage.close();
   return JSON.stringify(result, null, 2);
 }

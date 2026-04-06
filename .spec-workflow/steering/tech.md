@@ -119,7 +119,7 @@ wasurenagusa-spec-update
 5. **Analyzer Layer**: LLMプロバイダー（Genkit経由: Gemini/OpenAI/Anthropic）による自動判定・リトライ検出
 6. **Consolidator Layer**: dont/configエントリのLLM統合（多数のエントリ→少数の原則/テーマに集約）
 7a. **LLM Layer**: genkit経由のマルチLLMプロバイダー（Gemini/OpenAI/Anthropic、`LLM_PROVIDER`環境変数で切替）
-7b. **Vector Layer**: Gemini Embeddingによるセマンティック検索（短期・中期・長期の3層記憶）
+7b. **Vector Layer**: Gemini Embeddingによるセマンティック検索（短期・中期・長期の3層記憶）+ Smart Tag Retrieval（重み付きタグ拡張・複合スコアリング・バックグラウンド再タグ付け）
 8. **Scheduler Layer**: cron/systemd timerによるバッチ実行（Spec自動更新・Keep-Alive）
 9. **Autonomous Layer**: 自律タスク実行（タスクストア、命令文生成、評価者、プロジェクト初期設定、Slack通知）
 

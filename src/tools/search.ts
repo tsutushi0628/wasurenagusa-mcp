@@ -1,8 +1,7 @@
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { MarkdownStorage } from "../storage/index.js";
+import { SQLiteStorage } from "../storage/sqlite.js";
 import { SearchParams, MemoryCategory, MemoryIndexEntry } from "../types.js";
-import { EmbeddingService } from "../vector/embedding-service.js";
-import { VectorStore } from "../vector/vector-store.js";
+import { LocalEmbedding } from "../vector/local-embedding.js";
 import { TIER_THRESHOLDS, shouldPromoteToCritical } from "../vector/memory-tier.js";
 import { SearchScorer } from "../vector/search-scorer.js";
 import { parseWeightedTags } from "../vector/weighted-tag.js";
@@ -72,7 +71,10 @@ export async function handleMemorySearch(
   args: Record<string, unknown>,
   projectRoot: string
 ): Promise<string> {
-  const storage = new MarkdownStorage(projectRoot);
+  const memoryPath = getMemoryPath(projectRoot);
+  const dbPath = join(memoryPath, config.sqliteFile);
+  const storage = new SQLiteStorage(dbPath);
+  storage.initialize(memoryPath);
 
   const params: SearchParams = {
     query: args.query as string,
@@ -82,57 +84,54 @@ export async function handleMemorySearch(
     scope: args.scope as string | undefined,
   };
 
-  const result = await storage.search(params);
   const limit = params.limit || 20;
 
-  // ベクトル検索結果のdistanceマップ
+  // LocalEmbedding初期化
+  const modelsDir = join(memoryPath, config.modelsDir);
+  const localEmbedding = new LocalEmbedding(modelsDir);
+  let embeddingAvailable = false;
+  try {
+    await localEmbedding.initialize();
+    embeddingAvailable = localEmbedding.isAvailable();
+  } catch (error) {
+    console.error("[search] LocalEmbedding初期化失敗:", error);
+  }
+
+  // ベクトル検索のdistanceマップ
   const vectorDistanceMap = new Map<string, number>();
+  let result;
 
-  // ベクトル検索（APIキーがある場合のみ）
-  const embeddingService = new EmbeddingService(config.geminiApiKey);
-  let vectorStore: VectorStore | null = null;
-  if (embeddingService.isAvailable()) {
+  if (embeddingAvailable) {
     try {
-      const memoryPath = getMemoryPath(projectRoot);
-      vectorStore = new VectorStore(memoryPath);
-      const queryEmbedding = await embeddingService.embed(params.query);
-      const vectorResults = await vectorStore.search(
-        queryEmbedding,
-        TIER_THRESHOLDS.medium,
-        limit
-      );
+      const queryEmbedding = await localEmbedding.embed(params.query);
 
-      // distanceマップ構築
+      // ハイブリッド検索（FTS5 + ベクトル）
+      result = storage.searchHybrid(params, queryEmbedding);
+
+      // ベクトル検索結果のdistanceマップ構築
+      const vectorResults = storage.searchVectors(queryEmbedding, TIER_THRESHOLDS.medium, limit);
       for (const vr of vectorResults) {
         vectorDistanceMap.set(vr.id, vr.distance);
-      }
-
-      // キーワード結果のIDセット
-      const keywordIds = new Set(result.results.map(r => r.id));
-
-      // ベクトルのみの結果ID
-      const vectorOnlyIds: string[] = [];
-      for (const vr of vectorResults) {
-        if (!keywordIds.has(vr.id)) {
-          vectorOnlyIds.push(vr.id);
-        }
       }
 
       // アクセスカウント更新
       const allVectorIds = vectorResults.map(vr => vr.id);
       if (allVectorIds.length > 0) {
-        await vectorStore.incrementAccessCount(allVectorIds);
+        storage.incrementAccessCount(allVectorIds);
       }
 
       // critical昇格チェック
       for (const vr of vectorResults) {
-        if (shouldPromoteToCritical(vr.accessCount + 1)) {
+        const meta = storage.getVectorMetadata([vr.id]);
+        const entryMeta = meta.get(vr.id);
+        const accessCount = entryMeta ? entryMeta.accessCount : 0;
+        if (shouldPromoteToCritical(accessCount)) {
           try {
-            const detail = await storage.getDetail({ ids: [vr.id] });
+            const detail = storage.getDetail({ ids: [vr.id] });
             if (detail.entries.length > 0) {
               const entry = detail.entries[0];
               if (entry.intensity === undefined || entry.intensity < 5) {
-                await storage.save({
+                storage.save({
                   category: entry.category,
                   content: entry.content,
                   title: entry.title,
@@ -149,34 +148,20 @@ export async function handleMemorySearch(
           }
         }
       }
-
-      // ベクトルのみの結果をマージ（MarkdownStorageから詳細取得してインデックス化）
-      if (vectorOnlyIds.length > 0) {
-        const detail = await storage.getDetail({ ids: vectorOnlyIds });
-        const vectorIndexEntries: MemoryIndexEntry[] = detail.entries.map(entry => ({
-          id: entry.id,
-          timestamp: entry.timestamp,
-          category: entry.category,
-          title: entry.title,
-          tags: entry.tags,
-          project: entry.project,
-          scope: entry.scope,
-          intensity: entry.intensity,
-        }));
-        result.results.push(...vectorIndexEntries);
-        result.totalCount += vectorIndexEntries.length;
-      }
     } catch (error) {
-      console.error("[vector] ベクトル検索失敗:", error);
-      // ベクトル検索失敗はキーワード結果に影響しない
+      console.error("[search] ハイブリッド検索失敗、FTS5にフォールバック:", error);
+      result = storage.search(params);
     }
+  } else {
+    // embedding不可 → FTS5のみ
+    result = storage.search(params);
   }
 
   // SearchScorerによるランキング
-  if (vectorStore && result.results.length > 0) {
+  if (result.results.length > 0) {
     try {
       const allIds = result.results.map(r => r.id);
-      const metadata = await vectorStore.getEntryMetadata(allIds);
+      const metadata = storage.getVectorMetadata(allIds);
 
       const scored = result.results.map(entry => {
         const meta = metadata.get(entry.id);
@@ -202,7 +187,6 @@ export async function handleMemorySearch(
       result.results = scored.map(s => s.entry);
     } catch (error) {
       console.error("[search] スコアリング失敗:", error);
-      // スコアリング失敗時は既存順序を維持
     }
   }
 
@@ -215,12 +199,33 @@ export async function handleMemorySearch(
 
     for (const proj of activeProjects) {
       try {
-        const projStorage = new MarkdownStorage(proj.path);
-        const projResults = await projStorage.search({
-          query: params.query,
-          category: params.category,
-          limit: params.limit,
-        });
+        const projMemoryPath = getMemoryPath(proj.path);
+        const projDbPath = join(projMemoryPath, config.sqliteFile);
+        const projStorage = new SQLiteStorage(projDbPath);
+        projStorage.initialize(projMemoryPath);
+
+        let projResults;
+        if (embeddingAvailable) {
+          try {
+            const projQueryEmbedding = await localEmbedding.embed(params.query);
+            projResults = projStorage.searchHybrid(
+              { query: params.query, category: params.category, limit: params.limit },
+              projQueryEmbedding
+            );
+          } catch {
+            projResults = projStorage.search({
+              query: params.query,
+              category: params.category,
+              limit: params.limit,
+            });
+          }
+        } else {
+          projResults = projStorage.search({
+            query: params.query,
+            category: params.category,
+            limit: params.limit,
+          });
+        }
 
         // プロジェクト名プレフィックスを付与してマージ
         const prefixedResults = projResults.results.map(r => ({
@@ -237,51 +242,13 @@ export async function handleMemorySearch(
           }
         }
 
-        // プロジェクト別ベクトル検索
-        if (embeddingService.isAvailable()) {
-          try {
-            const projMemoryPath = getMemoryPath(proj.path);
-            const projVectorStore = new VectorStore(projMemoryPath);
-            const projQueryEmbedding = await embeddingService.embed(params.query);
-            const projVectorResults = await projVectorStore.search(
-              projQueryEmbedding,
-              TIER_THRESHOLDS.medium,
-              limit
-            );
-
-            const existingIds = new Set(result.results.map(r => r.id));
-            const projVectorOnlyIds: string[] = [];
-            for (const vr of projVectorResults) {
-              if (!existingIds.has(vr.id)) {
-                projVectorOnlyIds.push(vr.id);
-              }
-            }
-
-            if (projVectorOnlyIds.length > 0) {
-              const projDetail = await projStorage.getDetail({ ids: projVectorOnlyIds });
-              const projVectorEntries: MemoryIndexEntry[] = projDetail.entries.map(entry => ({
-                id: entry.id,
-                timestamp: entry.timestamp,
-                category: entry.category,
-                title: `[${proj.name}] ${entry.title}`,
-                tags: entry.tags,
-                project: entry.project,
-                scope: entry.scope,
-                intensity: entry.intensity,
-              }));
-              result.results.push(...projVectorEntries);
-              result.totalCount += projVectorEntries.length;
-            }
-          } catch {
-            // プロジェクト別ベクトル検索失敗はスキップ
-          }
-        }
+        projStorage.close();
       } catch {
-        // 個別プロジェクトの検索失敗はスキップ
         continue;
       }
     }
   }
 
+  storage.close();
   return JSON.stringify(result, null, 2);
 }

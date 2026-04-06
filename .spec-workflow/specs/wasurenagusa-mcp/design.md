@@ -32,6 +32,7 @@ src/
 │   ├── scheduler-setup.ts   # wasurenagusa-scheduler CLI【夜間統合スケジューラのinstall/uninstall】
 │   ├── guard.ts             # wasurenagusa-guard CLI【Stop Hook用】intensity 5ルール強制チェック
 │   ├── rebuild.ts           # wasurenagusa-rebuild CLI【メンテナンス用】メモリデータの修復・重複除去
+│   ├── retag-worker.ts      # 再タグ付けバックグラウンドワーカー（新テーマ検出時にdetached起動）
 │   └── transcript-reader.ts # トランスクリプトJSONLパーサー（テスト可能な独立モジュール）
 ├── tools/
 │   ├── index.ts          # ツール定義のエクスポート
@@ -82,7 +83,11 @@ src/
 │   ├── embedding-service.ts  # Gemini Embedding生成（768次元）
 │   ├── vector-store.ts       # ベクトルデータストア（vectors.json、ブルートフォース検索）
 │   ├── memory-tier.ts        # 記憶階層フィルタリング（短期≤0.2/中期≤0.45/長期≤0.7）
-│   └── cosine-distance.ts    # コサイン距離計算
+│   ├── cosine-distance.ts    # コサイン距離計算
+│   ├── tag-enricher.ts       # タグ拡張（Gemini APIで重み付きタグ生成）
+│   ├── search-scorer.ts      # 検索スコアリング（freshness・タグ重み・アクセス頻度の複合スコア）
+│   ├── theme-registry.ts     # テーマレジストリ（既知テーマの管理）
+│   └── weighted-tag.ts       # 重み付きタグのパース・フォーマット
 ├── active-projects.ts        # アクティブプロジェクト追跡（上位5プロジェクト）
 └── utils/
     ├── projectRoot.ts    # .git探索ロジック

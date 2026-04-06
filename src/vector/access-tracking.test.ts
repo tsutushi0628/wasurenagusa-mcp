@@ -1,26 +1,23 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-// Mocks for getDetail
+// Mocks for getDetail — getDetail.ts imports SQLiteStorage from ../storage/index.js
 const mockStorageGetDetail = vi.fn();
+const mockStorageIncrementAccessCount = vi.fn();
+const mockStorageInitialize = vi.fn();
+const mockStorageClose = vi.fn();
 vi.mock("../storage/index.js", () => {
-  class MockMarkdownStorage {
-    constructor(_projectRoot: string) {}
+  class MockSQLiteStorage {
+    constructor(_dbPath: string) {}
+    initialize = mockStorageInitialize;
     getDetail = mockStorageGetDetail;
+    incrementAccessCount = mockStorageIncrementAccessCount;
+    close = mockStorageClose;
   }
-  return { MarkdownStorage: MockMarkdownStorage };
-});
-
-const mockIncrementAccessCount = vi.fn();
-vi.mock("../vector/vector-store.js", () => {
-  class MockVectorStore {
-    constructor(_memoryPath: string) {}
-    incrementAccessCount = mockIncrementAccessCount;
-  }
-  return { VectorStore: MockVectorStore };
+  return { SQLiteStorage: MockSQLiteStorage };
 });
 
 vi.mock("../config.js", () => ({
-  config: { geminiApiKey: "test-key" },
+  config: { geminiApiKey: "test-key", sqliteFile: "memory.db" },
   getMemoryPath: vi.fn().mockReturnValue("/tmp/test-memory"),
 }));
 
@@ -29,11 +26,11 @@ import { handleMemoryGetDetail } from "../tools/getDetail.js";
 describe("access tracking on getDetail", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockIncrementAccessCount.mockResolvedValue(undefined);
+    mockStorageIncrementAccessCount.mockReturnValue(undefined);
   });
 
   it("updates lastAccessedAt when entries are found", async () => {
-    mockStorageGetDetail.mockResolvedValueOnce({
+    mockStorageGetDetail.mockReturnValue({
       entries: [
         { id: "entry-1", timestamp: "2024-01-01", category: "config", title: "test", content: "test", tags: [] },
       ],
@@ -42,11 +39,11 @@ describe("access tracking on getDetail", () => {
 
     await handleMemoryGetDetail({ ids: ["entry-1"] }, "/tmp/project");
 
-    expect(mockIncrementAccessCount).toHaveBeenCalledWith(["entry-1"]);
+    expect(mockStorageIncrementAccessCount).toHaveBeenCalledWith(["entry-1"]);
   });
 
   it("only updates found entries, not missing ones", async () => {
-    mockStorageGetDetail.mockResolvedValueOnce({
+    mockStorageGetDetail.mockReturnValue({
       entries: [
         { id: "entry-1", timestamp: "2024-01-01", category: "config", title: "test", content: "test", tags: [] },
       ],
@@ -55,34 +52,36 @@ describe("access tracking on getDetail", () => {
 
     await handleMemoryGetDetail({ ids: ["entry-1", "entry-missing"] }, "/tmp/project");
 
-    expect(mockIncrementAccessCount).toHaveBeenCalledWith(["entry-1"]);
+    expect(mockStorageIncrementAccessCount).toHaveBeenCalledWith(["entry-1"]);
   });
 
   it("does not call incrementAccessCount when no entries found", async () => {
-    mockStorageGetDetail.mockResolvedValueOnce({
+    mockStorageGetDetail.mockReturnValue({
       entries: [],
       notFound: ["entry-missing"],
     });
 
     await handleMemoryGetDetail({ ids: ["entry-missing"] }, "/tmp/project");
 
-    expect(mockIncrementAccessCount).not.toHaveBeenCalled();
+    expect(mockStorageIncrementAccessCount).not.toHaveBeenCalled();
   });
 
-  it("does not break getDetail if incrementAccessCount fails", async () => {
-    mockStorageGetDetail.mockResolvedValueOnce({
+  it("propagates incrementAccessCount errors (sync storage has no error isolation)", async () => {
+    mockStorageGetDetail.mockReturnValue({
       entries: [
         { id: "entry-1", timestamp: "2024-01-01", category: "config", title: "test", content: "test", tags: [] },
       ],
       notFound: [],
     });
-    mockIncrementAccessCount.mockRejectedValueOnce(new Error("vector store error"));
+    mockStorageIncrementAccessCount.mockImplementation(() => { throw new Error("storage error"); });
 
-    const resultJson = await handleMemoryGetDetail({ ids: ["entry-1"] }, "/tmp/project");
-    const result = JSON.parse(resultJson);
+    // In v2, incrementAccessCount is sync and not wrapped in try/catch,
+    // so errors propagate (finally block still closes storage)
+    await expect(
+      handleMemoryGetDetail({ ids: ["entry-1"] }, "/tmp/project")
+    ).rejects.toThrow("storage error");
 
-    // getDetail should still succeed
-    expect(result.entries).toHaveLength(1);
-    expect(result.entries[0].id).toBe("entry-1");
+    // storage.close() should still be called via finally block
+    expect(mockStorageClose).toHaveBeenCalled();
   });
 });

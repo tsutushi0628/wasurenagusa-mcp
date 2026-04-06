@@ -49,16 +49,16 @@ wasurenagusa-mcpは「AIコーディングエージェントに永続メモリ�
 3. WHEN 明示的にtier指定で検索 THEN 長期層（distance <= 0.7）まで広く検索可能であること
 4. WHEN 閾値を超える結果 THEN 検索結果から除外されること
 
-### REQ-4: アクセスカウントによるcritical昇格
+### REQ-4: アクセスカウントによるintensity自動昇格
 
-**User Story:** システムとして、繰り返し参照される記憶を自動的にcriticalに昇格させ、永続的に保持したい。
+**User Story:** システムとして、繰り返し参照される記憶を自動的にintensity 5に昇格させ、コンテキスト注入で優先的に扱いたい。
 
 #### Acceptance Criteria
 
 1. WHEN ベクトル検索で記憶が引かれる THEN その記憶のアクセスカウントが+1されること
-2. WHEN アクセスカウントが閾値（初期値: 5）を超過 THEN そのエントリのimportanceがcriticalに自動昇格すること
+2. WHEN アクセスカウントが閾値（初期値: 5）を超過 THEN そのエントリのintensityが5に自動昇格すること
 3. WHEN 長期層の記憶がベクトル検索で引かれる THEN 次回以降は短期層でも注入対象となること（距離による層は固定だが、アクセスにより注目度が上がる）
-4. WHEN criticalに昇格 THEN 統合（consolidation）の対象外となり、永続保持されること（既存のcritical挙動と同一）
+4. WHEN intensity 5に昇格 THEN 統合時のスコアリング（maxIntensity × sourceCount）で高スコアとなり、統合原則の上位にランクされること
 
 ### REQ-5: 既存メモリへのバックフィル
 

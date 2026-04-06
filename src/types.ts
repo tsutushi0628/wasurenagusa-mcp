@@ -434,3 +434,44 @@ export interface ActiveProjectsData {
   updatedAt: string;         // 最終更新時刻（ISO 8601 JST）
 }
 
+
+// ============================
+// Storage Engine v2 Types
+// ============================
+
+// Stash（短期退避）保存パラメータ
+export interface StashParams {
+  content: string;           // 退避するファイル全文
+  filePath?: string;         // 元ファイルパス（オプション）
+  fileType?: string;         // ファイル拡張子（オプション）
+  sessionId?: string;        // セッションID（オプション）
+  ttlHours?: number;         // TTL時間（デフォルト24）
+}
+
+// Stash保存結果
+export interface StashResult {
+  id: string;
+  summary: string;           // ルールベース要約
+  expiresAt: string;         // 有効期限（ISO 8601）
+}
+
+// Stash復元結果
+export interface RestoreResult {
+  found: boolean;
+  content?: string;          // フル内容（found=true時）
+  expired?: boolean;         // TTL超過で見つからなかった場合true
+  message: string;
+}
+
+// StashEntry（DB行に対応）
+export interface StashEntry {
+  id: string;
+  content: string;
+  summary: string;
+  filePath?: string;
+  fileType?: string;
+  lineCount?: number;
+  sessionId?: string;
+  createdAt: string;
+  expiresAt: string;
+}

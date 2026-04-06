@@ -9,10 +9,10 @@
  * hookの5秒タイムアウトに影響を与えず、Embedding APIコールを完了できる。
  */
 
-import { MarkdownStorage } from "../storage/index.js";
+import { join } from "path";
+import { SQLiteStorage } from "../storage/index.js";
 import { config } from "../config.js";
 import { EmbeddingService } from "../vector/embedding-service.js";
-import { VectorStore } from "../vector/vector-store.js";
 
 async function main() {
   const [memoryPath, projectRoot] = process.argv.slice(2);
@@ -31,17 +31,15 @@ async function main() {
     process.exit(0);
   }
 
-  const vectorStore = new VectorStore(memoryPath);
-  const storage = new MarkdownStorage(projectRoot);
+  const dbPath = join(memoryPath, config.sqliteFile);
+  const storage = new SQLiteStorage(dbPath);
+  storage.initialize(memoryPath);
 
-  // 全エントリIDを取得
-  const allEntries = await storage.search({ query: "", category: "all", limit: 9999 });
-  const allIds = allEntries.results.map(e => e.id);
-
-  // embedding未生成のIDを特定
-  const missingIds = await vectorStore.getEntriesWithoutEmbedding(allIds);
+  // embedding未生成のIDを特定（SQLiteStorage経由）
+  const missingIds = storage.getEntriesWithoutEmbedding();
 
   if (missingIds.length === 0) {
+    storage.close();
     process.exit(0);
   }
 
@@ -52,14 +50,14 @@ async function main() {
   let processed = 0;
   for (const id of batch) {
     try {
-      const detail = await storage.getDetail({ ids: [id] });
+      const detail = storage.getDetail({ ids: [id] });
       if (detail.entries.length === 0) {
         continue;
       }
       const entry = detail.entries[0];
       const textToEmbed = entry.title + " " + entry.content;
       const embedding = await embeddingService.embed(textToEmbed);
-      await vectorStore.upsert(id, embedding);
+      storage.upsertVector(id, embedding);
       processed++;
       console.error(`[backfill] ${processed}/${batch.length} embedded: ${id}`);
     } catch (error) {
@@ -69,6 +67,7 @@ async function main() {
   }
 
   console.error(`[backfill] 完了: ${processed}/${batch.length}件処理`);
+  storage.close();
 }
 
 main().catch(error => {
