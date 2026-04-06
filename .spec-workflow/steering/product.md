@@ -78,6 +78,7 @@
 25. **Owner Profile** - SessionStart Hook初回実行時に`.wasurenagusa/owner-profile.md`を自動生成。優先順位・設計方針・コミュニケーションスタイル等を記入すると、SessionStart時のコンテキスト注入および自律タスク実行時の判断基準に反映
 26. **Slack通知** - スケジューラサイクルサマリー（1サイクル1通に統合）/人間エスカレーション/リトライ上限到達/デイリーサマリーをSlack Webhook経由で通知（`SLACK_WEBHOOK_URL`環境変数で有効化、オプション）
 27. **記憶想起リマインド** - 【UserPromptSubmit Hook】記憶想起機能はプロジェクト側のhooksに移譲。wasurenagusa-context内の`handleUserPromptSubmit()`は空実装（何も出力しない）
+28. **Smart Tag Retrieval** - memory_save時にGemini APIで重み付きタグ（0.0〜1.0）を自動生成。検索時はfreshness（時間減衰）× tagWeightScore × accessBoostの複合スコアでランキング最適化。新テーマ検出時はバックグラウンドで過去エントリを非同期再タグ付け。データ削除は一切行わず、取り出し優先順位のみを最適化
 
 ## Memory Categories
 
