@@ -2,39 +2,41 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Mocks
 const mockStorageSearch = vi.fn();
+const mockStorageSearchHybrid = vi.fn();
+const mockStorageSearchVectors = vi.fn();
+const mockStorageIncrementAccessCount = vi.fn();
+const mockStorageGetVectorMetadata = vi.fn();
 const mockStorageGetDetail = vi.fn();
-vi.mock("../storage/index.js", () => {
-  class MockMarkdownStorage {
-    constructor(_projectRoot: string) {}
+const mockStorageSave = vi.fn();
+const mockStorageInitialize = vi.fn();
+const mockStorageClose = vi.fn();
+vi.mock("../storage/sqlite.js", () => {
+  class MockSQLiteStorage {
+    constructor(_dbPath: string) {}
+    initialize = mockStorageInitialize;
     search = mockStorageSearch;
+    searchHybrid = mockStorageSearchHybrid;
+    searchVectors = mockStorageSearchVectors;
+    incrementAccessCount = mockStorageIncrementAccessCount;
+    getVectorMetadata = mockStorageGetVectorMetadata;
     getDetail = mockStorageGetDetail;
-    save = vi.fn().mockResolvedValue({});
+    save = mockStorageSave;
+    close = mockStorageClose;
   }
-  return { MarkdownStorage: MockMarkdownStorage };
+  return { SQLiteStorage: MockSQLiteStorage };
 });
 
 const mockEmbed = vi.fn();
 const mockEmbedIsAvailable = vi.fn();
-vi.mock("../vector/embedding-service.js", () => {
-  class MockEmbeddingService {
-    constructor(_apiKey: string) {}
+const mockEmbedInitialize = vi.fn();
+vi.mock("../vector/local-embedding.js", () => {
+  class MockLocalEmbedding {
+    constructor(_modelDir: string) {}
+    initialize = mockEmbedInitialize;
     embed = mockEmbed;
     isAvailable = mockEmbedIsAvailable;
   }
-  return { EmbeddingService: MockEmbeddingService };
-});
-
-const mockVectorSearch = vi.fn();
-const mockIncrementAccessCount = vi.fn();
-const mockGetEntryMetadata = vi.fn();
-vi.mock("../vector/vector-store.js", () => {
-  class MockVectorStore {
-    constructor(_memoryPath: string) {}
-    search = mockVectorSearch;
-    incrementAccessCount = mockIncrementAccessCount;
-    getEntryMetadata = mockGetEntryMetadata;
-  }
-  return { VectorStore: MockVectorStore };
+  return { LocalEmbedding: MockLocalEmbedding };
 });
 
 vi.mock("../vector/memory-tier.js", () => ({
@@ -43,7 +45,7 @@ vi.mock("../vector/memory-tier.js", () => ({
 }));
 
 vi.mock("../config.js", () => ({
-  config: { geminiApiKey: "test-key" },
+  config: { geminiApiKey: "test-key", sqliteFile: "memory.db", modelsDir: "models" },
   getMemoryPath: vi.fn().mockReturnValue("/tmp/test-memory"),
 }));
 
@@ -52,15 +54,16 @@ import { handleMemorySearch } from "./search.js";
 describe("search.ts scoring integration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockEmbedInitialize.mockResolvedValue(undefined);
     mockEmbedIsAvailable.mockReturnValue(true);
     mockEmbed.mockResolvedValue([0.1, 0.2, 0.3]);
-    mockIncrementAccessCount.mockResolvedValue(undefined);
-    mockStorageGetDetail.mockResolvedValue({ entries: [], notFound: [] });
+    mockStorageIncrementAccessCount.mockReturnValue(undefined);
+    mockStorageGetDetail.mockReturnValue({ entries: [], notFound: [] });
   });
 
   it("sorts results by composite score (not just timestamp)", async () => {
-    // Keyword search returns 2 entries
-    mockStorageSearch.mockResolvedValueOnce({
+    // searchHybrid returns merged FTS5 + vector results
+    mockStorageSearchHybrid.mockReturnValue({
       results: [
         { id: "old-high-relevance", timestamp: "2024-01-01T00:00:00+09:00", category: "config", title: "rate-limit設定", tags: ["rate-limit:0.9", "API:0.3"], project: "test" },
         { id: "recent-low-relevance", timestamp: "2024-06-01T00:00:00+09:00", category: "config", title: "一般設定", tags: ["設定:0.2"], project: "test" },
@@ -70,13 +73,13 @@ describe("search.ts scoring integration", () => {
     });
 
     // Vector search returns same IDs with different distances
-    mockVectorSearch.mockResolvedValueOnce([
+    mockStorageSearchVectors.mockReturnValue([
       { id: "old-high-relevance", distance: 0.1, accessCount: 5 },   // very similar
       { id: "recent-low-relevance", distance: 0.5, accessCount: 0 }, // less similar
     ]);
 
     // Metadata for freshness calculation
-    mockGetEntryMetadata.mockResolvedValueOnce(new Map([
+    mockStorageGetVectorMetadata.mockReturnValue(new Map([
       ["old-high-relevance", { lastAccessedAt: "2024-01-01T00:00:00+09:00", accessCount: 5 }],
       ["recent-low-relevance", { lastAccessedAt: "2024-06-01T00:00:00+09:00", accessCount: 0 }],
     ]));
@@ -89,25 +92,22 @@ describe("search.ts scoring integration", () => {
     expect(result.results[0].id).toBe("old-high-relevance");
   });
 
-  it("vector-only hits use tagWeightScore=1.0 (no penalty)", async () => {
-    mockStorageSearch.mockResolvedValueOnce({
-      results: [],
-      totalCount: 0,
+  it("vector-only hits are returned via searchHybrid", async () => {
+    // In v2, searchHybrid internally merges FTS5 + vector results,
+    // so vector-only hits appear in the searchHybrid result directly
+    mockStorageSearchHybrid.mockReturnValue({
+      results: [
+        { id: "vector-only-hit", timestamp: "2024-06-01T00:00:00+09:00", category: "config", title: "テスト", tags: [], project: "test" },
+      ],
+      totalCount: 1,
       hint: "",
     });
 
-    mockVectorSearch.mockResolvedValueOnce([
+    mockStorageSearchVectors.mockReturnValue([
       { id: "vector-only-hit", distance: 0.2, accessCount: 0 },
     ]);
 
-    mockStorageGetDetail.mockResolvedValueOnce({
-      entries: [
-        { id: "vector-only-hit", timestamp: "2024-06-01T00:00:00+09:00", category: "config", title: "テスト", tags: [], content: "test", project: "test" },
-      ],
-      notFound: [],
-    });
-
-    mockGetEntryMetadata.mockResolvedValueOnce(new Map([
+    mockStorageGetVectorMetadata.mockReturnValue(new Map([
       ["vector-only-hit", { lastAccessedAt: new Date().toISOString(), accessCount: 0 }],
     ]));
 

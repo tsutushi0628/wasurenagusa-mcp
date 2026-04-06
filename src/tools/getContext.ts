@@ -1,6 +1,8 @@
 import { basename } from "path";
+import { join } from "path";
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { MarkdownStorage } from "../storage/index.js";
+import { SQLiteStorage } from "../storage/index.js";
+import { config, getMemoryPath } from "../config.js";
 
 export const memoryGetContextTool: Tool = {
   name: "memory_get_context",
@@ -18,9 +20,17 @@ export async function handleMemoryGetContext(
   _args: Record<string, unknown>,
   projectRoot: string
 ): Promise<string> {
-  const storage = new MarkdownStorage(projectRoot);
-  const currentProject = basename(projectRoot);
-  const result = await storage.getContext(currentProject);
+  const memoryPath = getMemoryPath(projectRoot);
+  const dbPath = join(memoryPath, config.sqliteFile);
+  const storage = new SQLiteStorage(dbPath);
 
-  return JSON.stringify(result, null, 2);
+  try {
+    storage.initialize();
+    const currentProject = basename(projectRoot);
+    const result = storage.getContext(currentProject);
+
+    return JSON.stringify(result, null, 2);
+  } finally {
+    storage.close();
+  }
 }

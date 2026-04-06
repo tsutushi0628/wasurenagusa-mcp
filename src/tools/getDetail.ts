@@ -1,8 +1,8 @@
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { MarkdownStorage } from "../storage/index.js";
+import { SQLiteStorage } from "../storage/index.js";
 import { GetDetailParams } from "../types.js";
-import { VectorStore } from "../vector/vector-store.js";
-import { getMemoryPath } from "../config.js";
+import { config, getMemoryPath } from "../config.js";
+import { join } from "path";
 
 export const memoryGetDetailTool: Tool = {
   name: "memory_get_detail",
@@ -25,25 +25,27 @@ export async function handleMemoryGetDetail(
   args: Record<string, unknown>,
   projectRoot: string
 ): Promise<string> {
-  const storage = new MarkdownStorage(projectRoot);
+  const memoryPath = getMemoryPath(projectRoot);
+  const dbPath = join(memoryPath, config.sqliteFile);
+  const storage = new SQLiteStorage(dbPath);
 
-  const params: GetDetailParams = {
-    ids: args.ids as string[]
-  };
+  try {
+    storage.initialize();
 
-  const result = await storage.getDetail(params);
+    const params: GetDetailParams = {
+      ids: args.ids as string[]
+    };
 
-  // アクセスカウント更新（再浮上メカニズム）
-  const foundIds = result.entries.map(e => e.id);
-  if (foundIds.length > 0) {
-    try {
-      const memoryPath = getMemoryPath(projectRoot);
-      const vectorStore = new VectorStore(memoryPath);
-      await vectorStore.incrementAccessCount(foundIds);
-    } catch (error) {
-      console.error("[getDetail] アクセスカウント更新失敗:", error);
+    const result = storage.getDetail(params);
+
+    // アクセスカウント更新（再浮上メカニズム）
+    const foundIds = result.entries.map(e => e.id);
+    if (foundIds.length > 0) {
+      storage.incrementAccessCount(foundIds);
     }
-  }
 
-  return JSON.stringify(result, null, 2);
+    return JSON.stringify(result, null, 2);
+  } finally {
+    storage.close();
+  }
 }

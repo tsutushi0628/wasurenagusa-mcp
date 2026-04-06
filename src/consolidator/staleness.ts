@@ -1,11 +1,42 @@
-import { readFile, writeFile, stat } from "fs/promises";
+import { readFile, writeFile } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
 import { config } from "../config.js";
 import { ConsolidatedDont, ConsolidatedConfig } from "../types.js";
-import { parseMarkdown } from "../storage/parser.js";
+import { SQLiteStorage } from "../storage/sqlite.js";
 
 const CONSOLIDATED_DONT_SUMMARY_FILE = "consolidated-dont-summary.md";
+
+// === v2: SQLiteStorage経由の統合鮮度チェック ===
+
+export function isConsolidationStaleSqlite(storage: SQLiteStorage): boolean {
+  return storage.isConsolidationStale("dont");
+}
+
+export function isConfigConsolidationStaleSqlite(storage: SQLiteStorage): boolean {
+  return storage.isConsolidationStale("config");
+}
+
+export function readConsolidatedDontSqlite(storage: SQLiteStorage): ConsolidatedDont | null {
+  return storage.readConsolidated("dont") as ConsolidatedDont | null;
+}
+
+export function readConsolidatedConfigSqlite(storage: SQLiteStorage): ConsolidatedConfig | null {
+  return storage.readConsolidated("config") as ConsolidatedConfig | null;
+}
+
+export function writeConsolidatedDontSqlite(storage: SQLiteStorage, data: ConsolidatedDont): void {
+  storage.writeConsolidated("dont", data);
+}
+
+export function writeConsolidatedConfigSqlite(storage: SQLiteStorage, data: ConsolidatedConfig): void {
+  storage.writeConsolidated("config", data);
+}
+
+// === v1互換: ファイルベースの統合鮮度チェック（段階移行期間中に使用） ===
+
+import { stat } from "fs/promises";
+import { parseMarkdown } from "../storage/parser.js";
 
 export async function isConsolidationStale(memoryPath: string): Promise<boolean> {
   const dontPath = join(memoryPath, config.categoryFiles.dont);

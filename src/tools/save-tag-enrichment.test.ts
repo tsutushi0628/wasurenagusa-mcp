@@ -2,78 +2,68 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Mocks
 const mockStorageSave = vi.fn();
-vi.mock("../storage/index.js", () => {
-  class MockMarkdownStorage {
-    constructor(_projectRoot: string) {}
+const mockStorageInitialize = vi.fn();
+const mockStorageIsNewTheme = vi.fn();
+const mockStorageAddThemes = vi.fn();
+const mockStorageDeleteVectors = vi.fn();
+const mockStorageUpsertVector = vi.fn();
+const mockStorageClose = vi.fn();
+vi.mock("../storage/sqlite.js", () => {
+  class MockSQLiteStorage {
+    constructor(_dbPath: string) {}
+    initialize = mockStorageInitialize;
     save = mockStorageSave;
+    isNewTheme = mockStorageIsNewTheme;
+    addThemes = mockStorageAddThemes;
+    deleteVectors = mockStorageDeleteVectors;
+    upsertVector = mockStorageUpsertVector;
+    close = mockStorageClose;
   }
-  return { MarkdownStorage: MockMarkdownStorage };
+  return { SQLiteStorage: MockSQLiteStorage };
 });
 
 const mockEmbed = vi.fn();
 const mockEmbedIsAvailable = vi.fn();
-vi.mock("../vector/embedding-service.js", () => {
-  class MockEmbeddingService {
-    constructor(_apiKey: string) {}
+const mockEmbedInitialize = vi.fn();
+vi.mock("../vector/local-embedding.js", () => {
+  class MockLocalEmbedding {
+    constructor(_modelDir: string) {}
+    initialize = mockEmbedInitialize;
     embed = mockEmbed;
     isAvailable = mockEmbedIsAvailable;
   }
-  return { EmbeddingService: MockEmbeddingService };
-});
-
-const mockVectorUpsert = vi.fn();
-const mockVectorDelete = vi.fn();
-vi.mock("../vector/vector-store.js", () => {
-  class MockVectorStore {
-    constructor(_memoryPath: string) {}
-    upsert = mockVectorUpsert;
-    delete = mockVectorDelete;
-  }
-  return { VectorStore: MockVectorStore };
+  return { LocalEmbedding: MockLocalEmbedding };
 });
 
 const mockEnrich = vi.fn();
-const mockEnricherIsAvailable = vi.fn();
 vi.mock("../vector/tag-enricher.js", () => {
   class MockTagEnricher {
     constructor(_apiKey: string) {}
     enrich = mockEnrich;
-    isAvailable = mockEnricherIsAvailable;
   }
   return { TagEnricher: MockTagEnricher };
 });
 
-const mockIsNewTheme = vi.fn();
-const mockAddThemes = vi.fn();
-vi.mock("../vector/theme-registry.js", () => {
-  class MockThemeRegistry {
-    constructor(_memoryPath: string) {}
-    isNewTheme = mockIsNewTheme;
-    addThemes = mockAddThemes;
-  }
-  return { ThemeRegistry: MockThemeRegistry };
-});
-
 vi.mock("../config.js", () => ({
-  config: { geminiApiKey: "test-key" },
+  config: { geminiApiKey: "test-key", sqliteFile: "memory.db", modelsDir: "models" },
   getMemoryPath: vi.fn().mockReturnValue("/tmp/test-memory"),
 }));
 
 import { handleMemorySave } from "./save.js";
+import { config } from "../config.js";
 
 describe("save.ts tag enrichment integration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockStorageSave.mockResolvedValue({
+    mockStorageSave.mockReturnValue({
       success: true,
       id: "test-id-001",
-      path: "/tmp/test.md",
+      path: "sqlite",
       message: "saved",
     });
+    mockEmbedInitialize.mockResolvedValue(undefined);
     mockEmbed.mockResolvedValue([0.1, 0.2, 0.3]);
     mockEmbedIsAvailable.mockReturnValue(true);
-    mockEnricherIsAvailable.mockReturnValue(true);
-    mockVectorUpsert.mockResolvedValue(undefined);
   });
 
   it("runs tag enrichment in parallel with embedding", async () => {
@@ -112,7 +102,8 @@ describe("save.ts tag enrichment integration", () => {
 
   it("skips enrichment when API key unavailable", async () => {
     mockEmbedIsAvailable.mockReturnValue(false);
-    mockEnricherIsAvailable.mockReturnValue(false);
+    // config.geminiApiKeyを空にしてTagEnricherもスキップさせる
+    (config as Record<string, unknown>).geminiApiKey = "";
 
     await handleMemorySave(
       { category: "config", title: "test", content: "test content", tags: ["original"] },
@@ -123,5 +114,8 @@ describe("save.ts tag enrichment integration", () => {
     expect(mockEmbed).not.toHaveBeenCalled();
     const savedParams = mockStorageSave.mock.calls[0][0];
     expect(savedParams.tags).toEqual(["original"]);
+
+    // restore
+    (config as Record<string, unknown>).geminiApiKey = "test-key";
   });
 });

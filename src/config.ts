@@ -66,6 +66,13 @@ export const config = {
   embeddingModel: "gemini-embedding-001",
   embeddingDimensions: 768,
   backfillBatchSize: 20,
+
+  // Storage Engine v2 設定
+  sqliteFile: "memory.db",
+  localEmbeddingModel: "Xenova/all-MiniLM-L6-v2",
+  localEmbeddingDimensions: 384,
+  modelsDir: "models",
+  stashDefaultTtlHours: 24,
 };
 
 export function getMemoryPath(projectRoot: string): string {

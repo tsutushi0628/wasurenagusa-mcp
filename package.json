@@ -60,10 +60,14 @@
     "@genkit-ai/google-genai": "^1.29.0",
     "@google/generative-ai": "^0.24.1",
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "better-sqlite3": "^12.8.0",
     "dotenv": "^16.4.0",
-    "genkit": "^1.29.0"
+    "genkit": "^1.29.0",
+    "@huggingface/transformers": "^4.0.1",
+    "sqlite-vec": "^0.1.9"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20.0.0",
     "ts-node": "^10.9.0",
     "typescript": "^5.0.0",

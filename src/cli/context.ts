@@ -23,13 +23,14 @@ import { homedir } from "os";
 import { readFile } from "fs/promises";
 import { spawn } from "child_process";
 import { findProjectRoot } from "../utils/projectRoot.js";
-import { MarkdownStorage } from "../storage/index.js";
+import { SQLiteStorage } from "../storage/index.js";
 import { getMemoryPath, config } from "../config.js";
+
 import {
-  isConsolidationStale,
-  isConfigConsolidationStale,
-  readConsolidatedDont,
-  readConsolidatedConfig,
+  isConsolidationStaleSqlite,
+  isConfigConsolidationStaleSqlite,
+  readConsolidatedDontSqlite,
+  readConsolidatedConfigSqlite,
   readDontSummary,
   formatConsolidatedDont,
   formatConsolidatedConfig,
@@ -109,7 +110,7 @@ function spawnBackfillBackground(memoryPath: string, projectRoot: string): void 
 }
 
 async function getDontContent(
-  storage: MarkdownStorage,
+  storage: SQLiteStorage,
   currentProject: string,
   memoryPath: string,
   outputMode: OutputMode,
@@ -123,8 +124,8 @@ async function getDontContent(
       layers.push("### 行動原則（サマリ）\n" + summary);
 
       // 統合済みに含まれない直近エントリのみ追加
-      const consolidated = await readConsolidatedDont(memoryPath);
-      const dontEntries = await storage.readDontEntries(currentProject);
+      const consolidated = readConsolidatedDontSqlite(storage);
+      const dontEntries = storage.readDontEntries(currentProject);
       const thirtyDaysAgo = new Date();
       thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
@@ -196,7 +197,7 @@ async function getDontContent(
 
   // injectionモード: 全文注入
   try {
-    const consolidated = await readConsolidatedDont(memoryPath);
+    const consolidated = readConsolidatedDontSqlite(storage);
     if (consolidated) {
       const formatted = formatConsolidatedDont(consolidated);
       if (formatted) {
@@ -207,13 +208,13 @@ async function getDontContent(
     // 統合読み込み失敗時はスキップ
   }
 
-  const dontEntries = await storage.readDontEntries(currentProject);
+  const dontEntries = storage.readDontEntries(currentProject);
   const thirtyDaysAgo = new Date();
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
   let consolidatedSourceIds = new Set<string>();
   try {
-    const consolidated = await readConsolidatedDont(memoryPath);
+    const consolidated = readConsolidatedDontSqlite(storage);
     if (consolidated) {
       for (const principle of consolidated.principles) {
         for (const sourceId of principle.sourceIds) {
@@ -238,7 +239,7 @@ async function getDontContent(
 
   if (layers.length === 0) {
     // フォールバック: 層が一つもない場合は従来の全件注入
-    const context = await storage.getContext(currentProject);
+    const context = storage.getContext(currentProject);
     return context.dont;
   }
 
@@ -246,14 +247,14 @@ async function getDontContent(
 }
 
 async function getConfigContent(
-  storage: MarkdownStorage,
+  storage: SQLiteStorage,
   currentProject: string,
   memoryPath: string,
   outputMode: OutputMode,
 ): Promise<string> {
   if (outputMode === "agent") {
     // agentモード: テーマ+IDのインデックスのみ
-    const consolidated = await readConsolidatedConfig(memoryPath);
+    const consolidated = readConsolidatedConfigSqlite(storage);
     if (!consolidated || consolidated.summaries.length === 0) return "";
 
     const lines = consolidated.summaries.map(s => {
@@ -266,7 +267,7 @@ async function getConfigContent(
 
   // injectionモード: 全文注入
   try {
-    const consolidated = await readConsolidatedConfig(memoryPath);
+    const consolidated = readConsolidatedConfigSqlite(storage);
     if (consolidated) {
       const formatted = formatConsolidatedConfig(consolidated);
       if (formatted) return formatted;
@@ -276,7 +277,7 @@ async function getConfigContent(
   }
 
   // フォールバック: 従来の全件注入
-  const context = await storage.getContext(currentProject);
+  const context = storage.getContext(currentProject);
   return context.config;
 }
 
@@ -312,14 +313,14 @@ async function main() {
   const currentProject = basename(projectRoot);
   const memoryPath = getMemoryPath(projectRoot);
 
-  // MarkdownStorageでコンテキスト取得
-  const storage = new MarkdownStorage(projectRoot);
+  // SQLiteStorageでコンテキスト取得
+  const dbPath = join(memoryPath, config.sqliteFile);
+  const storage = new SQLiteStorage(dbPath);
+  storage.initialize(memoryPath);
 
   // dont/configいずれかの統合が古ければバックグラウンドで再統合（次回セッション向け）
-  const [dontStale, configStale] = await Promise.all([
-    isConsolidationStale(memoryPath),
-    isConfigConsolidationStale(memoryPath),
-  ]);
+  const dontStale = isConsolidationStaleSqlite(storage);
+  const configStale = isConfigConsolidationStaleSqlite(storage);
   if (dontStale || configStale) {
     spawnConsolidationBackground(memoryPath, projectRoot);
   }
@@ -443,7 +444,7 @@ async function main() {
 
         if (vectorResults.length > 0) {
           const ids = vectorResults.map(r => r.id);
-          const details = await storage.getDetail({ ids });
+          const details = storage.getDetail({ ids });
 
           const lines: string[] = ["\n## 関連する記憶（自動検索）\n"];
           for (const entry of details.entries) {
@@ -497,14 +498,17 @@ async function main() {
               const crossResults = await projVectorStore.search(crossQueryEmbedding, TIER_THRESHOLDS.short, 3);
 
               if (crossResults.length > 0) {
-                const projStorage = new MarkdownStorage(proj.path);
-                const crossDetail = await projStorage.getDetail({
+                const projDbPath = join(getMemoryPath(proj.path), config.sqliteFile);
+                const projStorage = new SQLiteStorage(projDbPath);
+                projStorage.initialize();
+                const crossDetail = projStorage.getDetail({
                   ids: crossResults.map(r => r.id),
                 });
 
                 for (const entry of crossDetail.entries) {
                   crossProjectMemories.push(`[${proj.name}] ${entry.title}: ${entry.content}`);
                 }
+                projStorage.close();
               }
             } catch {
               continue;
@@ -533,6 +537,8 @@ async function main() {
 
   // stdoutに出力（Hooksがこれをコンテキストに注入する）
   console.log(output.join("\n"));
+
+  storage.close();
 }
 
 /**
