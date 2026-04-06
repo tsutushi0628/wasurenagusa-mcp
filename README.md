@@ -26,8 +26,9 @@ wasurenagusa is an MCP server that doesn't just *remember* — it **learns**.
 3. **Converts negatives to positives** — Generates `positiveRule` alongside each principle: "don't do X" becomes "do Y instead." Research shows LLMs follow affirmative instructions significantly better than prohibitions ([Pink Elephant problem](https://arxiv.org/abs/2404.15154))
 4. **Compresses config into themes** — LLM groups scattered settings into coherent summaries, preserving facts like ports and paths
 5. **Injects only what matters** — Consolidated wisdom + active settings only. No template bloat, no duplicate entries.
-6. **Semantic memory with vector search** — Gemini embeddings power meaning-based retrieval across short/medium/long-term memory tiers. Frequently accessed memories auto-promote to highest intensity.
+6. **Hybrid search (full-text + semantic)** — SQLite-backed storage with local embedding inference (no external API needed). Full-text search with Japanese support + vector semantic search, merged and deduplicated. Works completely offline.
 7. **Smart tag retrieval** — LLM-generated weighted tags + composite scoring (freshness, tag weight, access frequency) optimize retrieval priority without discarding any data.
+8. **Memory stash/restore** — Temporarily stash memories out of the active context to save context window space, then restore them when needed. Ideal for long sessions with sub-agents.
 
 **Fully automated via Claude Code hooks — zero configuration after setup.**
 
@@ -71,12 +72,12 @@ It's not a memory bank. It's a **learning system**.
 |---|---|---|---|---|
 | Auto-detect mistakes | Yes (retry + sentiment) | No | No | No |
 | Auto-consolidate (LLM) | Yes (dont→principles, config→themes) | No | Yes (decay-based) | No |
-| Vector semantic search | Yes (Gemini embeddings, 768-dim) | Yes (ChromaDB) | Yes (SQLite-vec / ChromaDB) | No |
+| Vector semantic search | Yes (local inference, offline) | Yes (ChromaDB) | Yes (SQLite-vec / ChromaDB) | No |
 | Memory tiers (short/mid/long) | Yes (cosine distance thresholds) | No | No | No |
 | Auto-promotion (intensity) | Yes (access count → intensity 5) | No | No | No |
 | Zero-effort via hooks | Yes | Yes | Partial | No |
-| Human-readable storage | Yes (Markdown + JSON vectors) | No (SQLite) | No (SQLite-vec) | Yes |
-| Multi-LLM support | Gemini / OpenAI / Anthropic | Claude only | Local (MiniLM-L6-v2) | N/A |
+| Human-readable storage | No (SQLite — auto-migrated from v1 Markdown) | No (SQLite) | No (SQLite-vec) | Yes |
+| Multi-LLM support | Gemini / OpenAI / Anthropic (embedding is local — no API key needed) | Claude only | Local (MiniLM-L6-v2) | N/A |
 | Token-efficient retrieval | Yes (index → detail, 70-90% savings) | Yes (3-layer) | N/A | No |
 | Cross-project memory | Yes (top 5 active projects) | No | No | No |
 | License | MIT | AGPL-3.0 | Apache-2.0 | N/A |
@@ -106,8 +107,8 @@ User Prompt (Hook) — agent mode
   → Survives compaction (re-injected on every user message)
 
 During Session
-  → memory_save auto-generates 768-dim embedding via Gemini
-  → memory_save enriches tags with LLM-assigned weights (0.0-1.0)
+  → memory_save auto-generates embedding via local inference (no API call)
+  → memory_save enriches tags with LLM-assigned weights (0.0-1.0) (when API key available)
   → Theme shift triggers background re-tagging of related past entries
   → memory_search merges keyword + vector semantic + tag-weighted results
   → Vector hits increment access counts → auto-promote to intensity 5 at threshold
@@ -136,7 +137,8 @@ Background (async workers)
 
 - Node.js 18+
 - Claude Code (CLI)
-- API key for one of: [Gemini](https://aistudio.google.com/) / [OpenAI](https://platform.openai.com/) / [Anthropic](https://console.anthropic.com/)
+- **No external API key required** for core memory features (embedding runs locally)
+- Optional: API key for LLM consolidation/analysis — [Gemini](https://aistudio.google.com/) / [OpenAI](https://platform.openai.com/) / [Anthropic](https://console.anthropic.com/)
 
 ### 1. Install
 
@@ -257,11 +259,11 @@ Launch Claude Code. That's it.
 
 | Category | What it stores | File |
 |----------|---------------|------|
-| **config** | API URLs, ports, auth locations | `config.md` |
-| **dont** | Mistakes, anti-patterns, user frustrations | `dont.md` |
-| **decision** | Architecture decisions, tech choices | `decisions.md` |
-| **log** | Implementation records, resolved errors | `logs/YYYY-MM-DD.md` |
-| **snippet** | Frequently used commands & queries | `snippets.md` |
+| **config** | API URLs, ports, auth locations | `memory.db` |
+| **dont** | Mistakes, anti-patterns, user frustrations | `memory.db` |
+| **decision** | Architecture decisions, tech choices | `memory.db` |
+| **log** | Implementation records, resolved errors | `memory.db` |
+| **snippet** | Frequently used commands & queries | `memory.db` |
 
 ---
 
@@ -273,6 +275,8 @@ Launch Claude Code. That's it.
 | `memory_search` | Lightweight index search (ID, title, tags only). Use `project: "active"` for cross-project search |
 | `memory_get_detail` | Get full detail by ID(s) |
 | `memory_save` | Save a memory entry explicitly |
+| `memory_stash` | Temporarily stash memories to save context window space |
+| `memory_restore` | Restore previously stashed memories back into active context |
 | `memory_delete` | Delete entries by ID |
 | `task_submit` | Submit an autonomous task for 24/7 execution |
 | `task_status` | Check task execution status |
@@ -348,22 +352,21 @@ wasurenagusa introduces a biologically-inspired memory system powered by Gemini 
 
 ```
 memory_save
-  → Text → Gemini gemini-embedding-001 → 768-dim vector → vectors.json
+  → Text → local inference (Hugging Face Transformers) → embedding → SQLite (sqlite-vec)
 
 memory_search "authentication setup"
-  → Keyword search (existing)           ─┐
-  → Embed query → cosine distance search ─┤→ merge, deduplicate → results
-                                           └→ increment access count
-                                              → auto-promote if threshold met
+  → Full-text search (FTS5, Japanese support) ─┐
+  → Embed query → vector similarity search     ─┤→ merge, deduplicate → results
+                                                └→ increment access count
+                                                   → auto-promote if threshold met
 
 SessionStart Hook
   → Embed project name → short-tier search → inject related memories
-  → Spawn backfill worker (20 entries/run, non-blocking)
 ```
 
-**Zero new dependencies** — uses the existing `@google/generative-ai` package. Vectors are stored locally in `vectors.json` (brute-force search, ~6MB per 1,000 entries). No external database required.
+**No external API required** — embeddings are generated locally via `@huggingface/transformers`. Data is stored in SQLite with `sqlite-vec` for vector indexing. Works completely offline.
 
-**Graceful degradation** — without a Gemini API key, everything works exactly as before (keyword search only). Vector features activate automatically when `GEMINI_API_KEY` is set.
+**Automatic migration from v1** — existing Markdown-based memory files are automatically migrated to SQLite on first run. No manual steps required.
 
 ### Smart Tag Retrieval
 
@@ -476,7 +479,7 @@ Runs daily at **2:00 AM**, consolidating dont and config entries for all recentl
 
 - **Autonomous by default, manual by choice** — Hooks automate everything. Manual tools exist but are optional.
 - **Context-efficient** — LLM consolidation + smart filtering achieves 71% injection reduction. Two-stage retrieval (index then detail) further reduces on-demand consumption.
-- **Human-readable storage** — All memory stored as Markdown. No database, no vendor lock-in.
+- **SQLite storage** — All memory stored in SQLite with sqlite-vec for vector indexing. Auto-migrated from v1 Markdown format.
 - **Externalized prompts** — LLM prompts live in `prompts/` as plain text. Iterate without rebuilding.
 
 ---

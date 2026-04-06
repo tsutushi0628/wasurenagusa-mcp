@@ -18,8 +18,9 @@ wasurenagusa はただ記憶するだけでなく、**学習する**。
 3. **否定形を肯定形に変換** — 各原則に `positiveRule` を生成。「〜するな」を「〜する」に変換。LLM は否定形指示より肯定形指示の遵守率が高いことが研究で示されている（[Pink Elephant 問題](https://arxiv.org/abs/2404.15154)）
 4. **設定をテーマ別に圧縮** — LLM が散在する設定を一貫したサマリーにグループ化（ポート・パス等の事実は保持）
 5. **必要なものだけ注入** — 統合された知見 + アクティブな設定のみ。テンプレートの肥大化も重複もなし
-6. **ベクトル検索による意味記憶** — Gemini embedding で短期/中期/長期の記憶層を横断する意味ベース検索。頻繁にアクセスされる記憶は自動的に最高強度に昇格
+6. **ハイブリッド検索（全文検索＋意味検索）** — SQLiteストレージ＋ローカル推論による埋め込み生成（外部API不要）。日本語対応の全文検索＋ベクトル意味検索をマージ・重複排除。完全オフライン動作可能
 7. **Smart Tag Retrieval** — 保存時にLLMがタグを自動拡張・重み付け。鮮度・タグ重み・アクセス頻度の複合スコアリングで検索精度を最適化
+8. **ファイル退避（memory_stash / memory_restore）** — 記憶を一時的にアクティブコンテキストから退避し、コンテキスト窓を節約。必要時に復元。長時間セッションやサブエージェント運用に最適
 
 **Claude Code Hooks で完全自動化 — セットアップ後の設定はゼロ。**
 
@@ -66,7 +67,7 @@ wasurenagusa-context 実行
     │
     ▼
 [会話中] ─── AIが必要に応じて memory_search → memory_get_detail を自律呼び出し
-         ─── memory_save 時に Gemini で 768 次元ベクトルを自動生成
+         ─── memory_save 時にローカル推論で埋め込みを自動生成（外部API不要）
          ─── memory_save 時に LLM がタグを自動拡張・重み付与（高重み: 固有名詞、低重み: 汎用カテゴリ）
          ─── 新テーマ検出時にバックグラウンドで過去エントリを再タグ付け
          ─── memory_search でキーワード + ベクトル意味検索を統合
@@ -107,12 +108,12 @@ wasurenagusa-analyze 実行
 |---|---|---|---|---|
 | ミス自動検出 | あり（リトライ + 感情） | なし | なし | なし |
 | LLM 自動統合 | あり（dont→原則, config→テーマ） | なし | あり（減衰ベース） | なし |
-| ベクトル意味検索 | あり（Gemini embedding, 768次元） | なし | あり（ChromaDB） | なし |
+| ベクトル意味検索 | あり（ローカル推論、オフライン動作） | なし | あり（ChromaDB） | なし |
 | 記憶層（短期/中期/長期） | あり（コサイン距離閾値） | なし | なし | なし |
 | critical 自動昇格 | あり（アクセス回数ベース） | なし | なし | なし |
 | Hooks で完全自動化 | あり | あり | なし | なし |
-| 人間が読める保存形式 | あり（Markdown + JSON ベクトル） | なし（SQLite） | なし（ChromaDB） | あり |
-| マルチ LLM 対応 | Gemini / OpenAI / Anthropic | Claude のみ | ローカル埋め込み | N/A |
+| 人間が読める保存形式 | なし（SQLite — v1 Markdownから自動移行） | なし（SQLite） | なし（ChromaDB） | あり |
+| マルチ LLM 対応 | Gemini / OpenAI / Anthropic（埋め込みはローカル — APIキー不要） | Claude のみ | ローカル埋め込み | N/A |
 | トークン効率的な取得 | あり（index→detail, 70-90%削減） | あり（3層） | N/A | なし |
 | クロスプロジェクト記憶 | あり（直近5プロジェクト） | なし | なし | なし |
 | ライセンス | MIT | AGPL-3.0 | Apache-2.0 | N/A |
@@ -176,7 +177,7 @@ LLM ベースのセマンティック重複検出。同じテーマの新しい�
 
 ### ベクトル記憶層（Vector Memory Tiers）
 
-生物の記憶を模倣した、Gemini embedding による意味検索システム。すべての記憶が 768 次元ベクトルに変換され、キーワードでは見つからない「意味的に近い記憶」を呼び起こせる。
+生物の記憶を模倣した意味検索システム。ローカル推論で埋め込みを生成し（外部API不要）、SQLite + sqlite-vec でベクトルインデックスを管理。キーワードでは見つからない「意味的に近い記憶」を呼び起こせる。
 
 **コサイン距離による 3 層アーキテクチャ:**
 
@@ -192,22 +193,21 @@ LLM ベースのセマンティック重複検出。同じテーマの新しい�
 
 ```
 memory_save
-  → テキスト → Gemini gemini-embedding-001 → 768次元ベクトル → vectors.json
+  → テキスト → ローカル推論（Hugging Face Transformers）→ 埋め込み → SQLite（sqlite-vec）
 
 memory_search "認証の設定"
-  → キーワード検索（既存）              ─┐
-  → クエリ埋め込み → コサイン距離検索    ─┤→ マージ・重複排除 → 結果
-                                          └→ アクセスカウント++
-                                             → 閾値超過で critical 昇格
+  → 全文検索（FTS5、日本語対応）         ─┐
+  → クエリ埋め込み → ベクトル類似度検索   ─┤→ マージ・重複排除 → 結果
+                                           └→ アクセスカウント++
+                                              → 閾値超過で critical 昇格
 
 SessionStart Hook
   → プロジェクト名を埋め込み → 短期層検索 → 関連記憶を注入
-  → バックフィルワーカー起動（1回最大20件、非ブロッキング）
 ```
 
-**依存追加ゼロ** — 既存の `@google/generative-ai` パッケージを使用。ベクトルは `vectors.json` にローカル保存（ブルートフォース検索、1,000 エントリで約 6MB）。外部 DB 不要。
+**外部API不要** — 埋め込みは `@huggingface/transformers` によるローカル推論で生成。データは SQLite + `sqlite-vec` で管理。完全オフライン動作可能。
 
-**グレースフルデグラデーション** — `GEMINI_API_KEY` がなければ従来通りキーワード検索のみで動作。API キーを設定した瞬間からベクトル機能が自動的に有効になる。
+**v1からの自動マイグレーション** — 既存のMarkdownベースの記憶ファイルは初回起動時にSQLiteへ自動移行される。手動操作は不要。
 
 ### Smart Tag Retrieval（タグ拡張＋複合スコアリング）
 
@@ -295,7 +295,8 @@ MCP サーバー初回起動時に `.wasurenagusa/owner-profile.md` が自動生
 
 - Node.js 18+
 - Claude Code（CLI）
-- API キー: [Gemini](https://aistudio.google.com/) / [OpenAI](https://platform.openai.com/) / [Anthropic](https://console.anthropic.com/) のいずれか
+- **外部APIキー不要**（コア機能の埋め込みはローカル実行）
+- オプション: LLM統合・分析用のAPIキー — [Gemini](https://aistudio.google.com/) / [OpenAI](https://platform.openai.com/) / [Anthropic](https://console.anthropic.com/)
 
 ### 1. インストール
 
@@ -327,9 +328,9 @@ GEMINI_API_KEY=your-key-here
 
 | 変数 | 必須 | 説明 |
 |------|------|------|
-| `GEMINI_API_KEY` | 3つのうち1つ | Google Gemini API キー |
-| `OPENAI_API_KEY` | 3つのうち1つ | OpenAI API キー |
-| `ANTHROPIC_API_KEY` | 3つのうち1つ | Anthropic API キー |
+| `GEMINI_API_KEY` | 任意 | Google Gemini API キー（LLM統合・分析用） |
+| `OPENAI_API_KEY` | 任意 | OpenAI API キー（LLM統合・分析用） |
+| `ANTHROPIC_API_KEY` | 任意 | Anthropic API キー（LLM統合・分析用） |
 | `LLM_PROVIDER` | 任意 | `gemini`（デフォルト）, `openai`, `anthropic` |
 | `LLM_MODEL` | 任意 | プロバイダのデフォルトモデルを上書き |
 | `MEMORY_DIR` | 任意 | メモリ保存先ディレクトリ（デフォルト: `.wasurenagusa`） |
@@ -400,7 +401,7 @@ Claude Code を起動する。初回は `.wasurenagusa/` ディレクトリが�
 ├── dont.md             ← 会話から自動蓄積
 ├── decisions.md        ← 会話から自動蓄積
 ├── snippets.md         ← 会話から自動蓄積
-├── vectors.json        ← 768次元ベクトルインデックス（自動生成）
+├── memory.db           ← SQLiteデータベース（記憶・ベクトル・全文検索インデックス）
 └── logs/               ← 日付別ログ
 ```
 
@@ -433,11 +434,11 @@ Claude Code を起動する。初回は `.wasurenagusa/` ディレクトリが�
 
 | カテゴリ | 説明 | 保存先 |
 |---------|------|--------|
-| **config** | API URL、ポート番号、認証情報の場所 | `.wasurenagusa/config.md` |
-| **dont** | やってはいけないこと、過去のミス | `.wasurenagusa/dont.md` |
-| **decision** | 技術選定、アーキテクチャ決定 | `.wasurenagusa/decisions.md` |
-| **log** | 実装完了、エラー解決の記録 | `.wasurenagusa/logs/YYYY-MM-DD.md` |
-| **snippet** | よく使うコマンド、クエリ | `.wasurenagusa/snippets.md` |
+| **config** | API URL、ポート番号、認証情報の場所 | `.wasurenagusa/memory.db` |
+| **dont** | やってはいけないこと、過去のミス | `.wasurenagusa/memory.db` |
+| **decision** | 技術選定、アーキテクチャ決定 | `.wasurenagusa/memory.db` |
+| **log** | 実装完了、エラー解決の記録 | `.wasurenagusa/memory.db` |
+| **snippet** | よく使うコマンド、クエリ | `.wasurenagusa/memory.db` |
 
 ---
 
@@ -449,6 +450,8 @@ Claude Code を起動する。初回は `.wasurenagusa/` ディレクトリが�
 | `memory_search` | AI 自律 | 軽量インデックス検索（ID・タイトル・タグのみ）。`project: "active"` でクロスプロジェクト検索 |
 | `memory_get_detail` | AI 自律 | 指定 ID のフル詳細を取得 |
 | `memory_save` | 手動（オプション） | 明示的な記憶保存 |
+| `memory_stash` | AI 自律 | 記憶を一時退避しコンテキスト窓を節約 |
+| `memory_restore` | AI 自律 | 退避した記憶をアクティブコンテキストに復元 |
 | `memory_delete` | 手動 | エントリ削除（ID 指定、複数一括可） |
 | `task_submit` | AI 自律 | 自律タスクの投入 |
 | `task_status` | AI 自律 | タスク状態の確認 |
@@ -494,7 +497,7 @@ npm run test:watch
 
 - **自律自動が基本、手動はオプション** — ユーザーに手動操作を強いない。Hooks で完全自動化
 - **コンテキスト効率** — LLM 統合 + スマートフィルタリングで注入データ 71% 削減。2段階取得（index→detail）でオンデマンド消費もさらに削減
-- **人間が読めるストレージ** — すべてのメモリは Markdown で保存。DB 不要、ベンダーロックインなし
+- **SQLiteストレージ** — すべてのメモリは SQLite + sqlite-vec で保存。v1のMarkdown形式からは自動移行
 - **プロンプト外部化** — `prompts/` に LLM プロンプトをテキストファイルとして配置。リビルドなしで改善可能
 
 ---
