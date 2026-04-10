@@ -48,37 +48,39 @@
 3. **memory_get_context** - config+dont取得（Hooksでも自動実行）
 4. **memory_search** - 軽量インデックス検索（タイトル+タグのみ返却でトークン節約）
 5. **memory_get_detail** - 必要なエントリのフル詳細を取得
+6. **memory_stash** - ファイル内容を一時退避し、要約のみ返却。コンテキスト窓のトークンを節約。TTL(デフォルト24h)超過で自動削除
+7. **memory_restore** - memory_stashで退避したデータのフル内容を復元
 
 ### 手動ツール（オプション）
-6. **memory_save** - 明示的に保存したい時だけ使用
-7. **memory_delete** - 不要エントリの削除（ID指定、複数一括削除対応）
-8. **memory_update_intensity** - 既存エントリの重要度（intensity）更新。6以上でコンテキスト注入の最優先ピン留め
+8. **memory_save** - 明示的に保存したい時だけ使用
+9. **memory_delete** - 不要エントリの削除（ID指定、複数一括削除対応）
+10. **memory_update_intensity** - 既存エントリの重要度（intensity）更新。6以上でコンテキスト注入の最優先ピン留め
 
 ### 自律タスク実行（MCPツール）
-9. **task_submit** - WHY/WHAT/DONE/PROJECTの4項目でタスクを投入。Geminiで命令文生成→Claude CLI実行→Gemini評価のパイプライン
-10. **task_status** - タスク状態サマリ（pending/in-progress/completed/failed/human-required/cancelled件数）と直近タスク一覧
-11. **task_action_list** - AIが「人間判断が必要」と仕分けたタスクの一覧と対応操作（retry/complete/cancel）
-12. **project_init** - プロジェクトの品質基準・フェーズ・判断基準を選択式で登録。評価者エージェントの判定基準に反映
+11. **task_submit** - WHY/WHAT/DONE/PROJECTの4項目でタスクを投入。Geminiで命令文生成→Claude CLI実行→Gemini評価のパイプライン
+12. **task_status** - タスク状態サマリ（pending/in-progress/completed/failed/human-required/cancelled件数）と直近タスク一覧
+13. **task_action_list** - AIが「人間判断が必要」と仕分けたタスクの一覧と対応操作（retry/complete/cancel）
+14. **project_init** - プロジェクトの品質基準・フェーズ・判断基準を選択式で登録。評価者エージェントの判定基準に反映
 
 ### Spec自動更新（Scheduler連携）
-13. **wasurenagusa-spec-update** - 【cron/systemd timer】5時間5分サイクルでClaude Code CLIを起動し、Specドキュメントを自動更新
-14. **変更ログ記録** - Stop Hook（wasurenagusa-analyze）実行時に、セッション中に変更されたファイル一覧を変更ログに記録
-15. **タスクキュー** - 変更ベース更新・ローテーション更新・自律タスクを優先度付きキューで管理。全件dequeue後にmaxConcurrentTasks（デフォルト3）で並列数制限付き実行
-16. **Keep-Alive** - タスクがない場合でもpingを送信し、5時間ウィンドウを回転させる
+15. **wasurenagusa-spec-update** - 【cron/systemd timer】5時間5分サイクルでClaude Code CLIを起動し、Specドキュメントを自動更新
+16. **変更ログ記録** - Stop Hook（wasurenagusa-analyze）実行時に、セッション中に変更されたファイル一覧を変更ログに記録
+17. **タスクキュー** - 変更ベース更新・ローテーション更新・自律タスクを優先度付きキューで管理。全件dequeue後にmaxConcurrentTasks（デフォルト3）で並列数制限付き実行
+18. **Keep-Alive** - タスクがない場合でもpingを送信し、5時間ウィンドウを回転させる
 
 ### コア機能
-17. **LLM自動判定** - Genkit経由のマルチプロバイダー（Gemini/OpenAI/Anthropic、デフォルト: Gemini）で会話を自動分類・保存
-18. **プロジェクト横断記憶** - シンボリックリンクで`.wasurenagusa/`を集約。各エントリにproject/scopeフィールドを持ち、フィルタリング可能
-19. **AIリトライ検出** - AI自身の失敗パターンを自動検出・記録
-20. **動的記憶取得** - agentモード: SessionStart時はdont原文+config+owner-profileのみ注入。話題関連記憶はAIがmemory_searchで動的に取得。injectionモード: 短期・中期・長期記憶を一括注入（従来方式）。記憶想起の仕組みはプロジェクト側hooksに移譲済み
-21. **重複検出・自動マージ** - Geminiベースのセマンティック重複検出。同じテーマのエントリは自動置換でコンテキスト汚染を防止
-22. **メタ情報による諦め検知** - メッセージ長の急減少やポジティブ反応の不在を数値で検知し、テキストパターンだけでは拾えない「沈黙の諦め」を捕捉
-23. **プロンプト外部化** - 分析プロンプトを`prompts/`ディレクトリにテキストファイルとして管理。デプロイなしでプロンプト改善可能
-24. **dont統合（L3圧縮）** - SessionStart時にGeminiで多数のdontエントリ（例:49件）を5-6個の行動原則に統合。元エントリは保持したまま、コンテキスト注入量を36KB→3-4KBに大幅削減
-25. **Owner Profile** - SessionStart Hook初回実行時に`.wasurenagusa/owner-profile.md`を自動生成。優先順位・設計方針・コミュニケーションスタイル等を記入すると、SessionStart時のコンテキスト注入および自律タスク実行時の判断基準に反映
-26. **Slack通知** - スケジューラサイクルサマリー（1サイクル1通に統合）/人間エスカレーション/リトライ上限到達/デイリーサマリーをSlack Webhook経由で通知（`SLACK_WEBHOOK_URL`環境変数で有効化、オプション）
-27. **記憶想起リマインド** - 【UserPromptSubmit Hook】記憶想起機能はプロジェクト側のhooksに移譲。wasurenagusa-context内の`handleUserPromptSubmit()`は空実装（何も出力しない）
-28. **Smart Tag Retrieval** - memory_save時にGemini APIで重み付きタグ（0.0〜1.0）を自動生成。検索時はfreshness（時間減衰）× tagWeightScore × accessBoostの複合スコアでランキング最適化。新テーマ検出時はバックグラウンドで過去エントリを非同期再タグ付け。データ削除は一切行わず、取り出し優先順位のみを最適化
+19. **LLM自動判定** - Genkit経由のマルチプロバイダー（Gemini/OpenAI/Anthropic、デフォルト: Gemini）で会話を自動分類・保存
+20. **プロジェクト横断記憶** - シンボリックリンクで`.wasurenagusa/`を集約。各エントリにproject/scopeフィールドを持ち、フィルタリング可能
+21. **AIリトライ検出** - AI自身の失敗パターンを自動検出・記録
+22. **動的記憶取得** - agentモード: SessionStart時はdont原文+config+owner-profileのみ注入。話題関連記憶はAIがmemory_searchで動的に取得。injectionモード: 短期・中期・長期記憶を一括注入（従来方式）。記憶想起の仕組みはプロジェクト側hooksに移譲済み
+23. **重複検出・自動マージ** - Geminiベースのセマンティック重複検出。同じテーマのエントリは自動置換でコンテキスト汚染を防止
+24. **メタ情報による諦め検知** - メッセージ長の急減少やポジティブ反応の不在を数値で検知し、テキストパターンだけでは拾えない「沈黙の諦め」を捕捉
+25. **プロンプト外部化** - 分析プロンプトを`prompts/`ディレクトリにテキストファイルとして管理。デプロイなしでプロンプト改善可能
+26. **dont統合（L3圧縮）** - SessionStart時にGeminiで多数のdontエントリ（例:49件）を5-6個の行動原則に統合。元エントリは保持したまま、コンテキスト注入量を36KB→3-4KBに大幅削減
+27. **Owner Profile** - SessionStart Hook初回実行時に`.wasurenagusa/owner-profile.md`を自動生成。優先順位・設計方針・コミュニケーションスタイル等を記入すると、SessionStart時のコンテキスト注入および自律タスク実行時の判断基準に反映
+28. **Slack通知** - スケジューラサイクルサマリー（1サイクル1通に統合）/人間エスカレーション/リトライ上限到達/デイリーサマリーをSlack Webhook経由で通知（`SLACK_WEBHOOK_URL`環境変数で有効化、オプション）
+29. **記憶想起リマインド** - 【UserPromptSubmit Hook】記憶想起機能はプロジェクト側のhooksに移譲。wasurenagusa-context内の`handleUserPromptSubmit()`は空実装（何も出力しない）
+30. **Smart Tag Retrieval** - memory_save時にGemini APIで重み付きタグ（0.0〜1.0）を自動生成。検索時はfreshness（時間減衰）× tagWeightScore × accessBoostの複合スコアでランキング最適化。新テーマ検出時はバックグラウンドで過去エントリを非同期再タグ付け。データ削除は一切行わず、取り出し優先順位のみを最適化
 
 ## Memory Categories
 
@@ -222,8 +224,8 @@
 ## Future Vision
 
 ### 将来の拡張可能性
-- **SQLite移行**: 数千件規模への対応、検索性能向上
-- **Embeddingによるセマンティック検索**: 類似内容の検出、重複マージ
+- ~~**SQLite移行**: 数千件規模への対応、検索性能向上~~ → v0.16.0で実装済み（better-sqlite3 + FTS5 + sqlite-vec）
+- ~~**Embeddingによるセマンティック検索**: 類似内容の検出、重複マージ~~ → v0.6.0でGemini Embedding実装、v0.16.0でローカル推論（@huggingface/transformers）に移行済み
 - **HTTP Transport**: リモートアクセス、チーム共有
 - **Analytics**: 保存頻度、検索パターン、学習効果の可視化
 - **Collaboration**: チームでのdont/decisionの共有・投票

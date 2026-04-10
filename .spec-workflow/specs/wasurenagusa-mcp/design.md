@@ -13,7 +13,7 @@ wasurenagusa-mcpは、Claude Codeのコンテキスト問題を解決する自�
 - **Language**: TypeScript 5.x + Node.js 18以上 (ES2022)
 - **Module System**: ESM (NodeNext)
 - **Transport**: STDIO-based MCP Server
-- **Dependencies**: @modelcontextprotocol/sdk, @google/generative-ai, dotenv
+- **Dependencies**: @modelcontextprotocol/sdk, @google/generative-ai, genkit, @genkit-ai/google-genai, @genkit-ai/compat-oai, @genkit-ai/anthropic, better-sqlite3, sqlite-vec, @huggingface/transformers, dotenv
 
 ### Project Structure ([structure.md](../../steering/structure.md))
 
@@ -45,10 +45,15 @@ src/
 │   ├── taskStatus.ts     # task_status ツール【自律タスク状態確認】
 │   ├── taskActionList.ts # task_action_list ツール【人間アクションリスト】
 │   ├── projectInit.ts    # project_init ツール【プロジェクト初期設定】
-│   └── updateIntensity.ts # memory_update_intensity ツール【手動】重要度変更
+│   ├── updateIntensity.ts # memory_update_intensity ツール【手動】重要度変更
+│   ├── stash.ts           # memory_stash ツール【AI自律】ファイル退避
+│   └── restore.ts         # memory_restore ツール【AI自律】退避データ復元
 ├── storage/
-│   ├── index.ts          # ストレージインターフェース
-│   ├── markdown.ts       # Markdown読み書き実装
+│   ├── index.ts          # ストレージエクスポート
+│   ├── sqlite.ts         # SQLiteストレージ実装（v2、メイン）
+│   ├── schema.ts         # SQLiteスキーマ定義（DDL、FTS5、sqlite-vec）
+│   ├── migration.ts      # v1 Markdown→v2 SQLite自動マイグレーション
+│   ├── markdown.ts       # Markdown読み書き実装（v1レガシー、CLI互換用）
 │   ├── parser.ts         # Markdownパーサー（MemoryEntry配列に変換）
 │   └── formatter.ts      # MemoryEntryのMarkdownフォーマッター
 ├── analyzer/
@@ -80,8 +85,9 @@ src/
 ├── llm/
 │   └── provider.ts           # マルチLLMプロバイダー（genkit経由、Gemini/OpenAI/Anthropic切替）
 ├── vector/
-│   ├── embedding-service.ts  # Gemini Embedding生成（768次元）
-│   ├── vector-store.ts       # ベクトルデータストア（vectors.json、ブルートフォース検索）
+│   ├── local-embedding.ts    # ローカルEmbedding生成（@huggingface/transformers, 384次元、v2メイン）
+│   ├── embedding-service.ts  # Gemini Embedding生成（768次元、v1レガシー）
+│   ├── vector-store.ts       # ベクトルデータストア（v1レガシー: vectors.json）
 │   ├── memory-tier.ts        # 記憶階層フィルタリング（短期≤0.2/中期≤0.45/長期≤0.7）
 │   ├── cosine-distance.ts    # コサイン距離計算
 │   ├── tag-enricher.ts       # タグ拡張（Gemini APIで重み付きタグ生成）
@@ -109,7 +115,8 @@ src/
 ### Integration Points
 
 - **Claude Code Hooks**: SessionStart/Stop イベントでCLIスクリプト自動実行
-- **Markdown Storage**: `.wasurenagusa/` ディレクトリでの永続化
+- **SQLite Storage**: `.wasurenagusa/memory.db` でのSQLite永続化（v2）
+- **Markdown Storage**: `.wasurenagusa/` ディレクトリでの永続化（v1レガシー）
 
 ## Architecture
 
@@ -135,6 +142,8 @@ graph TD
             GD[memory_get_detail]
             DL[memory_delete]
             UI[memory_update_intensity]
+            STH[memory_stash]
+            RST[memory_restore]
             TS[task_submit]
             TST[task_status]
             TAL[task_action_list]
@@ -142,7 +151,8 @@ graph TD
         end
 
         subgraph "Storage Layer"
-            MS[MarkdownStorage]
+            SS[SQLiteStorage]
+            MS[MarkdownStorage v1互換]
         end
 
         subgraph "Analyzer Layer"
@@ -174,7 +184,8 @@ graph TD
         end
 
         subgraph "Vector Layer"
-            ES[EmbeddingService]
+            LE[LocalEmbedding 384次元]
+            ES[EmbeddingService v1互換]
             VS[VectorStore]
         end
     end
@@ -182,7 +193,6 @@ graph TD
     subgraph "External"
         FS[".wasurenagusa/"]
         GAPI[Gemini API]
-        GEMBED[Gemini Embedding API]
         CCLI[Claude Code CLI]
     end
 
@@ -199,19 +209,23 @@ graph TD
     MC -->|STDIO| TST
     MC -->|STDIO| TAL
     MC -->|STDIO| PI
+    MC -->|STDIO| STH
+    MC -->|STDIO| RST
 
-    CTX --> MS
+    CTX --> SS
     CTX --> DC
     CTX --> CC
     ANZ --> MS
     ANZ --> GA
     ANZ --> CL
-    GC --> MS
-    SV --> MS
-    SR --> MS
-    GD --> MS
-    DL --> MS
-    UI --> MS
+    GC --> SS
+    SV --> SS
+    SR --> SS
+    GD --> SS
+    DL --> SS
+    UI --> SS
+    STH --> SS
+    RST --> SS
 
     TS --> TSTORE
     TST --> TSTORE
@@ -233,9 +247,9 @@ graph TD
     PIN --> LLM
     LLM --> GAPI
 
-    ES --> GEMBED
+    LE --> SS
     VS --> ES
-    MS --> FS
+    SS --> FS
 ```
 
 ### Modular Design Principles

@@ -44,6 +44,7 @@ export interface CycleSummary {
   results: CycleTaskResult[];
   totalDurationMs: number;
   completedAt: string;
+  rateLimitSkipped?: number;
 }
 
 // Discriminated union: タイプ別でペイロード型を分離
@@ -270,16 +271,27 @@ export class SlackNotifier {
           text: `*Tasks:*\n${taskLines.join("\n")}`,
         },
       },
-      {
-        type: "context",
-        elements: [
-          {
-            type: "mrkdwn",
-            text: `Cycle completed at ${this.formatJstDateTime(summary.completedAt)}`,
-          },
-        ],
-      },
     ];
+
+    if (summary.rateLimitSkipped && summary.rateLimitSkipped > 0) {
+      blocks.push({
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: `⚠️ リミット到達: ${summary.rateLimitSkipped}件スキップ`,
+        },
+      });
+    }
+
+    blocks.push({
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text: `Cycle completed at ${this.formatJstDateTime(summary.completedAt)}`,
+        },
+      ],
+    });
 
     return blocks;
   }

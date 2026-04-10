@@ -336,7 +336,7 @@ When using `"agent"` mode with Claude Code Agent Teams, add these rules to your 
 
 ### Vector Memory Tiers
 
-wasurenagusa introduces a biologically-inspired memory system powered by Gemini embeddings. Every memory is converted to a 768-dimensional vector, enabling meaning-based retrieval that goes far beyond keyword matching.
+wasurenagusa introduces a biologically-inspired memory system powered by local embeddings. Every memory is converted to a 384-dimensional vector, enabling meaning-based retrieval that goes far beyond keyword matching.
 
 **Three-tier architecture with cosine distance thresholds:**
 
