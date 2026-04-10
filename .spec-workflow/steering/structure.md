@@ -37,10 +37,15 @@ wasurenagusa-mcp/
 │   │   ├── taskStatus.ts     # task_status ツール【自律タスク状態確認】
 │   │   ├── taskActionList.ts # task_action_list ツール【人間アクションリスト】
 │   │   ├── projectInit.ts    # project_init ツール【プロジェクト初期設定】
-│   │   └── updateIntensity.ts # memory_update_intensity ツール【手動】重要度変更
+│   │   ├── updateIntensity.ts # memory_update_intensity ツール【手動】重要度変更
+│   │   ├── stash.ts           # 【v2】memory_stash ツール【AI自律】ファイル退避
+│   │   └── restore.ts         # 【v2】memory_restore ツール【AI自律】退避データ復元
 │   ├── storage/
-│   │   ├── index.ts          # ストレージインターフェース
-│   │   ├── markdown.ts       # Markdown読み書き実装
+│   │   ├── index.ts          # ストレージエクスポート
+│   │   ├── sqlite.ts         # SQLiteストレージ実装（v2、メイン）
+│   │   ├── schema.ts         # SQLiteスキーマ定義（DDL、FTS5、sqlite-vec）
+│   │   ├── migration.ts      # v1 Markdown→v2 SQLite自動マイグレーション
+│   │   ├── markdown.ts       # Markdown読み書き実装（v1レガシー、CLI互換用）
 │   │   ├── parser.ts         # Markdownパーサー（MemoryEntry配列に変換）
 │   │   └── formatter.ts      # MemoryEntryのMarkdownフォーマッター
 │   ├── analyzer/
@@ -72,8 +77,9 @@ wasurenagusa-mcp/
 │   ├── llm/
 │   │   └── provider.ts           # マルチLLMプロバイダー（genkit経由、Gemini/OpenAI/Anthropic切替）
 │   ├── vector/
-│   │   ├── embedding-service.ts  # Gemini Embedding生成（768次元）
-│   │   ├── vector-store.ts       # ベクトルデータストア（vectors.json、ブルートフォース検索）
+│   │   ├── local-embedding.ts    # ローカルEmbedding生成（@huggingface/transformers, 384次元、v2メイン）
+│   │   ├── embedding-service.ts  # Gemini Embedding生成（768次元、v1レガシー）
+│   │   ├── vector-store.ts       # ベクトルデータストア（v1レガシー: vectors.json）
 │   │   ├── memory-tier.ts        # 記憶階層フィルタリング（短期≤0.2/中期≤0.45/長期≤0.7）
 │   │   ├── cosine-distance.ts    # コサイン距離計算
 │   │   ├── tag-enricher.ts       # タグ拡張（Gemini APIで重み付きタグ生成）
@@ -115,7 +121,8 @@ wasurenagusa-mcp/
 │       ├── autonomous-task-execution/ # 自律タスク実行
 │       ├── importance-memory/       # intensity（重要度）記憶
 │       ├── vector-memory-tier/      # ベクトル記憶階層
-│       └── smart-tag-retrieval/     # Smart Tag Retrieval（タグ拡張+スコアリング最適化）
+│       ├── smart-tag-retrieval/     # Smart Tag Retrieval（タグ拡張+スコアリング最適化）
+│       └── storage-engine-v2/       # SQLite移行・ローカルembedding・退避機能
 ├── package.json
 ├── tsconfig.json
 ├── vitest.config.ts          # Vitestテスト設定
@@ -129,6 +136,7 @@ wasurenagusa-mcp/
 ```
 共通管理リポジトリ（例: firebase-kit）
 └── .wasurenagusa/              # 実体はここに1つだけ
+    ├── memory.db               # 【v2】SQLiteデータベース（記憶・ベクトル・全文検索インデックス）
     ├── config.md               # 設定情報（全プロジェクト集約、projectフィールドで識別）
     ├── dont.md                 # やってはいけないこと（全プロジェクト集約）
     ├── consolidated-dont.json  # dont統合キャッシュ（Geminiで原則化した結果）
@@ -181,7 +189,7 @@ wasurenagusa-mcp/
 
 ### MCPツール名
 - `snake_case`（MCP規約に従う）
-- 例: `memory_save`, `memory_search`, `memory_get_detail`, `memory_get_context`, `memory_delete`, `memory_update_intensity`, `task_submit`, `task_status`, `task_action_list`, `project_init`
+- 例: `memory_save`, `memory_search`, `memory_get_detail`, `memory_get_context`, `memory_delete`, `memory_update_intensity`, `memory_stash`, `memory_restore`, `task_submit`, `task_status`, `task_action_list`, `project_init`
 
 ## Import Patterns
 
@@ -362,6 +370,10 @@ export class MarkdownStorage {
 - `memory_delete` - エントリ削除（ID指定、複数一括可）
 - `memory_update_intensity` - エントリの重要度（intensity）変更
 
+**AI自律（v2追加）**
+- `memory_stash` - ファイル退避（コンテキスト窓節約）
+- `memory_restore` - 退避データ復元
+
 **自律タスク管理**
 - `task_submit` - タスク投入（WHY/WHAT/DONE/PROJECT）
 - `task_status` - タスク状態サマリ取得
@@ -370,6 +382,8 @@ export class MarkdownStorage {
 
 ### Internal（外部から直接呼ばない）
 - `MarkdownStorage` クラス
+- `SQLiteStorage` クラス（v2: MarkdownStorageの置き換え。SQLite+FTS5+sqlite-vec）
+- `LocalEmbedding` クラス（v2: EmbeddingServiceの置き換え。ローカル推論、384次元）
 - `Analyzer` クラス（旧GeminiAnalyzer）
 - `DontConsolidator` クラス（dontエントリのLLM統合）
 - `ConfigConsolidator` クラス（configエントリのLLM統合）

@@ -230,6 +230,32 @@ describe("TaskStore", () => {
     });
   });
 
+  describe("requeueTask()", () => {
+    it("in-progressのタスクをpendingに戻す", async () => {
+      const store = new TaskStore(schedulerDir);
+      const task = await store.submit(makeParams(), "/tmp/test");
+      await store.dequeue(); // in-progressになる
+
+      await store.requeueTask(task.id);
+
+      const status = await store.getStatus();
+      expect(status.summary.pending).toBe(1);
+      expect(status.summary.inProgress).toBe(0);
+    });
+
+    it("存在しないtaskIdでエラーを投げる", async () => {
+      const store = new TaskStore(schedulerDir);
+      await expect(store.requeueTask("nonexistent")).rejects.toThrow("Task not found");
+    });
+
+    it("in-progress以外のステータスでエラーを投げる", async () => {
+      const store = new TaskStore(schedulerDir);
+      const task = await store.submit(makeParams(), "/tmp/test");
+      // pendingのまま
+      await expect(store.requeueTask(task.id)).rejects.toThrow("Task is not in-progress");
+    });
+  });
+
   describe("recoverInProgress()", () => {
     it("in-progressのタスクをfailedに復旧する", async () => {
       const store = new TaskStore(schedulerDir);

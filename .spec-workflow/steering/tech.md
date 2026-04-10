@@ -27,6 +27,9 @@ MCPサーバー（Model Context Protocol Server）- Claude Codeの機能を拡�
 | **@genkit-ai/compat-oai** | ^1.29.0 | OpenAIプロバイダー（genkit用） |
 | **@genkit-ai/anthropic** | ^0.2.0 | Anthropicプロバイダー（genkit用） |
 | **dotenv** | ^16.4.0 | 環境変数管理 |
+| **better-sqlite3** | ^12.8.0 | SQLiteデータベースアクセス |
+| **sqlite-vec** | ^0.1.9 | SQLiteベクトル検索拡張 |
+| **@huggingface/transformers** | ^4.0.1 | ローカルembedding推論（all-MiniLM-L6-v2、384次元） |
 
 ### Application Architecture
 
@@ -52,7 +55,7 @@ MCPサーバー（Model Context Protocol Server）- Claude Codeの機能を拡�
 │  │  【自動】wasurenagusa-context ← SessionStart/UserPromptSubmit/PreCompact Hook │
 │  │  【自動】wasurenagusa-analyze ← Stop Hook               │   │
 │  ├─────────────────────────────────────────────────────────┤   │
-│  │   MCP Tool Handlers（10ツール）                           │   │
+│  │   MCP Tool Handlers（12ツール）                           │   │
 │  │  【AI自律】memory_get_context← コンテキスト取得          │   │
 │  │  【手動】memory_save       ← オプション                  │   │
 │  │  【AI自律】memory_search   ← AIが必要時に呼び出し        │   │
@@ -63,10 +66,12 @@ MCPサーバー（Model Context Protocol Server）- Claude Codeの機能を拡�
 │  │  【手動】task_action_list  ← 人間アクションリスト        │   │
 │  │  【手動】project_init      ← プロジェクト初期設定        │   │
 │  │  【手動】memory_update_intensity ← 重要度変更            │   │
+│  │  【AI自律】memory_stash    ← ファイル退避              │   │
+│  │  【AI自律】memory_restore  ← 退避データ復元            │   │
 │  └─────────────────────────────────────────────────────────┘   │
 │                              │                                 │
 │  ┌───────────────────────────▼─────────────────────────────┐   │
-│  │   Storage Layer (Markdown Files)                        │   │
+│  │   Storage Layer (SQLite: memory.db)                     │   │
 │  │   .wasurenagusa/ (シンボリックリンク集約)                │   │
 │  └───────────────────────────┬─────────────────────────────┘   │
 │                              │                                 │
@@ -115,21 +120,31 @@ wasurenagusa-spec-update
 1. **Hooks Layer**: Claude Code Hooksによる自動実行トリガー
 2. **Transport Layer**: STDIO（標準入出力）でMCPプロトコル通信
 3. **Tool Layer**: MCPツール定義とハンドラー
-4. **Storage Layer**: Markdownファイルの読み書き
+4. **Storage Layer**: SQLiteデータベース（memory.db）の読み書き + FTS5全文検索
 5. **Analyzer Layer**: LLMプロバイダー（Genkit経由: Gemini/OpenAI/Anthropic）による自動判定・リトライ検出
 6. **Consolidator Layer**: dont/configエントリのLLM統合（多数のエントリ→少数の原則/テーマに集約）
 7a. **LLM Layer**: genkit経由のマルチLLMプロバイダー（Gemini/OpenAI/Anthropic、`LLM_PROVIDER`環境変数で切替）
-7b. **Vector Layer**: Gemini Embeddingによるセマンティック検索（短期・中期・長期の3層記憶）+ Smart Tag Retrieval（重み付きタグ拡張・複合スコアリング・バックグラウンド再タグ付け）
+7b. **Vector Layer**: ローカルEmbedding（@huggingface/transformers, 384次元）によるセマンティック検索（短期・中期・長期の3層記憶）+ Smart Tag Retrieval（重み付きタグ拡張・複合スコアリング・バックグラウンド再タグ付け）
 8. **Scheduler Layer**: cron/systemd timerによるバッチ実行（Spec自動更新・Keep-Alive）
 9. **Autonomous Layer**: 自律タスク実行（タスクストア、命令文生成、評価者、プロジェクト初期設定、Slack通知）
 
 ### Data Storage
 
-- **Primary storage**: Markdownファイル（`.wasurenagusa/` ディレクトリ）
-- **Caching**: なし（ファイル直接読み込み）
-- **Data formats**: Markdown（構造化メタデータ付き）
+- **Primary storage**: SQLite（`.wasurenagusa/memory.db`）
+- **Caching**: なし（SQLite直接アクセス）
+- **Data formats**: SQLite（FTS5全文検索 + sqlite-vecベクトル検索）
 
 **ストレージ構造**:
+```
+共通管理リポジトリ（例: firebase-kit）
+└── .wasurenagusa/
+    ├── memory.db               # SQLiteデータベース（メモリ本体 + FTS5 + sqlite-vec）
+    ├── models/                  # ローカルembeddingモデルキャッシュ
+    ├── owner-profile.md         # オーナープロフィール
+    └── ...（v1 Markdownファイルは自動マイグレーション後もフォールバック用に残存）
+```
+
+（v1レガシー: v2ではmemory.dbに移行済み。以下のファイルはv1互換CLIで参照される場合がある）
 ```
 共通管理リポジトリ（例: firebase-kit）
 └── .wasurenagusa/              # 実体はここに1つだけ
@@ -157,7 +172,7 @@ wasurenagusa-spec-update
 | **Claude Code Hooks** | SessionStart/UserPromptSubmit/Stop/PreCompact (type: "command") | なし（ローカル） | 自律動作トリガー |
 | **Claude Code CLI** | `claude -p` (ヘッドレス) | なし（ローカル） | Spec自動更新・自律タスク実行・Keep-Alive |
 | **LLMプロバイダー** | HTTPS/REST (genkit経由) | API Key | 会話分析・自動判定・リトライ検出（Gemini/OpenAI/Anthropic切替可能） |
-| **Google Gemini Embedding API** | HTTPS/REST | API Key | ベクトル埋め込み生成（セマンティック検索用、768次元） |
+| **ローカルEmbedding（Transformers.js）** | ローカル推論 | なし | ベクトル埋め込み生成（all-MiniLM-L6-v2、384次元。外部API不要） |
 | **OS Scheduler** | cron (Linux) / launchd (macOS) | なし | 5h5mサイクル実行 |
 | **Slack Webhook** | HTTPS POST | Webhook URL | サイクルサマリー/人間エスカレーション/リトライ上限到達/デイリーサマリーの通知 |
 
@@ -234,7 +249,7 @@ claude mcp add wasurenagusa node /path/to/wasurenagusa-mcp/dist/index.js
 
 - **Expected Load**: 1ユーザー、1プロジェクトあたり数百エントリ
 - **Availability Requirements**: なし（ローカルツール）
-- **Growth Projections**: 将来的にSQLite移行で数千エントリ対応可能
+- **Growth Projections**: SQLite+FTS5移行済み。1万エントリでも500ms以内の検索レイテンシ
 
 ## Technical Decisions & Rationale
 
@@ -256,6 +271,7 @@ claude mcp add wasurenagusa node /path/to/wasurenagusa-mcp/dist/index.js
    - **理由**: 人間が読みやすい、git管理可能、セットアップ不要
    - **代替案**: SQLite、JSON
    - **トレードオフ**: 検索性能は劣るが、数百件なら十分
+   - **v2更新**: v0.16.0でSQLite（better-sqlite3 + sqlite-vec）に移行。FTS5全文検索とベクトルインデックスを統合。v1 Markdownからの自動マイグレーション対応
 
 4. **STDIO Transport採用**
    - **理由**: ローカル実行でセットアップ最小、セキュリティリスク低
@@ -326,7 +342,7 @@ claude mcp add wasurenagusa node /path/to/wasurenagusa-mcp/dist/index.js
 | 制限事項 | 影響 | 対応策 |
 |----------|------|--------|
 | **Hooks設定が必要** | 自動化にはHooks設定が必要 | 初回設定のみ。設定なしでも手動利用可 |
-| **Markdown検索の性能** | 数千件で遅延の可能性 | 将来SQLite移行 |
+| ~~**Markdown検索の性能**~~ | ~~数千件で遅延の可能性~~ | v0.16.0でSQLite+FTS5に移行済み |
 | ~~**重複検出なし**~~ | ~~同じ内容が複数保存される~~ | v0.3.0でGeminiベース重複検出を実装済み |
 | **ローカル実行のみ** | チーム共有が困難 | 将来HTTP Transport |
 | **.gitがないプロジェクト** | プロジェクトルート検出不可 | process.cwd()フォールバック |

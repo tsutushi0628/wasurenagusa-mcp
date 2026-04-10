@@ -198,6 +198,19 @@ export class TaskStore {
     await this.saveTasks(tasks);
   }
 
+  async requeueTask(taskId: string): Promise<void> {
+    const tasks = await this.loadTasks();
+    const task = tasks.find((t) => t.id === taskId);
+    if (!task) {
+      throw new Error(`Task not found: ${taskId}`);
+    }
+    if (task.status !== "in-progress") {
+      throw new Error(`Task is not in-progress: ${task.status}`);
+    }
+    task.status = "pending";
+    await this.saveTasks(tasks);
+  }
+
   async recoverInProgress(): Promise<number> {
     const tasks = await this.loadTasks();
     let recovered = 0;

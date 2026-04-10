@@ -28,6 +28,16 @@ import { SlackNotifier, type CycleTaskResult } from "../autonomous/notifier.js";
 import { TaskMarkdownAdapter } from "../autonomous/task-markdown.js";
 import type { SchedulerConfig, ExecutionLogEntry, AutonomousTask, AutonomousTaskStatus } from "../types.js";
 
+/**
+ * Claude CLIの出力からトークンリミット到達を検出する。
+ * exitCode === 0 の場合はリミット到達とみなさない。
+ */
+export function detectRateLimit(exitCode: number, stdout: string, stderr: string): boolean {
+  if (exitCode === 0) return false;
+  const combined = stdout + stderr;
+  return combined.includes("hit your limit") || combined.includes("resets");
+}
+
 const TASKS_MD_PATH = join(homedir(), ".wasurenagusa", "scheduler", "tasks.md");
 
 const SCHEDULER_DIR = join(homedir(), ".wasurenagusa", "scheduler");
@@ -244,7 +254,7 @@ async function executeAutonomousTask(
   taskStore: TaskStore,
   executor: Executor,
   notifier: SlackNotifier,
-): Promise<{ exitCode: number; durationMs: number; failReason?: string }> {
+): Promise<{ exitCode: number; durationMs: number; failReason?: string; rateLimitHit?: boolean }> {
   const projectInitializer = new ProjectInitializer(SCHEDULER_DIR);
   const commandGenerator = new CommandGenerator();
   const evaluator = new TaskEvaluator();
@@ -274,11 +284,12 @@ async function executeAutonomousTask(
 
   // exitCode != 0 → 即failed
   if (result.exitCode !== 0) {
+    const isRateLimit = detectRateLimit(result.exitCode, result.stdout, result.stderr);
     const failReason = `Exit code: ${result.exitCode}`;
     await taskStore.markFailed(task.id, failReason);
     await syncStatusToMarkdown(task.what, task.project, "failed", { error: failReason });
     console.error(`[Autonomous] Task failed with exit code ${result.exitCode}`);
-    return { exitCode: result.exitCode, durationMs: result.durationMs, failReason };
+    return { exitCode: result.exitCode, durationMs: result.durationMs, failReason, rateLimitHit: isRateLimit };
   }
 
   // 評価
@@ -427,6 +438,8 @@ async function runCommand(): Promise<void> {
     const taskFns: (() => Promise<void>)[] = [];
     const cycleResults: CycleTaskResult[] = [];
     const cycleStartMs = Date.now();
+    let rateLimitHit = false;
+    let rateLimitSkipped = 0;
 
     // 自律タスク: 全dequeue
     const autonomousTasks: AutonomousTask[] = [];
@@ -455,8 +468,15 @@ async function runCommand(): Promise<void> {
       }
 
       taskFns.push(async () => {
+        if (rateLimitHit) {
+          await taskStore.requeueTask(autoTask.id);
+          await syncStatusToMarkdown(autoTask.what, autoTask.project, "pending");
+          rateLimitSkipped++;
+          console.log(`[Rate Limit] Skipping autonomous task: ${autoTask.what}`);
+          return;
+        }
         await syncStatusToMarkdown(autoTask.what, autoTask.project, "in-progress");
-        let execResult: { exitCode: number; durationMs: number; failReason?: string } = { exitCode: -1, durationMs: 0 };
+        let execResult: { exitCode: number; durationMs: number; failReason?: string; rateLimitHit?: boolean } = { exitCode: -1, durationMs: 0 };
         try {
           execResult = await executeAutonomousTask(autoTask, taskStore, executor, notifier);
         } catch (error) {
@@ -470,6 +490,11 @@ async function runCommand(): Promise<void> {
           await syncStatusToMarkdown(autoTask.what, autoTask.project, "failed", { error: errorMessage });
           console.error(`[Autonomous] Task failed with error: ${errorMessage}`);
           execResult = { exitCode: -1, durationMs: 0, failReason: `Error: ${errorMessage}` };
+        }
+
+        if (execResult.rateLimitHit) {
+          rateLimitHit = true;
+          console.log("[Rate Limit] Token limit reached. Aborting remaining tasks.");
         }
 
         cycleResults.push({
@@ -505,6 +530,11 @@ async function runCommand(): Promise<void> {
 
     for (const task of specTasks) {
       taskFns.push(async () => {
+        if (rateLimitHit) {
+          rateLimitSkipped++;
+          console.log(`[Rate Limit] Skipping spec task: ${task.project}`);
+          return;
+        }
         let prompt: string;
         if (task.type === "change-based") {
           prompt = await promptBuilder.buildChangeBasedPrompt(task);
@@ -529,6 +559,10 @@ async function runCommand(): Promise<void> {
         } else {
           await taskQueue.markFailed(task.id, result.stderr.slice(0, 200));
           console.error(`Task failed for ${task.project} with exit code ${result.exitCode}`);
+          if (detectRateLimit(result.exitCode, result.stdout, result.stderr)) {
+            rateLimitHit = true;
+            console.log("[Rate Limit] Token limit reached. Aborting remaining tasks.");
+          }
         }
 
         cycleResults.push({
@@ -571,6 +605,7 @@ async function runCommand(): Promise<void> {
           results: cycleResults,
           totalDurationMs: Date.now() - cycleStartMs,
           completedAt: new Date().toISOString(),
+          rateLimitSkipped: rateLimitSkipped > 0 ? rateLimitSkipped : undefined,
         });
       }
     } else {
