@@ -3,7 +3,7 @@
  * backfill-worker
  * detachedプロセスとして起動され、embedding未生成のメモリエントリをバックグラウンドで埋める。
  *
- * 使い方: node backfill-worker.js <memoryPath> <projectRoot>
+ * 使い方: node backfill-worker.js <memoryPath> <projectRoot> [batchSize]
  *
  * context.ts の SessionStart hook から spawn される。
  * hookの5秒タイムアウトに影響を与えず、Embedding APIコールを完了できる。
@@ -12,10 +12,10 @@
 import { join } from "path";
 import { SQLiteStorage } from "../storage/index.js";
 import { config } from "../config.js";
-import { EmbeddingService } from "../vector/embedding-service.js";
+import { LocalEmbedding } from "../vector/local-embedding.js";
 
 async function main() {
-  const [memoryPath, projectRoot] = process.argv.slice(2);
+  const [memoryPath, projectRoot, batchSizeArg] = process.argv.slice(2);
 
   if (!memoryPath) {
     console.error("[backfill] memoryPath引数がありません");
@@ -26,8 +26,9 @@ async function main() {
     process.exit(1);
   }
 
-  const embeddingService = new EmbeddingService(config.geminiApiKey);
-  if (!embeddingService.isAvailable()) {
+  const localEmbedding = new LocalEmbedding(join(memoryPath, config.modelsDir));
+  await localEmbedding.initialize();
+  if (!localEmbedding.isAvailable()) {
     process.exit(0);
   }
 
@@ -43,9 +44,9 @@ async function main() {
     process.exit(0);
   }
 
-  // 最大 backfillBatchSize 件処理
-  const batchSize = config.backfillBatchSize;
-  const batch = missingIds.slice(0, batchSize);
+  // バッチサイズ: 引数指定あり→その値(0=全件)、なし→config
+  const requestedBatchSize = batchSizeArg !== undefined ? parseInt(batchSizeArg, 10) : config.backfillBatchSize;
+  const batch = requestedBatchSize === 0 ? missingIds : missingIds.slice(0, requestedBatchSize);
 
   let processed = 0;
   for (const id of batch) {
@@ -56,7 +57,7 @@ async function main() {
       }
       const entry = detail.entries[0];
       const textToEmbed = entry.title + " " + entry.content;
-      const embedding = await embeddingService.embed(textToEmbed);
+      const embedding = await localEmbedding.embed(textToEmbed);
       storage.upsertVector(id, embedding);
       processed++;
       console.error(`[backfill] ${processed}/${batch.length} embedded: ${id}`);
