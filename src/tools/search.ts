@@ -7,7 +7,8 @@ import { SearchScorer } from "../vector/search-scorer.js";
 import { parseWeightedTags } from "../vector/weighted-tag.js";
 import { config, getMemoryPath } from "../config.js";
 import { homedir } from "os";
-import { join } from "path";
+import { join, basename } from "path";
+import { logOperation, setLastSearch, generateSearchSessionId, generateJstTimestamp } from "../utils/operation-logger.js";
 
 export const memorySearchTool: Tool = {
   name: "memory_search",
@@ -71,6 +72,7 @@ export async function handleMemorySearch(
   args: Record<string, unknown>,
   projectRoot: string
 ): Promise<string> {
+  const startTime = Date.now();
   const memoryPath = getMemoryPath(projectRoot);
   const dbPath = join(memoryPath, config.sqliteFile);
   const storage = new SQLiteStorage(dbPath);
@@ -250,5 +252,10 @@ export async function handleMemorySearch(
   }
 
   storage.close();
-  return JSON.stringify(result, null, 2);
+  const resultJson = JSON.stringify(result, null, 2);
+  const sessionId = generateSearchSessionId();
+  const resultIds = result.results.map((r: MemoryIndexEntry) => r.id);
+  void logOperation({ ts: generateJstTimestamp(), operation_type: "search", session_id: sessionId, query: params.query, category: params.category ?? "all", hit_count: result.results.length, project: basename(projectRoot), duration_ms: Date.now() - startTime }, memoryPath).catch(() => {});
+  setLastSearch(basename(projectRoot), sessionId, resultIds);
+  return resultJson;
 }
