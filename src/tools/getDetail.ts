@@ -2,7 +2,8 @@ import { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { SQLiteStorage } from "../storage/index.js";
 import { GetDetailParams } from "../types.js";
 import { config, getMemoryPath } from "../config.js";
-import { join } from "path";
+import { join, basename } from "path";
+import { logOperation, resolveParentSessionId, generateGetDetailSessionId, generateJstTimestamp } from "../utils/operation-logger.js";
 
 export const memoryGetDetailTool: Tool = {
   name: "memory_get_detail",
@@ -25,9 +26,11 @@ export async function handleMemoryGetDetail(
   args: Record<string, unknown>,
   projectRoot: string
 ): Promise<string> {
+  const startTime = Date.now();
   const memoryPath = getMemoryPath(projectRoot);
   const dbPath = join(memoryPath, config.sqliteFile);
   const storage = new SQLiteStorage(dbPath);
+  const project = basename(projectRoot);
 
   try {
     storage.initialize();
@@ -44,7 +47,11 @@ export async function handleMemoryGetDetail(
       storage.incrementAccessCount(foundIds);
     }
 
-    return JSON.stringify(result, null, 2);
+    const resultJson = JSON.stringify(result, null, 2);
+    const requestedIds = params.ids;
+    const parentSessionId = resolveParentSessionId(project, requestedIds);
+    void logOperation({ ts: generateJstTimestamp(), operation_type: "get_detail", session_id: generateGetDetailSessionId(), parent_session_id: parentSessionId, requested_ids: requestedIds, found_count: foundIds.length, project, duration_ms: Date.now() - startTime }, memoryPath).catch(() => {});
+    return resultJson;
   } finally {
     storage.close();
   }
