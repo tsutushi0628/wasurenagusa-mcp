@@ -42,4 +42,26 @@ describe("prompt-loader", () => {
     expect(prompt).toContain("例2:");
     expect(prompt).toContain("例3:");
   });
+
+  it("analysis.txtにsuccessカテゴリ定義がある（F4）", async () => {
+    const prompt = await loadPrompt("analysis.txt");
+    expect(prompt).toContain("success");
+    // S1/S2/S3 シグナル
+    expect(prompt).toMatch(/S1|反対意見後|称賛/);
+    expect(prompt).toMatch(/S2|根拠提示|懸念解消|採用/);
+    expect(prompt).toMatch(/S3|複数案/);
+  });
+
+  it("analysis.txtにsuccessのnegative example（保存しない例）がある（F4 誤保存防止）", async () => {
+    const prompt = await loadPrompt("analysis.txt");
+    // 「単なるありがとう」「単なるOK」は保存しない、と明記
+    expect(prompt).toMatch(/保存しない|negative/i);
+    expect(prompt).toMatch(/ありがとう|OK|いいね/);
+  });
+
+  it("analysis.txtの出力JSON値域に success が含まれる（F4）", async () => {
+    const prompt = await loadPrompt("analysis.txt");
+    // 出力形式の category 列挙に "success" が入っていること
+    expect(prompt).toMatch(/"category":[^]*success/);
+  });
 });
