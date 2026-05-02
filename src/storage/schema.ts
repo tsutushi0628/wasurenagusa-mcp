@@ -1,19 +1,20 @@
 import type Database from "better-sqlite3";
 
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 export const DDL = `
 -- メモリエントリ本体
 CREATE TABLE IF NOT EXISTS memories (
     id TEXT PRIMARY KEY,
     timestamp TEXT NOT NULL,
-    category TEXT NOT NULL CHECK(category IN ('config','dont','decision','log','snippet')),
+    category TEXT NOT NULL CHECK(category IN ('config','dont','decision','log','snippet','dream','success')),
     title TEXT NOT NULL,
     content TEXT NOT NULL,
     tags TEXT NOT NULL DEFAULT '[]',
     project TEXT,
     scope TEXT,
     intensity INTEGER,
+    knowledge_gap TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

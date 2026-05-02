@@ -137,6 +137,33 @@ describe("SQLiteStorage", () => {
       expect(result).toEqual(data2);
     });
 
+    it("writeConsolidated 失敗時に元データが破壊されない（fail-open 回帰）", () => {
+      // 先に正しいデータを書き込む
+      const original = {
+        principles: [],
+        consolidatedAt: "2026-01-01T00:00:00+09:00",
+        sourceEntryCount: 3,
+        version: 1,
+      };
+      storage.writeConsolidated("dont", original);
+
+      // 不正な type で書き込みを試みる（CHECK制約で失敗）
+      // SQLite側で例外が発生するが、ON CONFLICT DO UPDATE は同じ type のみ対象なので
+      // 元の dont エントリは破壊されない
+      expect(() => {
+        storage.writeConsolidated("invalid" as "dont", {
+          principles: [],
+          consolidatedAt: "2026-01-99T00:00:00+09:00",
+          sourceEntryCount: 999,
+          version: 1,
+        });
+      }).toThrow();
+
+      // 元データが残っている
+      const result = storage.readConsolidated("dont");
+      expect(result).toEqual(original);
+    });
+
     it("isConsolidationStale returns true when no consolidated data", () => {
       storage.save({
         category: "dont",
@@ -243,6 +270,163 @@ describe("SQLiteStorage", () => {
       storage.setSessionTopic("project-b", "Topic B");
       expect(storage.getSessionTopic("project-a")).toBe("Topic A");
       expect(storage.getSessionTopic("project-b")).toBe("Topic B");
+    });
+  });
+
+  // =========================
+  // heart-extension B0c: knowledgeGap 永続化
+  // =========================
+  describe("knowledgeGap 永続化", () => {
+    it("save with knowledgeGap → getDetail で同一配列が返る", () => {
+      const saveResult = storage.save({
+        category: "dont",
+        title: "Gemini API失敗の原因",
+        content: "max_tokens超過でstalled",
+        tags: ["gemini"],
+        knowledgeGap: ["Gemini APIのfinishReason種類", "max_tokensの上限値"],
+      });
+
+      const detail = storage.getDetail({ ids: [saveResult.id] });
+      expect(detail.entries.length).toBe(1);
+      expect(detail.entries[0].knowledgeGap).toEqual([
+        "Gemini APIのfinishReason種類",
+        "max_tokensの上限値",
+      ]);
+    });
+
+    it("save without knowledgeGap → getDetail で undefined", () => {
+      const saveResult = storage.save({
+        category: "dont",
+        title: "通常のdont",
+        content: "no gap",
+        tags: [],
+      });
+
+      const detail = storage.getDetail({ ids: [saveResult.id] });
+      expect(detail.entries[0].knowledgeGap).toBeUndefined();
+    });
+
+    it("save with empty knowledgeGap → getDetail で空配列", () => {
+      const saveResult = storage.save({
+        category: "dont",
+        title: "空配列",
+        content: "empty gap",
+        tags: [],
+        knowledgeGap: [],
+      });
+
+      const detail = storage.getDetail({ ids: [saveResult.id] });
+      expect(detail.entries[0].knowledgeGap).toEqual([]);
+    });
+
+    it("config カテゴリでの save は knowledgeGap が NULL のまま", () => {
+      const saveResult = storage.save({
+        category: "config",
+        title: "設定",
+        content: "ポート3000",
+        tags: [],
+      });
+
+      const detail = storage.getDetail({ ids: [saveResult.id] });
+      expect(detail.entries[0].knowledgeGap).toBeUndefined();
+    });
+
+    it("readDontEntries が knowledgeGap を含む MemoryEntry を返す", () => {
+      storage.save({
+        category: "dont",
+        title: "knowledge付きdont",
+        content: "test",
+        tags: [],
+        project: "myproject",
+        knowledgeGap: ["仕様A", "仕様B"],
+      });
+
+      const entries = storage.readDontEntries("myproject");
+      expect(entries.length).toBeGreaterThan(0);
+      const found = entries.find(e => e.title === "knowledge付きdont");
+      expect(found).toBeDefined();
+      expect(found!.knowledgeGap).toEqual(["仕様A", "仕様B"]);
+    });
+
+    it("replaceId 経由の更新でも knowledgeGap が反映される", () => {
+      const saved = storage.save({
+        category: "dont",
+        title: "初版",
+        content: "v1",
+        tags: [],
+        knowledgeGap: ["旧知識"],
+      });
+
+      storage.save({
+        category: "dont",
+        title: "更新版",
+        content: "v2",
+        tags: [],
+        knowledgeGap: ["新知識1", "新知識2"],
+        replaceId: saved.id,
+      });
+
+      const detail = storage.getDetail({ ids: [saved.id] });
+      expect(detail.entries[0].title).toBe("更新版");
+      expect(detail.entries[0].knowledgeGap).toEqual(["新知識1", "新知識2"]);
+    });
+  });
+
+  /**
+   * heart-extension F3/F4: dream / success カテゴリの save と search が通る
+   * （v2 マイグレーション後の CHECK 制約に阻まれない確認）
+   */
+  describe("dream / success カテゴリ (heart-extension F3/F4)", () => {
+    it("category='dream' で save → search で取得できる", () => {
+      const saved = storage.save({
+        category: "dream",
+        title: "霧の中の声",
+        content: "霧の道で誰かが小さく頷いた",
+        tags: ["dream"],
+        project: "myproject",
+      });
+      expect(saved.success).toBe(true);
+
+      const search = storage.search({ query: "", category: "dream", limit: 5 });
+      expect(search.results.length).toBe(1);
+      expect(search.results[0].title).toBe("霧の中の声");
+    });
+
+    it("category='success' で save → search で取得できる", () => {
+      const saved = storage.save({
+        category: "success",
+        title: "媚び化リスク指摘で同意",
+        content: "S1: 反対意見後の称賛シグナル",
+        tags: ["success"],
+        project: "myproject",
+      });
+      expect(saved.success).toBe(true);
+
+      const search = storage.search({ query: "", category: "success", limit: 5 });
+      expect(search.results.length).toBe(1);
+      expect(search.results[0].title).toBe("媚び化リスク指摘で同意");
+    });
+
+    it("category='all' 検索で dream / success も含まれる", () => {
+      storage.save({
+        category: "dream",
+        title: "夢A",
+        content: "...",
+        tags: [],
+        project: "myproject",
+      });
+      storage.save({
+        category: "success",
+        title: "成功A",
+        content: "...",
+        tags: [],
+        project: "myproject",
+      });
+
+      const search = storage.search({ query: "", category: "all", limit: 10 });
+      const titles = search.results.map((r) => r.title);
+      expect(titles).toContain("夢A");
+      expect(titles).toContain("成功A");
     });
   });
 });

@@ -37,7 +37,7 @@ export const config = {
   memoryDir: process.env.MEMORY_DIR || ".wasurenagusa",
 
   // 検索デフォルト
-  defaultSearchLimit: 20,
+  defaultSearchLimit: 5,
 
   // ログローテーション（デフォルト30日保持）
   logRetentionDays: parseInt(process.env.LOG_RETENTION_DAYS || "30", 10),
@@ -53,12 +53,16 @@ export const config = {
   consolidatedConfigFile: "consolidated-config.json",
 
   // カテゴリとファイルのマッピング
+  // 注: dream / success は SQLiteStorage 専用カテゴリだが、型整合のため
+  // ファイル名を宣言しておく（MarkdownStorage 側からは呼ばれない想定）。
   categoryFiles: {
     config: "config.md",
     dont: "dont.md",
     decision: "decisions.md",
     log: "logs",  // logsはディレクトリ
-    snippet: "snippets.md"
+    snippet: "snippets.md",
+    dream: "dreams.md",
+    success: "successes.md",
   } as const,
 
   // ベクトル記憶層設定

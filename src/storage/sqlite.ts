@@ -22,7 +22,7 @@ import {
 } from "../types.js";
 import { config } from "../config.js";
 import { initializeSchema, initializeVectors, getSchemaVersion, CURRENT_SCHEMA_VERSION } from "./schema.js";
-import { migrateV1ToV2 } from "./migration.js";
+import { migrateV1ToV2, migrateV1ToV2_categoryAndKnowledgeGap } from "./migration.js";
 import { existsSync } from "fs";
 import { join } from "path";
 import { formatEntry } from "./formatter.js";
@@ -41,6 +41,17 @@ export class SQLiteStorage {
   }
 
   initialize(memoryPath?: string): void {
+    // 既存DB（v1スキーマ）の場合、initializeSchema は CREATE TABLE IF NOT EXISTS のため
+    // CHECK制約が古いまま残る。schema_version を見て v1→v2 マイグレーションを先に走らせる。
+    const preExistingVersion = getSchemaVersion(this.db);
+    const memoriesTableExists = this.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='memories'")
+      .get() !== undefined;
+
+    if (memoriesTableExists && preExistingVersion < 2) {
+      migrateV1ToV2_categoryAndKnowledgeGap(this.db);
+    }
+
     initializeSchema(this.db);
 
     // 自動マイグレーション: DB新規作成 AND v1ファイル存在 → マイグレーション実行
@@ -80,6 +91,8 @@ export class SQLiteStorage {
     const id = this.generateId();
     const timestamp = this.generateTimestamp();
     const tags = JSON.stringify(params.tags ?? []);
+    // knowledgeGap は undefined なら NULL、配列（空含む）なら JSON 文字列で保存
+    const knowledgeGap = params.knowledgeGap !== undefined ? JSON.stringify(params.knowledgeGap) : null;
 
     if (params.replaceId) {
       const existing = this.db.prepare("SELECT id FROM memories WHERE id = ?").get(params.replaceId) as { id: string } | undefined;
@@ -87,12 +100,13 @@ export class SQLiteStorage {
         const updateStmt = this.db.prepare(`
           UPDATE memories SET
             timestamp = ?, category = ?, title = ?, content = ?, tags = ?,
-            project = ?, scope = ?, intensity = ?, updated_at = datetime('now')
+            project = ?, scope = ?, intensity = ?, knowledge_gap = ?, updated_at = datetime('now')
           WHERE id = ?
         `);
         updateStmt.run(
           timestamp, params.category, params.title, params.content, tags,
           params.project ?? null, params.scope ?? null, params.intensity ?? null,
+          knowledgeGap,
           params.replaceId
         );
         return {
@@ -105,12 +119,13 @@ export class SQLiteStorage {
     }
 
     const insertStmt = this.db.prepare(`
-      INSERT INTO memories (id, timestamp, category, title, content, tags, project, scope, intensity)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO memories (id, timestamp, category, title, content, tags, project, scope, intensity, knowledge_gap)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     insertStmt.run(
       id, timestamp, params.category, params.title, params.content, tags,
-      params.project ?? null, params.scope ?? null, params.intensity ?? null
+      params.project ?? null, params.scope ?? null, params.intensity ?? null,
+      knowledgeGap
     );
 
     return {
@@ -654,6 +669,13 @@ export class SQLiteStorage {
     if (row.project) { entry.project = row.project; }
     if (row.scope) { entry.scope = row.scope; }
     if (row.intensity !== null && row.intensity !== undefined) { entry.intensity = row.intensity; }
+    if (row.knowledge_gap !== null && row.knowledge_gap !== undefined) {
+      try {
+        entry.knowledgeGap = JSON.parse(row.knowledge_gap);
+      } catch {
+        // パース失敗時は省略（fail-open: 既存エントリの保護）
+      }
+    }
     return entry;
   }
 
@@ -710,6 +732,7 @@ interface MemoryRow {
   project: string | null;
   scope: string | null;
   intensity: number | null;
+  knowledge_gap: string | null;
   created_at: string;
   updated_at: string;
 }

@@ -3,8 +3,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import Database from "better-sqlite3";
-import { initializeSchema } from "./schema.js";
-import { migrateV1ToV2 } from "./migration.js";
+import { initializeSchema, getSchemaVersion } from "./schema.js";
+import { migrateV1ToV2, migrateV1ToV2_categoryAndKnowledgeGap } from "./migration.js";
 
 function createV1Files(memoryPath: string): void {
   // config.md
@@ -362,5 +362,221 @@ describe("migrateV1ToV2", () => {
 
     // パーサーが2件返すが、INSERT OR IGNOREで重複は無視
     expect(result.entriesCount).toBe(1);
+  });
+});
+
+// ============================================================
+// マイグレーション v1→v2: CHECK制約拡張 + knowledge_gap カラム追加
+// （heart-extension spec M1）
+// ============================================================
+describe("migrateV1ToV2_categoryAndKnowledgeGap", () => {
+  let tmpDir: string;
+  let db: Database.Database;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "wasurenagusa-migration-v2-test-"));
+    db = new Database(join(tmpDir, "test.db"));
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function createV1Schema(): void {
+    // 旧スキーマ（v1相当: CHECK制約 5値、knowledge_gap カラムなし）を直接作成
+    db.exec(`
+      CREATE TABLE memories (
+          id TEXT PRIMARY KEY,
+          timestamp TEXT NOT NULL,
+          category TEXT NOT NULL CHECK(category IN ('config','dont','decision','log','snippet')),
+          title TEXT NOT NULL,
+          content TEXT NOT NULL,
+          tags TEXT NOT NULL DEFAULT '[]',
+          project TEXT,
+          scope TEXT,
+          intensity INTEGER,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX idx_memories_category ON memories(category);
+      CREATE INDEX idx_memories_project ON memories(project);
+      CREATE INDEX idx_memories_timestamp ON memories(timestamp DESC);
+      CREATE VIRTUAL TABLE memories_fts USING fts5(
+          title, content, tags,
+          content=memories,
+          content_rowid=rowid,
+          tokenize='trigram'
+      );
+      CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
+          INSERT INTO memories_fts(rowid, title, content, tags)
+          VALUES (new.rowid, new.title, new.content, new.tags);
+      END;
+      CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
+          INSERT INTO memories_fts(memories_fts, rowid, title, content, tags)
+          VALUES ('delete', old.rowid, old.title, old.content, old.tags);
+      END;
+      CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN
+          INSERT INTO memories_fts(memories_fts, rowid, title, content, tags)
+          VALUES ('delete', old.rowid, old.title, old.content, old.tags);
+          INSERT INTO memories_fts(rowid, title, content, tags)
+          VALUES (new.rowid, new.title, new.content, new.tags);
+      END;
+      CREATE TABLE schema_version (
+          version INTEGER PRIMARY KEY,
+          applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO schema_version (version) VALUES (1);
+    `);
+  }
+
+  it("v1スキーマ（5値CHECK制約・knowledge_gap無し）を v2 へ移行する", () => {
+    createV1Schema();
+
+    // v1既存データを投入
+    db.prepare(
+      "INSERT INTO memories (id, timestamp, category, title, content, tags, intensity) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ).run("v1-001", "2026-01-01T00:00:00+09:00", "dont", "本番DB禁止", "本番に直接接続するな", JSON.stringify(["db"]), 5);
+
+    migrateV1ToV2_categoryAndKnowledgeGap(db);
+
+    // 既存データが保持されている
+    const row = db.prepare("SELECT * FROM memories WHERE id = ?").get("v1-001") as {
+      id: string; category: string; title: string; intensity: number; knowledge_gap: string | null;
+    };
+    expect(row.id).toBe("v1-001");
+    expect(row.category).toBe("dont");
+    expect(row.intensity).toBe(5);
+    expect(row.knowledge_gap).toBeNull();
+  });
+
+  it("CHECK制約に dream / success が含まれる（v2拡張）", () => {
+    createV1Schema();
+    migrateV1ToV2_categoryAndKnowledgeGap(db);
+
+    // dream カテゴリで挿入できる
+    expect(() => {
+      db.prepare(
+        "INSERT INTO memories (id, timestamp, category, title, content) VALUES (?, ?, ?, ?, ?)"
+      ).run("dream-001", "2026-05-02T03:00:00+09:00", "dream", "夢タイトル", "夢の本文");
+    }).not.toThrow();
+
+    // success カテゴリで挿入できる
+    expect(() => {
+      db.prepare(
+        "INSERT INTO memories (id, timestamp, category, title, content) VALUES (?, ?, ?, ?, ?)"
+      ).run("success-001", "2026-05-02T10:00:00+09:00", "success", "成功タイトル", "成功本文");
+    }).not.toThrow();
+
+    // 不正カテゴリは弾かれる
+    expect(() => {
+      db.prepare(
+        "INSERT INTO memories (id, timestamp, category, title, content) VALUES (?, ?, ?, ?, ?)"
+      ).run("bad-001", "2026-05-02T10:00:00+09:00", "invalid", "x", "x");
+    }).toThrow();
+  });
+
+  it("knowledge_gap カラムが追加され、JSON配列文字列を保存できる", () => {
+    createV1Schema();
+    migrateV1ToV2_categoryAndKnowledgeGap(db);
+
+    const gapJson = JSON.stringify(["Gemini APIのfinishReason種類", "max_tokensの上限"]);
+    db.prepare(
+      "INSERT INTO memories (id, timestamp, category, title, content, knowledge_gap) VALUES (?, ?, ?, ?, ?, ?)"
+    ).run("kg-001", "2026-05-02T11:00:00+09:00", "dont", "知識穴あり", "失敗内容", gapJson);
+
+    const row = db.prepare("SELECT knowledge_gap FROM memories WHERE id = ?").get("kg-001") as { knowledge_gap: string };
+    expect(JSON.parse(row.knowledge_gap)).toEqual(["Gemini APIのfinishReason種類", "max_tokensの上限"]);
+  });
+
+  it("FTS5 トリガーが再作成され v2 でも全文検索が動く", () => {
+    createV1Schema();
+    db.prepare(
+      "INSERT INTO memories (id, timestamp, category, title, content, tags) VALUES (?, ?, ?, ?, ?, ?)"
+    ).run("v1-002", "2026-01-02T00:00:00+09:00", "config", "ポート設定", "フロントは3000、バックは5001", "[]");
+
+    migrateV1ToV2_categoryAndKnowledgeGap(db);
+
+    // 移行後に新規挿入したエントリも FTS5 でヒットする（trigram は3文字以上必要）
+    db.prepare(
+      "INSERT INTO memories (id, timestamp, category, title, content, tags) VALUES (?, ?, ?, ?, ?, ?)"
+    ).run("v2-001", "2026-05-02T00:00:00+09:00", "dream", "夢のタイトル", "今夜は流れ星を見た夢", "[]");
+
+    const ftsRows = db.prepare(`
+      SELECT m.id FROM memories m
+      INNER JOIN memories_fts fts ON m.rowid = fts.rowid
+      WHERE memories_fts MATCH '"流れ星"'
+    `).all() as { id: string }[];
+
+    expect(ftsRows.some(r => r.id === "v2-001")).toBe(true);
+
+    // 移行前から存在していたエントリも FTS5 でヒットする
+    const ftsRowsOld = db.prepare(`
+      SELECT m.id FROM memories m
+      INNER JOIN memories_fts fts ON m.rowid = fts.rowid
+      WHERE memories_fts MATCH '"ポート"'
+    `).all() as { id: string }[];
+
+    expect(ftsRowsOld.some(r => r.id === "v1-002")).toBe(true);
+  });
+
+  it("schema_version が 2 に更新される", () => {
+    createV1Schema();
+    expect(getSchemaVersion(db)).toBe(1);
+
+    migrateV1ToV2_categoryAndKnowledgeGap(db);
+
+    expect(getSchemaVersion(db)).toBe(2);
+  });
+
+  it("再実行しても破壊しない（冪等）", () => {
+    createV1Schema();
+    db.prepare(
+      "INSERT INTO memories (id, timestamp, category, title, content) VALUES (?, ?, ?, ?, ?)"
+    ).run("idem-001", "2026-01-01T00:00:00+09:00", "dont", "title", "content");
+
+    migrateV1ToV2_categoryAndKnowledgeGap(db);
+    // 2回目: schema_version が既に 2 なのでスキップされる
+    migrateV1ToV2_categoryAndKnowledgeGap(db);
+
+    const row = db.prepare("SELECT id FROM memories WHERE id = ?").get("idem-001") as { id: string };
+    expect(row.id).toBe("idem-001");
+
+    const count = db.prepare("SELECT COUNT(*) as count FROM memories").get() as { count: number };
+    expect(count.count).toBe(1);
+  });
+
+  it("既に v2 のスキーマ（schema_version=2）には適用されない", () => {
+    // v2想定: schema.ts の最新DDLで初期化（CURRENT_SCHEMA_VERSION=2 想定）
+    initializeSchema(db);
+    // initializeSchema 後は CURRENT_SCHEMA_VERSION（v2想定）に更新されている
+
+    // 何かデータを入れる
+    db.prepare(
+      "INSERT INTO memories (id, timestamp, category, title, content, knowledge_gap) VALUES (?, ?, ?, ?, ?, ?)"
+    ).run("v2-pre-001", "2026-05-02T00:00:00+09:00", "dont", "title", "content", JSON.stringify(["x"]));
+
+    expect(() => migrateV1ToV2_categoryAndKnowledgeGap(db)).not.toThrow();
+
+    const row = db.prepare("SELECT knowledge_gap FROM memories WHERE id = ?").get("v2-pre-001") as { knowledge_gap: string };
+    expect(JSON.parse(row.knowledge_gap)).toEqual(["x"]);
+  });
+
+  it("マイグレーション失敗時はトランザクションでロールバックされる", () => {
+    createV1Schema();
+    db.prepare(
+      "INSERT INTO memories (id, timestamp, category, title, content) VALUES (?, ?, ?, ?, ?)"
+    ).run("rb-001", "2026-01-01T00:00:00+09:00", "dont", "title", "content");
+
+    // 故意に失敗させる：memories_new と同名のテーブルを先に作って衝突させる
+    db.exec("CREATE TABLE memories_new (broken TEXT)");
+
+    expect(() => migrateV1ToV2_categoryAndKnowledgeGap(db)).toThrow();
+
+    // 元 memories テーブルは健在
+    const row = db.prepare("SELECT id FROM memories WHERE id = ?").get("rb-001") as { id: string } | undefined;
+    expect(row?.id).toBe("rb-001");
+    // schema_version は v1 のまま
+    expect(getSchemaVersion(db)).toBe(1);
   });
 });

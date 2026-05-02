@@ -18,6 +18,10 @@ import {
   isConsolidationStale,
   isConfigConsolidationStale,
 } from "../consolidator/staleness.js";
+import {
+  persistConsolidatedDontToSqlite,
+  persistConsolidatedConfigToSqlite,
+} from "../consolidator/persistence-helper.js";
 import { config, getMemoryPath } from "../config.js";
 
 function log(message: string): void {
@@ -37,6 +41,8 @@ async function consolidateProject(projectPath: string): Promise<void> {
       const result = await consolidator.consolidate(dontEntries);
       if (result) {
         await writeConsolidatedDont(memoryPath, result);
+        // B0a 修復: SQLite consolidated('dont') にも同期書き込み（fail-open）
+        persistConsolidatedDontToSqlite(memoryPath, result, log);
       }
     }
   }
@@ -49,6 +55,7 @@ async function consolidateProject(projectPath: string): Promise<void> {
       const result = await consolidator.consolidate(configEntries);
       if (result) {
         await writeConsolidatedConfig(memoryPath, result);
+        persistConsolidatedConfigToSqlite(memoryPath, result, log);
       }
     }
   }

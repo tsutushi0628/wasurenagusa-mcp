@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { SQLiteStorage } from "./sqlite.js";
+import type { MemoryCategory } from "../types.js";
 
 function createMinimalV1Files(memoryPath: string): void {
   writeFileSync(
@@ -152,6 +153,73 @@ describe("TASK-023: マイグレーション自動判定", () => {
     storage.initialize(memoryPath);
     // 初期化後はマイグレーション済みなので false
     expect(storage.needsMigration(memoryPath)).toBe(false);
+
+    storage.close();
+  });
+
+  it("v1スキーマDB（schema_version=1）を SQLiteStorage.initialize で v2 に自動移行する", async () => {
+    // v1スキーマで DB を直接作成（CHECK制約 5値、knowledge_gap 無し、schema_version=1）
+    const Database = (await import("better-sqlite3")).default;
+    const rawDb = new Database(dbPath);
+    rawDb.exec(`
+      CREATE TABLE memories (
+          id TEXT PRIMARY KEY,
+          timestamp TEXT NOT NULL,
+          category TEXT NOT NULL CHECK(category IN ('config','dont','decision','log','snippet')),
+          title TEXT NOT NULL,
+          content TEXT NOT NULL,
+          tags TEXT NOT NULL DEFAULT '[]',
+          project TEXT,
+          scope TEXT,
+          intensity INTEGER,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE VIRTUAL TABLE memories_fts USING fts5(
+          title, content, tags,
+          content=memories,
+          content_rowid=rowid,
+          tokenize='trigram'
+      );
+      CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
+          INSERT INTO memories_fts(rowid, title, content, tags)
+          VALUES (new.rowid, new.title, new.content, new.tags);
+      END;
+      CREATE TABLE schema_version (
+          version INTEGER PRIMARY KEY,
+          applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO schema_version (version) VALUES (1);
+    `);
+    rawDb.prepare(
+      "INSERT INTO memories (id, timestamp, category, title, content) VALUES (?, ?, ?, ?, ?)"
+    ).run("v1-pre-001", "2026-01-01T00:00:00+09:00", "dont", "v1既存", "v1で保存された");
+    rawDb.close();
+
+    // SQLiteStorage.initialize を通して自動移行
+    const storage = new SQLiteStorage(dbPath);
+    storage.initialize();
+
+    // dream カテゴリで保存できる（CHECK制約が拡張済み）
+    const dreamSave = storage.save({
+      category: "dream" as MemoryCategory,
+      title: "今夜の夢",
+      content: "星空を歩いた",
+    });
+    expect(dreamSave.success).toBe(true);
+
+    // success カテゴリで保存できる
+    const successSave = storage.save({
+      category: "success" as MemoryCategory,
+      title: "効いた提案",
+      content: "根拠ある反対意見が承認された",
+    });
+    expect(successSave.success).toBe(true);
+
+    // v1 既存データが残っている
+    const detail = storage.getDetail({ ids: ["v1-pre-001"] });
+    expect(detail.entries.length).toBe(1);
+    expect(detail.entries[0].category).toBe("dont");
 
     storage.close();
   });
