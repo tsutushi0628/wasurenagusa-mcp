@@ -140,6 +140,8 @@ wasurenagusa-mcp/
     ├── config.md               # 設定情報（全プロジェクト集約、projectフィールドで識別）
     ├── dont.md                 # やってはいけないこと（全プロジェクト集約）
     ├── consolidated-dont.json  # dont統合キャッシュ（Geminiで原則化した結果）
+    ├── consolidated-config.json # config統合キャッシュ（Geminiでテーマ化した結果）
+    ├── models/                  # ローカルembeddingモデルキャッシュ
     ├── decisions.md            # 決定事項（全プロジェクト集約）
     ├── snippets.md             # よく使うコマンド・クエリ（全プロジェクト集約）
     ├── owner-profile.md        # オーナープロフィール（自律タスクの文脈に使用）
