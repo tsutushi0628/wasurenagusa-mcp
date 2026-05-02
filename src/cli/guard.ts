@@ -69,10 +69,15 @@ export async function writeBlockCounts(sessionId: string, counts: BlockCounts): 
 /**
  * タイムアウト付き正規表現テスト（ReDoS対策）。
  * vm.runInNewContextで隔離実行し、タイムアウト時はfalseを返す（fail-open）。
+ *
+ * 評価は **case-sensitive（既定）**。英字略号 `NG` のような短いパターンが、
+ * Editツール引数キー `old_string` / `new_string` の 'ng' に誤マッチしてツール実行を
+ * ブロックする問題を回避するため、フラグは付けない。
+ * 大文字小文字を両方対象にしたい場合はパターン側で `[Nn][Gg]` のように明示する。
  */
 export function safeRegexTest(pattern: string, input: string, timeoutMs: number = 100): boolean {
   try {
-    const script = new vm.Script(`new RegExp(pattern, "i").test(input)`);
+    const script = new vm.Script(`new RegExp(pattern).test(input)`);
     const context = vm.createContext({ pattern, input });
     return script.runInNewContext(context, { timeout: timeoutMs }) as boolean;
   } catch {
