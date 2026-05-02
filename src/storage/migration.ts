@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync } from "fs";
 import { join } from "path";
 import { MemoryCategory, MemoryEntry } from "../types.js";
 import { parseMarkdown } from "./parser.js";
+import { getSchemaVersion } from "./schema.js";
 
 interface MigrationResult {
   entriesCount: number;
@@ -117,6 +118,110 @@ function readAllV1Entries(memoryPath: string): MemoryEntry[] {
   }
 
   return entries;
+}
+
+/**
+ * memories テーブルの idx と FTS5 トリガーを再作成する。
+ * テーブル再構築（DROP → RENAME）後の整合性回復に使う。
+ */
+function recreateMemoriesIndexesAndTriggers(db: Database.Database): void {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
+    CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project);
+    CREATE INDEX IF NOT EXISTS idx_memories_timestamp ON memories(timestamp DESC);
+
+    DROP TRIGGER IF EXISTS memories_ai;
+    DROP TRIGGER IF EXISTS memories_ad;
+    DROP TRIGGER IF EXISTS memories_au;
+
+    CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
+        INSERT INTO memories_fts(rowid, title, content, tags)
+        VALUES (new.rowid, new.title, new.content, new.tags);
+    END;
+    CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, rowid, title, content, tags)
+        VALUES ('delete', old.rowid, old.title, old.content, old.tags);
+    END;
+    CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, rowid, title, content, tags)
+        VALUES ('delete', old.rowid, old.title, old.content, old.tags);
+        INSERT INTO memories_fts(rowid, title, content, tags)
+        VALUES (new.rowid, new.title, new.content, new.tags);
+    END;
+  `);
+}
+
+/**
+ * v1→v2 マイグレーション（heart-extension spec）
+ *
+ * 変更内容:
+ *   - memories.category の CHECK 制約を 5値→7値（dream, success 追加）に拡張
+ *   - memories に knowledge_gap TEXT カラムを追加（NULL 許容）
+ *   - 関連 idx と FTS5 トリガーを再作成
+ *
+ * 動作:
+ *   - schema_version >= 2 ならスキップ（冪等）
+ *   - SQLite はテーブル再作成方式（CREATE NEW → INSERT SELECT → DROP OLD → RENAME）
+ *   - 全操作を `db.transaction()` 内で実行し、失敗時は自動ロールバック
+ */
+export function migrateV1ToV2_categoryAndKnowledgeGap(db: Database.Database): void {
+  // 冪等チェック: 既に v2 以上なら何もしない
+  if (getSchemaVersion(db) >= 2) {
+    return;
+  }
+
+  const transaction = db.transaction(() => {
+    // 既存 FTS5 トリガーを先に落とす（INSERT SELECT 中の FTS 同期を避ける）
+    db.exec(`
+      DROP TRIGGER IF EXISTS memories_ai;
+      DROP TRIGGER IF EXISTS memories_ad;
+      DROP TRIGGER IF EXISTS memories_au;
+    `);
+
+    // 新スキーマで memories_new を作成
+    db.exec(`
+      CREATE TABLE memories_new (
+          id TEXT PRIMARY KEY,
+          timestamp TEXT NOT NULL,
+          category TEXT NOT NULL CHECK(category IN ('config','dont','decision','log','snippet','dream','success')),
+          title TEXT NOT NULL,
+          content TEXT NOT NULL,
+          tags TEXT NOT NULL DEFAULT '[]',
+          project TEXT,
+          scope TEXT,
+          intensity INTEGER,
+          knowledge_gap TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+
+    // 旧データをコピー（knowledge_gap は NULL で初期化）
+    db.exec(`
+      INSERT INTO memories_new (id, timestamp, category, title, content, tags, project, scope, intensity, knowledge_gap, created_at, updated_at)
+      SELECT id, timestamp, category, title, content, tags, project, scope, intensity, NULL, created_at, updated_at
+      FROM memories;
+    `);
+
+    // 旧テーブル削除 → リネーム
+    db.exec(`DROP TABLE memories;`);
+    db.exec(`ALTER TABLE memories_new RENAME TO memories;`);
+
+    // FTS5 索引と memories_fts の整合再構築
+    // memories_fts は外部 content テーブルとして memories を参照しているので
+    // rowid が変わった可能性に備えて rebuild する
+    db.exec(`INSERT INTO memories_fts(memories_fts) VALUES('rebuild');`);
+
+    // idx と FTS5 トリガーを再作成
+    recreateMemoriesIndexesAndTriggers(db);
+
+    // schema_version を 2 に更新
+    db.prepare(
+      "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, datetime('now'))"
+    ).run(2);
+  });
+
+  transaction();
 }
 
 /**

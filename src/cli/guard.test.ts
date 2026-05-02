@@ -114,12 +114,60 @@ describe("checkGuard", () => {
     expect(result.message).toContain("パターンBに違反");
   });
 
-  it("case insensitiveでマッチする", () => {
+  it("case-sensitiveでマッチし、大文字パターンが小文字入力にはマッチしない", () => {
     const principles = [makePrinciple({ guardPattern: "FORBIDDEN" })];
     const blockCounts: BlockCounts = {};
     const result = checkGuard("this message has forbidden word", principles, blockCounts);
 
+    expect(result.action).toBe("pass");
+  });
+
+  it("case-sensitiveで大文字パターンと大文字入力はマッチする", () => {
+    const principles = [makePrinciple({ guardPattern: "FORBIDDEN" })];
+    const blockCounts: BlockCounts = {};
+    const result = checkGuard("this message has FORBIDDEN word", principles, blockCounts);
+
     expect(result.action).toBe("block");
+  });
+
+  it("guardPattern 'NG' は Edit ツール引数キー 'old_string'/'new_string' の 'ng' に誤マッチしない（QA T5再現）", () => {
+    const principles = [
+      makePrinciple({ theme: "NG警告", guardPattern: "NG", guardMessage: "NGを使わないで" }),
+    ];
+    const blockCounts: BlockCounts = {};
+    const toolInputJson = JSON.stringify({
+      file_path: "a.ts",
+      old_string: "x",
+      new_string: "y",
+    });
+
+    const result = checkGuard(toolInputJson, principles, blockCounts);
+
+    expect(result.action).toBe("pass");
+  });
+
+  it("guardPattern 'NG' は大文字 'NG' を含む入力にはマッチする", () => {
+    const principles = [
+      makePrinciple({ theme: "NG警告", guardPattern: "NG", guardMessage: "NGを使わないで" }),
+    ];
+    const blockCounts: BlockCounts = {};
+    const result = checkGuard("NG warning detected", principles, blockCounts);
+
+    expect(result.action).toBe("block");
+    expect(result.message).toContain("NG");
+  });
+
+  it("character class [Nn][Gg] は大文字小文字どちらにもマッチする（明示的両対応パターン）", () => {
+    const principles = [
+      makePrinciple({ guardPattern: "[Nn][Gg]", guardMessage: "ng/NGを使わないで" }),
+    ];
+    const blockCountsLower: BlockCounts = {};
+    const resultLower = checkGuard("ng warning", [principles[0]], blockCountsLower);
+    expect(resultLower.action).toBe("block");
+
+    const blockCountsUpper: BlockCounts = {};
+    const resultUpper = checkGuard("NG warning", [principles[0]], blockCountsUpper);
+    expect(resultUpper.action).toBe("block");
   });
 
   it("空文字列メッセージの場合はpassを返す", () => {
@@ -217,8 +265,16 @@ describe("safeRegexTest", () => {
     expect(safeRegexTest("hello", "say goodbye")).toBe(false);
   });
 
-  it("case insensitiveでマッチする", () => {
-    expect(safeRegexTest("HELLO", "say hello world")).toBe(true);
+  it("case-sensitive: 大文字パターンは小文字入力にマッチしない", () => {
+    expect(safeRegexTest("HELLO", "say hello world")).toBe(false);
+  });
+
+  it("case-sensitive: 大文字パターンは大文字入力にマッチする", () => {
+    expect(safeRegexTest("HELLO", "say HELLO world")).toBe(true);
+  });
+
+  it("case-sensitive: 'NG' パターンは 'ng' (Editツール 'new_string' に含まれる) にはマッチしない", () => {
+    expect(safeRegexTest("NG", JSON.stringify({ new_string: "y" }))).toBe(false);
   });
 
   it("不正な正規表現の場合にfalseを返す（fail-open）", () => {

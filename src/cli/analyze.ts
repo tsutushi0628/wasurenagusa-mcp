@@ -16,10 +16,39 @@ import { Analyzer } from "../analyzer/index.js";
 import { SQLiteStorage } from "../storage/index.js";
 import { getMemoryPath, config } from "../config.js";
 import { findProjectRoot } from "../utils/projectRoot.js";
-import { SaveParams } from "../types.js";
+import { SaveParams, AnalysisResult } from "../types.js";
 import { computeConversationMeta } from "../analyzer/conversation-meta.js";
 import { readTranscript } from "./transcript-reader.js";
 import { ChangeLogger } from "../scheduler/change-logger.js";
+
+/**
+ * AnalysisResult から SaveParams を構築する純粋関数。
+ * heart-extension B0c: analysis.knowledgeGap を SaveParams.knowledgeGap に引き渡す。
+ *
+ * @param analysis Analyzer.analyze の出力（shouldSave/category/title/summary が確定済みの前提）
+ * @param projectName basename(projectRoot)
+ * @param replaceId 重複検出で見つかった既存エントリID（無ければ undefined）
+ */
+export function buildSaveParamsFromAnalysis(
+  analysis: AnalysisResult,
+  projectName: string,
+  replaceId?: string,
+): SaveParams {
+  if (!analysis.category || !analysis.title || !analysis.summary) {
+    throw new Error("buildSaveParamsFromAnalysis: analysis must have category/title/summary");
+  }
+  return {
+    category: analysis.category,
+    title: analysis.title,
+    content: analysis.summary,
+    tags: analysis.tags,
+    project: projectName,
+    scope: analysis.scope || undefined,
+    replaceId,
+    intensity: analysis.intensity,
+    knowledgeGap: analysis.knowledgeGap,
+  };
+}
 
 // __dirnameベースで.envを探す（CWDに依存しない）
 const __filename = fileURLToPath(import.meta.url);
@@ -114,16 +143,11 @@ async function main() {
       // 重複チェック失敗時は新規追加にフォールバック
     }
 
-    const saveParams: SaveParams = {
-      category: analysis.category,
-      title: analysis.title,
-      content: analysis.summary,
-      tags: analysis.tags,
-      project: basename(projectRoot),
-      scope: analysis.scope || undefined,
+    const saveParams: SaveParams = buildSaveParamsFromAnalysis(
+      analysis,
+      basename(projectRoot),
       replaceId,
-      intensity: analysis.intensity,
-    };
+    );
 
     storage.save(saveParams);
     storage.close();
@@ -200,6 +224,13 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-});
+// CLI エントリ判定: import 時に main を実行しない
+const isCliEntry =
+  process.argv[1] !== undefined &&
+  fileURLToPath(import.meta.url) === process.argv[1];
+
+if (isCliEntry) {
+  main().catch((err) => {
+    console.error(err);
+  });
+}

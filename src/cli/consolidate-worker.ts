@@ -10,6 +10,7 @@
  */
 
 import { basename } from "path";
+import { fileURLToPath } from "url";
 import { MarkdownStorage } from "../storage/index.js";
 import { config } from "../config.js";
 import { DontConsolidator } from "../consolidator/dont-consolidator.js";
@@ -21,6 +22,77 @@ import {
   isConsolidationStale,
   isConfigConsolidationStale,
 } from "../consolidator/staleness.js";
+import {
+  persistConsolidatedDontToSqlite,
+  persistConsolidatedConfigToSqlite,
+} from "../consolidator/persistence-helper.js";
+import type { GenerateTextFn } from "../llm/provider.js";
+import type { ConsolidatedDont } from "../types.js";
+
+interface DontConsolidationOptions {
+  memoryPath: string;
+  projectRoot: string;
+  generateTextFn?: GenerateTextFn;
+}
+
+/**
+ * 1プロジェクトの dont 統合を実行する。
+ * - MarkdownStorage から dont エントリ読込
+ * - DontConsolidator で統合
+ * - 結果を ① consolidated-dont.json ② SQLite consolidated('dont') の二重で書き込み
+ * - サマリ生成・consolidated-dont-summary.md を書き込み
+ *
+ * モック LLM テスト用に generateTextFn を注入できる。
+ */
+export async function runDontConsolidationForProject(
+  options: DontConsolidationOptions,
+): Promise<ConsolidatedDont | null> {
+  const { memoryPath, projectRoot, generateTextFn } = options;
+  const currentProject = basename(projectRoot);
+  const storage = new MarkdownStorage(projectRoot);
+
+  const dontEntries = await storage.readDontEntries(currentProject);
+  if (dontEntries.length === 0) return null;
+
+  const consolidator = new DontConsolidator(generateTextFn);
+  const result = await consolidator.consolidate(dontEntries);
+  if (!result) return null;
+
+  // ① ファイル書き込み（既存パス: PreToolUse / Stop guard が直読する）
+  await writeConsolidatedDont(memoryPath, result);
+
+  // ② SQLite 書き込み（B0a 修復: agent モードの SessionStart 注入が読む）
+  // ファイル書き込みが先に成功している前提で、SQLite 失敗は fail-open でログのみ。
+  persistConsolidatedDontToSqlite(memoryPath, result);
+
+  // サマリ生成・保存
+  const summary = await consolidator.generateSummary(result);
+  await writeDontSummary(memoryPath, summary);
+
+  return result;
+}
+
+/**
+ * 1プロジェクトの config 統合を実行する。
+ * dont と同様にファイル + SQLite の二重書き。
+ */
+export async function runConfigConsolidationForProject(
+  options: DontConsolidationOptions,
+): Promise<void> {
+  const { memoryPath, projectRoot, generateTextFn } = options;
+  const currentProject = basename(projectRoot);
+  const storage = new MarkdownStorage(projectRoot);
+
+  const configEntries = await storage.readConfigEntries(currentProject);
+  if (configEntries.length === 0) return;
+
+  const consolidator = new ConfigConsolidator(generateTextFn);
+  const result = await consolidator.consolidate(configEntries);
+  if (!result) return;
+
+  await writeConsolidatedConfig(memoryPath, result);
+  persistConsolidatedConfigToSqlite(memoryPath, result);
+}
 
 async function main() {
   const [memoryPath, projectRoot] = process.argv.slice(2);
@@ -33,38 +105,24 @@ async function main() {
     process.exit(0);
   }
 
-  const currentProject = basename(projectRoot);
-  const storage = new MarkdownStorage(projectRoot);
-
   // dont統合（全エントリ対象）
   if (await isConsolidationStale(memoryPath)) {
-    const dontEntries = await storage.readDontEntries(currentProject);
-    if (dontEntries.length > 0) {
-      const consolidator = new DontConsolidator();
-      const result = await consolidator.consolidate(dontEntries);
-      if (result) {
-        await writeConsolidatedDont(memoryPath, result);
-
-        // サマリ生成・保存
-        const summary = await consolidator.generateSummary(result);
-        await writeDontSummary(memoryPath, summary);
-      }
-    }
+    await runDontConsolidationForProject({ memoryPath, projectRoot });
   }
 
   // config統合
   if (await isConfigConsolidationStale(memoryPath)) {
-    const configEntries = await storage.readConfigEntries(currentProject);
-    if (configEntries.length > 0) {
-      const consolidator = new ConfigConsolidator();
-      const result = await consolidator.consolidate(configEntries);
-      if (result) {
-        await writeConsolidatedConfig(memoryPath, result);
-      }
-    }
+    await runConfigConsolidationForProject({ memoryPath, projectRoot });
   }
 }
 
-main().catch(() => {
-  process.exit(1);
-});
+// CLI エントリ判定: import 時に main を実行しない
+const isCliEntry =
+  process.argv[1] !== undefined &&
+  fileURLToPath(import.meta.url) === process.argv[1];
+
+if (isCliEntry) {
+  main().catch(() => {
+    process.exit(1);
+  });
+}

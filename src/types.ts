@@ -1,5 +1,7 @@
 // メモリのカテゴリ
-export type MemoryCategory = "config" | "dont" | "decision" | "log" | "snippet";
+// 注: heart-extension spec で dream / success を追加（CHECK制約は v2 マイグレーション）。
+// 後続 chunk（M5/M6）で実装される予定。本chunk1ではスキーマだけ広げる。
+export type MemoryCategory = "config" | "dont" | "decision" | "log" | "snippet" | "dream" | "success";
 
 // スコープ候補（推奨値。実際のscopeフィールドはstring型で自由入力も可）
 export type MemoryScope = "frontend" | "backend" | "infra" | "design" | "spec" | "ai" | "general";
@@ -22,6 +24,7 @@ export interface MemoryEntry {
   project?: string;      // プロジェクト名（cwdのディレクトリ名）
   scope?: string;        // スコープ（frontend/backend/infra/design/spec/ai/general等）
   intensity?: number;    // 怒られ度（1〜10）。1=提案〜5=激怒。6以上=手動ピン留め
+  knowledgeGap?: string[]; // dontカテゴリ時: この失敗を防ぐために覚えておくべき具体的知識
 }
 
 // メモリエントリ（軽量インデックス - 動的取得用）
@@ -46,6 +49,7 @@ export interface SaveParams {
   scope?: string;        // スコープ（Gemini自動判定 or 手動指定）
   replaceId?: string;    // 指定時: 既存エントリを置換（重複排除用）
   intensity?: number;    // 怒られ度（1〜10、手動指定 or LLM自動判定）
+  knowledgeGap?: string[]; // dontカテゴリ時: 失敗を防ぐために覚えておくべき具体的知識
 }
 
 // 保存結果

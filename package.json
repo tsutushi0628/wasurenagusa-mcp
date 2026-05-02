@@ -17,7 +17,9 @@
     "wasurenagusa-backfill": "./dist/cli/backfill-worker.js",
     "wasurenagusa-consolidate-all": "./dist/cli/consolidate-all.js",
     "wasurenagusa-scheduler": "./dist/cli/scheduler-setup.js",
-    "wasurenagusa-guard": "./dist/cli/guard.js"
+    "wasurenagusa-guard": "./dist/cli/guard.js",
+    "wasurenagusa-pretool-guard": "./dist/cli/pre-tool-use-guard.js",
+    "wasurenagusa-dream-worker": "./dist/cli/dream-worker.js"
   },
   "scripts": {
     "build": "tsc && chmod +x dist/cli/*.js dist/index.js",

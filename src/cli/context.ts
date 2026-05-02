@@ -22,6 +22,7 @@ import { basename, join } from "path";
 import { homedir } from "os";
 import { readFile } from "fs/promises";
 import { spawn } from "child_process";
+import { fileURLToPath } from "url";
 import { findProjectRoot } from "../utils/projectRoot.js";
 import { SQLiteStorage } from "../storage/index.js";
 import { getMemoryPath, config } from "../config.js";
@@ -109,11 +110,97 @@ function spawnBackfillBackground(memoryPath: string, projectRoot: string): void 
   child.unref();
 }
 
+/**
+ * heart-extension F3: 直近24時間以内の dream エントリ1件を
+ * "### 今朝の夢\n${content}" の文字列で返す。
+ * 0件 / 期間外 / 失敗時は空文字（セクション省略）。
+ */
+export async function getDreamContent(
+  storage: SQLiteStorage,
+  currentProject: string,
+): Promise<string> {
+  try {
+    const result = storage.search({
+      query: "",
+      category: "dream",
+      project: currentProject,
+      limit: 1,
+    });
+    if (result.results.length === 0) return "";
+
+    const detail = storage.getDetail({ ids: [result.results[0].id] });
+    const entry = detail.entries[0];
+    if (!entry) return "";
+
+    const ts = new Date(entry.timestamp).getTime();
+    if (Number.isNaN(ts)) return "";
+    const ageMs = Date.now() - ts;
+    const ageHours = ageMs / (1000 * 60 * 60);
+    if (ageHours >= 24) return "";
+
+    return `### 今朝の夢\n${entry.content}`;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * heart-extension F4: 直近30日以内の success エントリ上位3件を
+ * "### 効いた提案パターン\n- title: 1行要約" の形式で返す。
+ * 0件 / 期間外 / 失敗時は空文字（セクション省略）。
+ */
+export async function getSuccessContent(
+  storage: SQLiteStorage,
+  currentProject: string,
+): Promise<string> {
+  try {
+    const result = storage.search({
+      query: "",
+      category: "success",
+      project: currentProject,
+      limit: 30,
+    });
+    if (result.results.length === 0) return "";
+
+    const detail = storage.getDetail({ ids: result.results.map((r) => r.id) });
+    const cutoffMs = Date.now() - 30 * 24 * 60 * 60 * 1000;
+
+    const fresh = detail.entries.filter((e) => {
+      const ts = new Date(e.timestamp).getTime();
+      if (Number.isNaN(ts)) return false;
+      return ts >= cutoffMs;
+    });
+    if (fresh.length === 0) return "";
+
+    // 既に search が timestamp DESC で返してくる前提だが、念のため再ソート
+    fresh.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    const top3 = fresh.slice(0, 3);
+
+    const lines = top3.map((e) => {
+      const summary = e.content.replace(/\s+/g, " ").trim();
+      const oneLine = summary.length > 80 ? summary.substring(0, 80) + "…" : summary;
+      return `- **${e.title}**: ${oneLine}`;
+    });
+
+    return "### 効いた提案パターン\n" + lines.join("\n");
+  } catch {
+    return "";
+  }
+}
+
+interface DontContentExtras {
+  /** F4 success セクション本文（"### 効いた提案パターン..."）。空文字なら省略 */
+  successContent?: string;
+  /** F3 dream セクション本文（"### 今朝の夢..."）。空文字なら省略 */
+  dreamContent?: string;
+}
+
 async function getDontContent(
   storage: SQLiteStorage,
   currentProject: string,
   memoryPath: string,
   outputMode: OutputMode,
+  extras: DontContentExtras = {},
 ): Promise<string> {
   const layers: string[] = [];
 
@@ -168,6 +255,16 @@ async function getDontContent(
           return `- **${e.title}**${intensityLabel}\n  ${e.content}`;
         });
         layers.push("### 重要な行動原則 トップ3\n" + top3Lines.join("\n"));
+      }
+
+      // F4 success: 行動原則トップ3 と 直近の注意事項 の間に挿入
+      if (extras.successContent) {
+        layers.push(extras.successContent);
+      }
+
+      // F3 dream: success の後、直近の注意事項の前に挿入（D-10 セクション順）
+      if (extras.dreamContent) {
+        layers.push(extras.dreamContent);
       }
 
       const recentCandidates = dontEntries
@@ -339,11 +436,22 @@ async function main() {
     // config.json が存在しない or outputMode未設定 → デフォルトの injection で続行
   }
 
-  // 統合レイヤー経由で取得（統合版があればそれを、なければ生データを注入）
-  const [configContent, dontContent] = await Promise.all([
+  // F3/F4: dream / success 各セクションを並列取得（fail-open: 失敗時は空文字）
+  const [configContent, dreamContent, successContent] = await Promise.all([
     getConfigContent(storage, currentProject, memoryPath, outputMode),
-    getDontContent(storage, currentProject, memoryPath, outputMode),
+    getDreamContent(storage, currentProject),
+    getSuccessContent(storage, currentProject),
   ]);
+
+  // 統合レイヤー経由で取得（統合版があればそれを、なければ生データを注入）
+  // dont 内に success / dream を埋め込む（agent モード時は D-10 のセクション順で挟まれる）
+  const dontContent = await getDontContent(
+    storage,
+    currentProject,
+    memoryPath,
+    outputMode,
+    { dreamContent, successContent },
+  );
 
   // 出力を組み立て
   const output: string[] = [];
@@ -393,9 +501,19 @@ async function main() {
       output.push(configContent + "\n");
     }
 
+    // F3 dream: 設定情報と行動原則の間に挿入（design.md §4.4.2 injection モード）
+    if (dreamContent) {
+      output.push(dreamContent + "\n");
+    }
+
     if (dontContent && dontContent !== "（ルールなし）") {
       output.push("## 行動原則（dont由来）\n");
       output.push(dontContent);
+    }
+
+    // F4 success: 行動原則の下に挿入（design.md §4.5.2 injection モード）
+    if (successContent) {
+      output.push(successContent + "\n");
     }
 
     // オーナープロファイル注入
@@ -587,4 +705,11 @@ function extractTitleTokens(title: string): string[] {
   return tokens;
 }
 
-main().catch(console.error);
+// CLI エントリ判定: import 時に main を実行しない（isDirectRun パターン）
+const isCliEntry =
+  process.argv[1] !== undefined &&
+  fileURLToPath(import.meta.url) === process.argv[1];
+
+if (isCliEntry) {
+  main().catch(console.error);
+}

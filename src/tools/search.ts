@@ -29,7 +29,7 @@ export const memorySearchTool: Tool = {
       },
       limit: {
         type: "number",
-        description: "最大取得件数。デフォルトは20"
+        description: "最大取得件数。デフォルトは5"
       },
       project: {
         type: "string",
@@ -81,12 +81,12 @@ export async function handleMemorySearch(
   const params: SearchParams = {
     query: args.query as string,
     category: (args.category as MemoryCategory | "all") || "all",
-    limit: (args.limit as number) || 20,
+    limit: (args.limit as number) || 5,
     project: args.project as string | undefined,
     scope: args.scope as string | undefined,
   };
 
-  const limit = params.limit || 20;
+  const limit = params.limit || 5;
 
   // LocalEmbedding初期化
   const modelsDir = join(memoryPath, config.modelsDir);
