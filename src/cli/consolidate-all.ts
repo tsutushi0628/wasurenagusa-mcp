@@ -22,6 +22,7 @@ import {
   persistConsolidatedDontToSqlite,
   persistConsolidatedConfigToSqlite,
 } from "../consolidator/persistence-helper.js";
+import { runDreamGenerationForProject } from "./dream-worker.js";
 import { config, getMemoryPath } from "../config.js";
 
 function log(message: string): void {
@@ -58,6 +59,20 @@ async function consolidateProject(projectPath: string): Promise<void> {
         persistConsolidatedConfigToSqlite(memoryPath, result, log);
       }
     }
+  }
+
+  // F3: 夢生成（夜間バッチ後段。直近24h以内にdreamがあればスキップ、fail-open）
+  try {
+    const dreamResult = await runDreamGenerationForProject({
+      memoryPath,
+      projectRoot: projectPath,
+    });
+    if (dreamResult) {
+      log(`[consolidate-all] dream generated for ${currentProject}: ${dreamResult.title}`);
+    }
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`[consolidate-all] dream generation failed (${currentProject}): ${message}`);
   }
 }
 
