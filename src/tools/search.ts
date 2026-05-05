@@ -296,7 +296,34 @@ export async function handleMemorySearch(
   }
 
   storage.close();
-  const resultJson = JSON.stringify(result, null, 2);
+
+  // 軽量化: AI向けに必須フィールド（id/title/category/intensity）のみに絞る
+  // 詳細が必要なら memory_get_detail 経由で取得（既存の運用）
+  const slimEntry = (e: { id: string; title: string; category: string; intensity?: number; project?: string }) => {
+    const slim: { id: string; title: string; category: string; intensity?: number; project?: string } = {
+      id: e.id,
+      title: e.title,
+      category: e.category,
+    };
+    if (e.intensity !== undefined) { slim.intensity = e.intensity; }
+    // active プロジェクト横断時は project 名がタイトルにプレフィックス済みなので省略
+    if (e.project && params.project !== "active") { slim.project = e.project; }
+    return slim;
+  };
+  const slimResult: {
+    results: ReturnType<typeof slimEntry>[];
+    totalCount: number;
+    hint: string;
+    angerHistory?: ReturnType<typeof slimEntry>[];
+  } = {
+    results: result.results.map(slimEntry),
+    totalCount: result.totalCount,
+    hint: result.hint,
+  };
+  if (result.angerHistory && result.angerHistory.length > 0) {
+    slimResult.angerHistory = result.angerHistory.map(slimEntry);
+  }
+  const resultJson = JSON.stringify(slimResult, null, 2);
   const sessionId = generateSearchSessionId();
   const resultIds = result.results.map((r: MemoryIndexEntry) => r.id);
   void logOperation({ ts: generateJstTimestamp(), operation_type: "search", session_id: sessionId, query: params.query, category: params.category ?? "all", hit_count: result.results.length, project: basename(projectRoot), duration_ms: Date.now() - startTime }, memoryPath).catch(() => {});
