@@ -297,19 +297,9 @@ export async function handleMemorySearch(
 
   storage.close();
 
-  // 軽量化: AI向けに必須フィールド（id/title/category/intensity）のみに絞る
-  // 詳細が必要なら memory_get_detail 経由で取得（既存の運用）
-  const slimEntry = (e: { id: string; title: string; category: string; intensity?: number; project?: string }) => {
-    const slim: { id: string; title: string; category: string; intensity?: number; project?: string } = {
-      id: e.id,
-      title: e.title,
-      category: e.category,
-    };
-    if (e.intensity !== undefined) { slim.intensity = e.intensity; }
-    // active プロジェクト横断時は project 名がタイトルにプレフィックス済みなので省略
-    if (e.project && params.project !== "active") { slim.project = e.project; }
-    return slim;
-  };
+  // 軽量化: AI向けに id と title のみに絞る
+  // 詳細（category/intensity/tags/project等）は memory_get_detail で取得
+  const slimEntry = (e: { id: string; title: string }) => ({ id: e.id, title: e.title });
   const slimResult: {
     results: ReturnType<typeof slimEntry>[];
     totalCount: number;
