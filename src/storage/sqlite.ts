@@ -642,6 +642,56 @@ export class SQLiteStorage {
     return Buffer.from(new Float32Array(embedding).buffer);
   }
 
+  // 高強度dont（intensity>=minIntensity）の軽量インデックスを取得（再発防止リスト用）
+  listHighIntensityDonts(minIntensity: number, limit: number): Array<{
+    id: string;
+    timestamp: string;
+    category: MemoryCategory;
+    title: string;
+    tags: string[];
+    project?: string;
+    scope?: string;
+    intensity?: number;
+  }> {
+    const rows = this.db
+      .prepare(
+        "SELECT id, timestamp, category, title, tags, project, scope, intensity FROM memories WHERE category = 'dont' AND intensity IS NOT NULL AND intensity >= ? ORDER BY intensity DESC, timestamp DESC LIMIT ?"
+      )
+      .all(minIntensity, limit) as Array<{
+        id: string;
+        timestamp: string;
+        category: string;
+        title: string;
+        tags: string;
+        project: string | null;
+        scope: string | null;
+        intensity: number | null;
+      }>;
+
+    return rows.map((row) => {
+      const entry: {
+        id: string;
+        timestamp: string;
+        category: MemoryCategory;
+        title: string;
+        tags: string[];
+        project?: string;
+        scope?: string;
+        intensity?: number;
+      } = {
+        id: row.id,
+        timestamp: row.timestamp,
+        category: row.category as MemoryCategory,
+        title: row.title,
+        tags: JSON.parse(row.tags),
+      };
+      if (row.project) { entry.project = row.project; }
+      if (row.scope) { entry.scope = row.scope; }
+      if (row.intensity !== null && row.intensity !== undefined) { entry.intensity = row.intensity; }
+      return entry;
+    });
+  }
+
   private readEntriesByCategory(category: MemoryCategory, currentProject?: string): MemoryEntry[] {
     let query = "SELECT * FROM memories WHERE category = ?";
     const queryParams: string[] = [category];

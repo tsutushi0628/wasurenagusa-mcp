@@ -75,6 +75,7 @@ export interface SearchResult {
   results: MemoryIndexEntry[];   // タイトル+タグのみ
   totalCount: number;
   hint: string;                  // 「memory_get_detail で詳細を取得できます」のガイド
+  angerHistory?: MemoryIndexEntry[]; // 高強度dont（intensity≥4）一覧。クエリ無関係に毎回付与される再発防止リスト
 }
 
 // 詳細取得パラメータ

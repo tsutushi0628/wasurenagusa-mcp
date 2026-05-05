@@ -251,6 +251,50 @@ export async function handleMemorySearch(
     }
   }
 
+  // 再発防止リスト（高強度dont）を毎回付与
+  // クエリ無関係に直近で怒られた事項を surface する
+  try {
+    const angerEntries = storage.listHighIntensityDonts(4, 5);
+
+    // active プロジェクト指定時は他プロジェクトの高強度dontも合流
+    if (params.project === "active") {
+      const { ActiveProjectsTracker } = await import("../active-projects.js");
+      const schedulerDir = join(homedir(), ".wasurenagusa", "scheduler");
+      const activeTracker = new ActiveProjectsTracker(schedulerDir);
+      const activeProjects = await activeTracker.getActiveProjects();
+
+      for (const proj of activeProjects) {
+        try {
+          const projMemoryPath = getMemoryPath(proj.path);
+          const projDbPath = join(projMemoryPath, config.sqliteFile);
+          const projStorage = new SQLiteStorage(projDbPath);
+          projStorage.initialize(projMemoryPath);
+          const projAnger = projStorage.listHighIntensityDonts(4, 5).map(e => ({
+            ...e,
+            title: `[${proj.name}] ${e.title}`,
+          }));
+          for (const entry of projAnger) {
+            const exists = angerEntries.some(existing => existing.id === entry.id);
+            if (!exists) {
+              angerEntries.push(entry);
+            }
+          }
+          projStorage.close();
+        } catch {
+          continue;
+        }
+      }
+    }
+
+    // intensity降順でソート、上位5件のみ
+    angerEntries.sort((a, b) => (b.intensity ?? 0) - (a.intensity ?? 0));
+    if (angerEntries.length > 0) {
+      result.angerHistory = angerEntries.slice(0, 5);
+    }
+  } catch (error) {
+    console.error("[search] angerHistory取得失敗:", error);
+  }
+
   storage.close();
   const resultJson = JSON.stringify(result, null, 2);
   const sessionId = generateSearchSessionId();
