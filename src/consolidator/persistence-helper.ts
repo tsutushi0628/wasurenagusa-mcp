@@ -65,8 +65,8 @@ export function mergePrinciplesIntoMemories(
     sqliteStorage.initialize(memoryPath);
 
     for (const p of principles) {
-      // 1件以下のソースは「集約」として無意味なのでスキップ
-      if (!p.sourceIds || p.sourceIds.length < 2) continue;
+      // sourceIds が空のものだけスキップ（singleton も positiveRule への書き換え目的で処理する）
+      if (!p.sourceIds || p.sourceIds.length < 1) continue;
 
       try {
         // principle を新規 dont エントリとして保存
