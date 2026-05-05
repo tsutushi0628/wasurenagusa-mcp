@@ -54,6 +54,9 @@ export class SQLiteStorage {
 
     initializeSchema(this.db);
 
+    // 論理削除カラム migration（既存DBに対しても idempotent。consolidator が source エントリを論理削除する用途）
+    try { this.db.exec("ALTER TABLE memories ADD COLUMN deleted_at TEXT"); } catch { /* duplicate column → 既に追加済み */ }
+
     // 自動マイグレーション: DB新規作成 AND v1ファイル存在 → マイグレーション実行
     if (memoryPath && this.shouldAutoMigrate(memoryPath)) {
       migrateV1ToV2(this.db, memoryPath);
@@ -172,6 +175,25 @@ export class SQLiteStorage {
     return { deleted, notFound };
   }
 
+  // 論理削除: deleted_at にタイムスタンプを書き込む。memory_search の結果から外れるが、memory_get_detail では引ける（復元用に物理データは残す）。
+  softDelete(ids: string[]): { softDeleted: string[]; notFound: string[] } {
+    const softDeleted: string[] = [];
+    const notFound: string[] = [];
+    const ts = this.generateTimestamp();
+    const updateStmt = this.db.prepare("UPDATE memories SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL");
+    const checkStmt = this.db.prepare("SELECT id FROM memories WHERE id = ?");
+    for (const id of ids) {
+      const existing = checkStmt.get(id) as { id: string } | undefined;
+      if (existing) {
+        updateStmt.run(ts, id);
+        softDeleted.push(id);
+      } else {
+        notFound.push(id);
+      }
+    }
+    return { softDeleted, notFound };
+  }
+
   updateIntensity(id: string, intensity: number): { success: boolean; id: string; category: MemoryCategory } {
     const row = this.db.prepare("SELECT category FROM memories WHERE id = ?").get(id) as { category: MemoryCategory } | undefined;
     if (!row) {
@@ -196,15 +218,15 @@ export class SQLiteStorage {
       query = `
         SELECT m.* FROM memories m
         INNER JOIN memories_fts fts ON m.rowid = fts.rowid
-        WHERE memories_fts MATCH ?
+        WHERE memories_fts MATCH ? AND m.deleted_at IS NULL
       `;
       queryParams.push(this.escapeFtsQuery(params.query!));
     } else if (usesLike) {
       const likePattern = `%${trimmedQuery}%`;
-      query = `SELECT * FROM memories WHERE (title LIKE ? OR content LIKE ? OR tags LIKE ?)`;
+      query = `SELECT * FROM memories WHERE (title LIKE ? OR content LIKE ? OR tags LIKE ?) AND deleted_at IS NULL`;
       queryParams.push(likePattern, likePattern, likePattern);
     } else {
-      query = "SELECT * FROM memories WHERE 1=1";
+      query = "SELECT * FROM memories WHERE 1=1 AND deleted_at IS NULL";
     }
 
     const prefix = usesFts ? "m." : "";
@@ -235,12 +257,12 @@ export class SQLiteStorage {
       countQuery = `
         SELECT COUNT(*) as count FROM memories m
         INNER JOIN memories_fts fts ON m.rowid = fts.rowid
-        WHERE memories_fts MATCH ?
+        WHERE memories_fts MATCH ? AND m.deleted_at IS NULL
       `;
     } else if (usesLike) {
-      countQuery = "SELECT COUNT(*) as count FROM memories WHERE (title LIKE ? OR content LIKE ? OR tags LIKE ?)";
+      countQuery = "SELECT COUNT(*) as count FROM memories WHERE (title LIKE ? OR content LIKE ? OR tags LIKE ?) AND deleted_at IS NULL";
     } else {
-      countQuery = "SELECT COUNT(*) as count FROM memories WHERE 1=1";
+      countQuery = "SELECT COUNT(*) as count FROM memories WHERE 1=1 AND deleted_at IS NULL";
     }
     if (params.category && params.category !== "all") {
       countQuery += ` AND ${prefix}category = ?`;
@@ -291,7 +313,7 @@ export class SQLiteStorage {
         ftsQuery = `
           SELECT m.id FROM memories m
           INNER JOIN memories_fts fts ON m.rowid = fts.rowid
-          WHERE memories_fts MATCH ?
+          WHERE memories_fts MATCH ? AND m.deleted_at IS NULL
         `;
         ftsParams.push(this.escapeFtsQuery(params.query));
 
@@ -309,7 +331,7 @@ export class SQLiteStorage {
         }
       } else {
         const likePattern = `%${trimmedQ}%`;
-        ftsQuery = `SELECT id FROM memories WHERE (title LIKE ? OR content LIKE ? OR tags LIKE ?)`;
+        ftsQuery = `SELECT id FROM memories WHERE (title LIKE ? OR content LIKE ? OR tags LIKE ?) AND deleted_at IS NULL`;
         ftsParams.push(likePattern, likePattern, likePattern);
 
         if (params.category && params.category !== "all") {
@@ -348,7 +370,7 @@ export class SQLiteStorage {
     // 4. project/scopeフィルタ + エントリ取得
     const entries: MemoryIndexEntry[] = [];
     for (const id of allIds) {
-      const row = this.db.prepare("SELECT * FROM memories WHERE id = ?").get(id) as MemoryRow | undefined;
+      const row = this.db.prepare("SELECT * FROM memories WHERE id = ? AND deleted_at IS NULL").get(id) as MemoryRow | undefined;
       if (!row) continue;
 
       if (params.project && row.project !== null && row.project !== params.project) {
@@ -655,7 +677,7 @@ export class SQLiteStorage {
   }> {
     const rows = this.db
       .prepare(
-        "SELECT id, timestamp, category, title, tags, project, scope, intensity FROM memories WHERE category = 'dont' AND intensity IS NOT NULL AND intensity >= ? ORDER BY intensity DESC, timestamp DESC LIMIT ?"
+        "SELECT id, timestamp, category, title, tags, project, scope, intensity FROM memories WHERE category = 'dont' AND intensity IS NOT NULL AND intensity >= ? AND deleted_at IS NULL ORDER BY intensity DESC, timestamp DESC LIMIT ?"
       )
       .all(minIntensity, limit) as Array<{
         id: string;
@@ -693,7 +715,7 @@ export class SQLiteStorage {
   }
 
   private readEntriesByCategory(category: MemoryCategory, currentProject?: string): MemoryEntry[] {
-    let query = "SELECT * FROM memories WHERE category = ?";
+    let query = "SELECT * FROM memories WHERE category = ? AND deleted_at IS NULL";
     const queryParams: string[] = [category];
 
     if (currentProject) {

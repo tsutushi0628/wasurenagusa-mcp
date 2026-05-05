@@ -21,6 +21,7 @@ import {
 import {
   persistConsolidatedDontToSqlite,
   persistConsolidatedConfigToSqlite,
+  mergePrinciplesIntoMemories,
 } from "../consolidator/persistence-helper.js";
 import { runDreamGenerationForProject } from "./dream-worker.js";
 import { config, getMemoryPath } from "../config.js";
@@ -44,6 +45,11 @@ async function consolidateProject(projectPath: string): Promise<void> {
         await writeConsolidatedDont(memoryPath, result);
         // B0a 修復: SQLite consolidated('dont') にも同期書き込み（fail-open）
         persistConsolidatedDontToSqlite(memoryPath, result, log);
+        // 重複排除: principles を新規 dont として保存 + 元 source を論理削除
+        const mergeStats = mergePrinciplesIntoMemories(memoryPath, result.principles, currentProject, log);
+        if (mergeStats.merged > 0) {
+          log(`[consolidate-all] ${currentProject}: merged=${mergeStats.merged} softDeleted=${mergeStats.softDeleted}`);
+        }
       }
     }
   }

@@ -12,7 +12,7 @@ import {
   writeConsolidatedDontSqlite,
   writeConsolidatedConfigSqlite,
 } from "./staleness.js";
-import type { ConsolidatedDont, ConsolidatedConfig } from "../types.js";
+import type { ConsolidatedDont, ConsolidatedConfig, ConsolidatedPrinciple } from "../types.js";
 
 type Logger = (message: string) => void;
 
@@ -38,6 +38,63 @@ export function persistConsolidatedDontToSqlite(
     const message = err instanceof Error ? err.message : String(err);
     logger(`[consolidator-persistence] SQLite dont write failed: ${message}`);
   }
+}
+
+/**
+ * 統合された principles を新規 dont エントリとして memories へ保存し、
+ * 元の source エントリを論理削除する。
+ *
+ * 設計意図: consolidator が「日付切り詰め」系の似たエントリ N 件を 1 つの principle に集約しても、
+ * 元の N 件は memories に残り続けるため重複が消えない問題があった。
+ * principle を新規 dont として保存 + sourceIds を論理削除することで、
+ * memory_search 結果から重複が消え、必要なら memory_get_detail で復元可能な状態にする。
+ *
+ * fail-open: 個別 principle の保存・削除失敗は他の principle 処理を止めず stderr に1行記録する。
+ */
+export function mergePrinciplesIntoMemories(
+  memoryPath: string,
+  principles: ConsolidatedPrinciple[],
+  currentProject: string,
+  logger: Logger = defaultLogger,
+): { merged: number; softDeleted: number } {
+  let merged = 0;
+  let softDeleted = 0;
+  try {
+    const dbPath = join(memoryPath, config.sqliteFile);
+    const sqliteStorage = new SQLiteStorage(dbPath);
+    sqliteStorage.initialize(memoryPath);
+
+    for (const p of principles) {
+      // 1件以下のソースは「集約」として無意味なのでスキップ
+      if (!p.sourceIds || p.sourceIds.length < 2) continue;
+
+      try {
+        // principle を新規 dont エントリとして保存
+        sqliteStorage.save({
+          category: "dont",
+          title: p.theme || `[merged ${p.sourceCount} entries]`,
+          content: p.rule,
+          tags: p.tags ?? [],
+          project: currentProject,
+          intensity: p.maxIntensity,
+        });
+        merged += 1;
+
+        // 元の source エントリを論理削除
+        const result = sqliteStorage.softDelete(p.sourceIds);
+        softDeleted += result.softDeleted.length;
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger(`[consolidator-merge] principle '${p.theme}' merge failed: ${message}`);
+      }
+    }
+
+    sqliteStorage.close();
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger(`[consolidator-merge] DB open failed: ${message}`);
+  }
+  return { merged, softDeleted };
 }
 
 /**
