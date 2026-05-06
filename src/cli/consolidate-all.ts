@@ -10,6 +10,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { ActiveProjectsTracker } from "../active-projects.js";
 import { MarkdownStorage } from "../storage/index.js";
+import { SQLiteStorage } from "../storage/sqlite.js";
 import { DontConsolidator } from "../consolidator/dont-consolidator.js";
 import { ConfigConsolidator } from "../consolidator/config-consolidator.js";
 import {
@@ -35,9 +36,12 @@ async function consolidateProject(projectPath: string): Promise<void> {
   const memoryPath = getMemoryPath(projectPath);
   const storage = new MarkdownStorage(projectPath);
 
-  // dont統合
+  // dont統合（SQLite を真実源にして、論理削除されていない alive エントリを集約対象にする）
   if (await isConsolidationStale(memoryPath)) {
-    const dontEntries = await storage.readDontEntries(currentProject);
+    const sqliteForRead = new SQLiteStorage(join(memoryPath, config.sqliteFile));
+    sqliteForRead.initialize(memoryPath);
+    const dontEntries = sqliteForRead.readAliveDontEntries(currentProject);
+    sqliteForRead.close();
     if (dontEntries.length > 0) {
       const consolidator = new DontConsolidator();
       const result = await consolidator.consolidate(dontEntries);

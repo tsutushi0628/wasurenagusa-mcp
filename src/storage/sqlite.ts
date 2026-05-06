@@ -175,6 +175,19 @@ export class SQLiteStorage {
     return { deleted, notFound };
   }
 
+  // dont カテゴリの全 alive エントリ取得（consolidator 用、SQLite を真実源にする）
+  readAliveDontEntries(currentProject?: string): MemoryEntry[] {
+    let query = "SELECT * FROM memories WHERE category = 'dont' AND deleted_at IS NULL";
+    const params: string[] = [];
+    if (currentProject) {
+      query += " AND (project IS NULL OR project = ?)";
+      params.push(currentProject);
+    }
+    query += " ORDER BY intensity DESC, timestamp DESC";
+    const rows = this.db.prepare(query).all(...params) as MemoryRow[];
+    return rows.map(row => this.rowToEntry(row));
+  }
+
   // 論理削除: deleted_at にタイムスタンプを書き込む。memory_search の結果から外れるが、memory_get_detail では引ける（復元用に物理データは残す）。
   softDelete(ids: string[]): { softDeleted: string[]; notFound: string[] } {
     const softDeleted: string[] = [];
