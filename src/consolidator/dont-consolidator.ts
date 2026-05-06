@@ -26,6 +26,39 @@ export class DontConsolidator {
   async consolidate(entries: MemoryEntry[]): Promise<ConsolidatedDont | null> {
     if (entries.length === 0) return null;
 
+    // intensity 降順でソート（高強度ほど先に処理 → 同テーマの上位同士が同じ chunk に集まり、
+    // 「同じこと言ってたら統合」が機能する）
+    const sortedEntries = [...entries].sort((a, b) => (b.intensity ?? 2) - (a.intensity ?? 2));
+
+    // 入力が大きいと LLM が網羅できず source ID の取りこぼしが発生する。
+    // 1 chunk あたり最大 50 件で分割し、各 chunk を独立に集約して principles をマージする。
+    const CHUNK_SIZE = 50;
+    if (sortedEntries.length > CHUNK_SIZE) {
+      const chunks: MemoryEntry[][] = [];
+      for (let i = 0; i < sortedEntries.length; i += CHUNK_SIZE) {
+        chunks.push(sortedEntries.slice(i, i + CHUNK_SIZE));
+      }
+      const chunkResults = await Promise.all(chunks.map(c => this.consolidateChunk(c)));
+      const allPrinciples = chunkResults.flatMap(r => r?.principles ?? []);
+      if (allPrinciples.length === 0) return null;
+      const now = new Date();
+      const jstOffset = 9 * 60 * 60 * 1000;
+      const jst = new Date(now.getTime() + jstOffset);
+      const timestamp = jst.toISOString().replace("Z", "+09:00");
+      return {
+        principles: allPrinciples,
+        consolidatedAt: timestamp,
+        sourceEntryCount: entries.length,
+        version: 1,
+      };
+    }
+
+    return this.consolidateChunk(sortedEntries);
+  }
+
+  private async consolidateChunk(entries: MemoryEntry[]): Promise<ConsolidatedDont | null> {
+    if (entries.length === 0) return null;
+
     try {
       const template = await loadPrompt("consolidate.txt");
 
