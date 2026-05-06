@@ -175,6 +175,15 @@ export class SQLiteStorage {
     return { deleted, notFound };
   }
 
+  // 指定 ID の embedding を取得（クラスタリング用）
+  getEmbedding(id: string): number[] | null {
+    const row = this.db.prepare("SELECT embedding FROM vectors WHERE id = ?").get(id) as { embedding: Buffer } | undefined;
+    if (!row) return null;
+    const buf = row.embedding;
+    const f32 = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
+    return Array.from(f32);
+  }
+
   // dont カテゴリの全 alive エントリ取得（consolidator 用、SQLite を真実源にする）
   readAliveDontEntries(currentProject?: string): MemoryEntry[] {
     let query = "SELECT * FROM memories WHERE category = 'dont' AND deleted_at IS NULL";

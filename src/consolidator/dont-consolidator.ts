@@ -1,4 +1,4 @@
-import { ConsolidatedDont, MemoryEntry } from "../types.js";
+import { ConsolidatedDont, ConsolidatedPrinciple, MemoryEntry } from "../types.js";
 import { loadPrompt } from "../analyzer/prompt-loader.js";
 import { escapePromptVariable } from "../utils/prompt-escape.js";
 import { GenerateTextFn, createGenerateTextFn } from "../llm/provider.js";
@@ -20,6 +20,50 @@ export class DontConsolidator {
       this.generateText = generateText;
     } else {
       this.generateText = createGenerateTextFn();
+    }
+  }
+
+  // クラスタ（embedding 類似度で同一テーマと判定された entries）を 1 つの principle に統合する。
+  // 抽象化を禁止し、具体的事例を保持する重複排除に特化。
+  async mergeCluster(entries: MemoryEntry[]): Promise<ConsolidatedPrinciple | null> {
+    if (entries.length < 2) return null;
+    try {
+      const template = await loadPrompt("consolidate-cluster.txt");
+      const entriesList = entries
+        .map(e => `- id: ${e.id} | title: ${e.title} | intensity: ${e.intensity ?? 2} | content: ${e.content}`)
+        .join("\n");
+      const prompt = template.replace("{{clusterEntries}}", escapePromptVariable(entriesList));
+      const text = await this.generateText(prompt);
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return null;
+      const parsed = JSON.parse(jsonMatch[0]);
+      if (!parsed.principle) return null;
+
+      const principle = parsed.principle as ConsolidatedPrinciple;
+      // maxIntensity を入力から再計算（LLM 出力の信頼度が低いので念のため）
+      let maxIntensity = 2;
+      for (const e of entries) {
+        const i = e.intensity ?? 2;
+        if (i > maxIntensity) maxIntensity = i;
+      }
+      principle.maxIntensity = maxIntensity;
+      principle.score = (principle.sourceIds?.length ?? 0) * maxIntensity;
+      // guardPattern バリデーション
+      if (principle.guardPattern) {
+        try {
+          new RegExp(principle.guardPattern);
+          if (hasReDoSRisk(principle.guardPattern)) {
+            delete principle.guardPattern;
+            delete principle.guardMessage;
+          }
+        } catch {
+          delete principle.guardPattern;
+          delete principle.guardMessage;
+        }
+      }
+      return principle;
+    } catch {
+      return null;
     }
   }
 
