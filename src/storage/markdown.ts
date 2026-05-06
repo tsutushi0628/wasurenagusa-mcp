@@ -282,9 +282,33 @@ export class MarkdownStorage {
   async readDontEntries(currentProject?: string): Promise<MemoryEntry[]> {
     await this.initialize();
     const dontEntries = await this.readCategory("dont");
+
+    // dont-archive.md（過去にローテーションされたエントリ）も統合対象に含める。
+    // 高強度の古エントリがアーカイブに sleep していると consolidator が見落とすため。
+    const archivePath = join(this.memoryPath, "dont-archive.md");
+    let archiveEntries: MemoryEntry[] = [];
+    if (existsSync(archivePath)) {
+      try {
+        const archiveContent = await readFile(archivePath, "utf-8");
+        archiveEntries = parseMarkdown(archiveContent, "dont");
+      } catch {
+        archiveEntries = [];
+      }
+    }
+
+    // ID 重複排除（active と archive 両方に同じ ID があった場合は active を優先）
+    const seenIds = new Set<string>(dontEntries.map(e => e.id));
+    const merged = [...dontEntries];
+    for (const e of archiveEntries) {
+      if (!seenIds.has(e.id)) {
+        seenIds.add(e.id);
+        merged.push(e);
+      }
+    }
+
     return currentProject
-      ? dontEntries.filter(e => !e.project || e.project === currentProject)
-      : dontEntries;
+      ? merged.filter(e => !e.project || e.project === currentProject)
+      : merged;
   }
 
   async updateIntensity(id: string, intensity: number): Promise<{ success: boolean; id: string; category: MemoryCategory }> {
