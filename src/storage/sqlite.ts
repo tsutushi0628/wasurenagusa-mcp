@@ -22,7 +22,7 @@ import {
 } from "../types.js";
 import { config } from "../config.js";
 import { initializeSchema, initializeVectors, getSchemaVersion, CURRENT_SCHEMA_VERSION } from "./schema.js";
-import { migrateV1ToV2, migrateV1ToV2_categoryAndKnowledgeGap } from "./migration.js";
+import { migrateV1ToV2, migrateV1ToV2_categoryAndKnowledgeGap, migrateV2ToV3 } from "./migration.js";
 import { existsSync } from "fs";
 import { join } from "path";
 import { formatEntry } from "./formatter.js";
@@ -53,6 +53,11 @@ export class SQLiteStorage {
     }
 
     initializeSchema(this.db);
+
+    // v2→v3: positive_action カラム追加（カラム存在チェックで冪等）
+    if (memoriesTableExists) {
+      migrateV2ToV3(this.db);
+    }
 
     // 論理削除カラム migration（既存DBに対しても idempotent。consolidator が source エントリを論理削除する用途）
     try { this.db.exec("ALTER TABLE memories ADD COLUMN deleted_at TEXT"); } catch { /* duplicate column → 既に追加済み */ }
@@ -96,6 +101,7 @@ export class SQLiteStorage {
     const tags = JSON.stringify(params.tags ?? []);
     // knowledgeGap は undefined なら NULL、配列（空含む）なら JSON 文字列で保存
     const knowledgeGap = params.knowledgeGap !== undefined ? JSON.stringify(params.knowledgeGap) : null;
+    const positiveAction = params.positiveAction ?? null;
 
     if (params.replaceId) {
       const existing = this.db.prepare("SELECT id FROM memories WHERE id = ?").get(params.replaceId) as { id: string } | undefined;
@@ -103,13 +109,13 @@ export class SQLiteStorage {
         const updateStmt = this.db.prepare(`
           UPDATE memories SET
             timestamp = ?, category = ?, title = ?, content = ?, tags = ?,
-            project = ?, scope = ?, intensity = ?, knowledge_gap = ?, updated_at = datetime('now')
+            project = ?, scope = ?, intensity = ?, knowledge_gap = ?, positive_action = ?, updated_at = datetime('now')
           WHERE id = ?
         `);
         updateStmt.run(
           timestamp, params.category, params.title, params.content, tags,
           params.project ?? null, params.scope ?? null, params.intensity ?? null,
-          knowledgeGap,
+          knowledgeGap, positiveAction,
           params.replaceId
         );
         return {
@@ -122,13 +128,13 @@ export class SQLiteStorage {
     }
 
     const insertStmt = this.db.prepare(`
-      INSERT INTO memories (id, timestamp, category, title, content, tags, project, scope, intensity, knowledge_gap)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO memories (id, timestamp, category, title, content, tags, project, scope, intensity, knowledge_gap, positive_action)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     insertStmt.run(
       id, timestamp, params.category, params.title, params.content, tags,
       params.project ?? null, params.scope ?? null, params.intensity ?? null,
-      knowledgeGap
+      knowledgeGap, positiveAction
     );
 
     return {
@@ -696,10 +702,11 @@ export class SQLiteStorage {
     project?: string;
     scope?: string;
     intensity?: number;
+    positiveAction?: string;
   }> {
     const rows = this.db
       .prepare(
-        "SELECT id, timestamp, category, title, tags, project, scope, intensity FROM memories WHERE category = 'dont' AND intensity IS NOT NULL AND intensity >= ? AND deleted_at IS NULL ORDER BY intensity DESC, timestamp DESC LIMIT ?"
+        "SELECT id, timestamp, category, title, tags, project, scope, intensity, positive_action FROM memories WHERE category = 'dont' AND intensity IS NOT NULL AND intensity >= ? AND deleted_at IS NULL ORDER BY intensity DESC, timestamp DESC LIMIT ?"
       )
       .all(minIntensity, limit) as Array<{
         id: string;
@@ -710,6 +717,7 @@ export class SQLiteStorage {
         project: string | null;
         scope: string | null;
         intensity: number | null;
+        positive_action: string | null;
       }>;
 
     return rows.map((row) => {
@@ -722,6 +730,7 @@ export class SQLiteStorage {
         project?: string;
         scope?: string;
         intensity?: number;
+        positiveAction?: string;
       } = {
         id: row.id,
         timestamp: row.timestamp,
@@ -732,6 +741,7 @@ export class SQLiteStorage {
       if (row.project) { entry.project = row.project; }
       if (row.scope) { entry.scope = row.scope; }
       if (row.intensity !== null && row.intensity !== undefined) { entry.intensity = row.intensity; }
+      if (row.positive_action !== null && row.positive_action !== undefined) { entry.positiveAction = row.positive_action; }
       return entry;
     });
   }
@@ -769,6 +779,9 @@ export class SQLiteStorage {
       } catch {
         // パース失敗時は省略（fail-open: 既存エントリの保護）
       }
+    }
+    if (row.positive_action !== null && row.positive_action !== undefined) {
+      entry.positiveAction = row.positive_action;
     }
     return entry;
   }
@@ -827,6 +840,7 @@ interface MemoryRow {
   scope: string | null;
   intensity: number | null;
   knowledge_gap: string | null;
+  positive_action: string | null;
   created_at: string;
   updated_at: string;
 }

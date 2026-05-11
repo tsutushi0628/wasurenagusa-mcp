@@ -25,6 +25,7 @@ export interface MemoryEntry {
   scope?: string;        // スコープ（frontend/backend/infra/design/spec/ai/general等）
   intensity?: number;    // 怒られ度（1〜10）。1=提案〜5=激怒。6以上=手動ピン留め
   knowledgeGap?: string[]; // dontカテゴリ時: この失敗を防ぐために覚えておくべき具体的知識
+  positiveAction?: string; // dontカテゴリ時: 次に取るべき自律行動（肯定形）
 }
 
 // メモリエントリ（軽量インデックス - 動的取得用）
@@ -37,6 +38,7 @@ export interface MemoryIndexEntry {
   project?: string;      // プロジェクト名
   scope?: string;        // スコープ
   intensity?: number;    // 怒られ度（1〜10）
+  positiveAction?: string; // dontカテゴリ時: 次に取るべき自律行動（肯定形）
 }
 
 // 保存パラメータ
@@ -50,6 +52,7 @@ export interface SaveParams {
   replaceId?: string;    // 指定時: 既存エントリを置換（重複排除用）
   intensity?: number;    // 怒られ度（1〜10、手動指定 or LLM自動判定）
   knowledgeGap?: string[]; // dontカテゴリ時: 失敗を防ぐために覚えておくべき具体的知識
+  positiveAction?: string; // dontカテゴリ時: 次に取るべき自律行動（肯定形）
 }
 
 // 保存結果
@@ -59,6 +62,7 @@ export interface SaveResult {
   path: string;
   message: string;
   knowledgeGap?: string[];  // dontカテゴリ時: この失敗を防ぐために覚えておくべき具体的知識
+  positiveAction?: string;  // dontカテゴリ時: 次に取るべき自律行動（肯定形）
 }
 
 // 検索パラメータ
@@ -107,6 +111,7 @@ export interface AnalysisResult {
   replaceId?: string;    // 重複エントリのID（置換対象）
   intensity?: number;      // LLMが判定した怒られ度（1〜10）
   knowledgeGap?: string[]; // dontカテゴリ時: この失敗を防ぐために覚えておくべき具体的知識
+  positiveAction?: string; // dontカテゴリ時: 次に取るべき自律行動（肯定形）
   sessionTopic?: string;   // セッションのトピック要約（shouldSaveに関係なく毎回出力）
 }
 

@@ -47,6 +47,10 @@ titleには検索しやすい具体的な名詞を含めること。`,
       intensity: {
         type: "number",
         description: "怒られ度（オプション、1〜10の整数）。1=提案, 2=軽い注意, 3=明確な指摘, 4=強い不満, 5=激怒・諦め。6以上は手動ピン留め用（数値が大きいほどcontext注入で優先される）。指定時はLLM自動判定より優先される"
+      },
+      positiveAction: {
+        type: "string",
+        description: "category=dont 時に推奨。この記憶から導かれる「次に取るべき自律行動」を肯定形で1行（30〜80字）。否定形は使わない"
       }
     },
     required: ["category", "title", "content"]
@@ -99,6 +103,11 @@ export async function handleMemorySave(
     }
   }
 
+  const positiveAction = args.positiveAction as string | undefined;
+  if (args.category === "dont" && positiveAction !== undefined && positiveAction.trim() === "") {
+    return JSON.stringify({ success: false, error: "positiveAction は空文字にできません（category=dont では必須です）" }, null, 2);
+  }
+
   const params: SaveParams = {
     category: args.category as MemoryCategory,
     title: args.title as string,
@@ -107,6 +116,7 @@ export async function handleMemorySave(
     project: basename(projectRoot),
     scope: args.scope as string | undefined,
     intensity,
+    positiveAction,
   };
 
   // LocalEmbedding初期化
