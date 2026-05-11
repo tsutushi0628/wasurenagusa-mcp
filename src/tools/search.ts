@@ -297,21 +297,26 @@ export async function handleMemorySearch(
 
   storage.close();
 
-  // 軽量化: AI向けに id と title のみに絞る
+  // 軽量化: AI向けに id, title, positiveAction（angerHistory用）のみに絞る
   // 詳細（category/intensity/tags/project等）は memory_get_detail で取得
   const slimEntry = (e: { id: string; title: string }) => ({ id: e.id, title: e.title });
+  const slimAngerEntry = (e: { id: string; title: string; positiveAction?: string }) => ({
+    id: e.id,
+    title: e.title,
+    positiveAction: e.positiveAction ?? e.title,
+  });
   const slimResult: {
     results: ReturnType<typeof slimEntry>[];
     totalCount: number;
     hint: string;
-    angerHistory?: ReturnType<typeof slimEntry>[];
+    angerHistory?: ReturnType<typeof slimAngerEntry>[];
   } = {
     results: result.results.map(slimEntry),
     totalCount: result.totalCount,
     hint: result.hint,
   };
   if (result.angerHistory && result.angerHistory.length > 0) {
-    slimResult.angerHistory = result.angerHistory.map(slimEntry);
+    slimResult.angerHistory = result.angerHistory.map(slimAngerEntry);
   }
   const resultJson = JSON.stringify(slimResult, null, 2);
   const sessionId = generateSearchSessionId();

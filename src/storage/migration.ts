@@ -191,6 +191,7 @@ export function migrateV1ToV2_categoryAndKnowledgeGap(db: Database.Database): vo
           scope TEXT,
           intensity INTEGER,
           knowledge_gap TEXT,
+          positive_action TEXT,
           created_at TEXT NOT NULL DEFAULT (datetime('now')),
           updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
@@ -219,6 +220,36 @@ export function migrateV1ToV2_categoryAndKnowledgeGap(db: Database.Database): vo
     db.prepare(
       "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, datetime('now'))"
     ).run(2);
+  });
+
+  transaction();
+}
+
+/**
+ * v2→v3 マイグレーション
+ *
+ * 変更内容:
+ *   - memories に positive_action TEXT カラムを追加（NULL 許容）
+ *
+ * 動作:
+ *   - positive_action カラムが既に存在するならスキップ（冪等）
+ *   - SQLite の ALTER TABLE ADD COLUMN で安全に追加（既存データ保持）
+ */
+export function migrateV2ToV3(db: Database.Database): void {
+  const columnExists = (db.prepare(
+    "SELECT COUNT(*) as cnt FROM pragma_table_info('memories') WHERE name = 'positive_action'"
+  ).get() as { cnt: number }).cnt > 0;
+
+  if (columnExists) {
+    return;
+  }
+
+  const transaction = db.transaction(() => {
+    db.exec(`ALTER TABLE memories ADD COLUMN positive_action TEXT`);
+
+    db.prepare(
+      "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, datetime('now'))"
+    ).run(3);
   });
 
   transaction();
