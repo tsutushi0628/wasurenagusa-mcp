@@ -47,6 +47,9 @@ export function buildSaveParamsFromAnalysis(
     replaceId,
     intensity: analysis.intensity,
     knowledgeGap: analysis.knowledgeGap,
+    positiveAction: analysis.positiveAction,
+    scenario: analysis.scenario,
+    whyCore: analysis.whyCore,
   };
 }
 

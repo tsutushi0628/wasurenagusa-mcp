@@ -300,11 +300,16 @@ export async function handleMemorySearch(
   // 軽量化: AI向けに id, title, positiveAction（angerHistory用）のみに絞る
   // 詳細（category/intensity/tags/project等）は memory_get_detail で取得
   const slimEntry = (e: { id: string; title: string }) => ({ id: e.id, title: e.title });
-  const slimAngerEntry = (e: { id: string; title: string; positiveAction?: string }) => ({
-    id: e.id,
-    title: e.title,
-    positiveAction: e.positiveAction ?? e.title,
-  });
+  const slimAngerEntry = (e: { id: string; title: string; positiveAction?: string; scenario?: string; whyCore?: string }) => {
+    const result: { id: string; title: string; positiveAction: string; scenario?: string; whyCore?: string } = {
+      id: e.id,
+      title: e.title,
+      positiveAction: e.positiveAction ?? e.title,
+    };
+    if (e.scenario) { result.scenario = e.scenario; }
+    if (e.whyCore) { result.whyCore = e.whyCore; }
+    return result;
+  };
   const slimResult: {
     results: ReturnType<typeof slimEntry>[];
     totalCount: number;

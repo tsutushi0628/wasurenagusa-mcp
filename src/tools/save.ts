@@ -51,6 +51,14 @@ titleには検索しやすい具体的な名詞を含めること。`,
       positiveAction: {
         type: "string",
         description: "category=dont 時に推奨。この記憶から導かれる「次に取るべき自律行動」を肯定形で1行（30〜80字）。否定形は使わない"
+      },
+      scenario: {
+        type: "string",
+        description: "category=dont 時に推奨。何が起きたかの事象を1行（40〜80字）。いつ・どこで・何をしたかを具体的に記述"
+      },
+      whyCore: {
+        type: "string",
+        description: "category=dont 時に推奨。なぜその行動がダメなのかの核心を1行（30〜80字）。根本的な問題構造を記述"
       }
     },
     required: ["category", "title", "content"]
@@ -108,6 +116,9 @@ export async function handleMemorySave(
     return JSON.stringify({ success: false, error: "positiveAction は空文字にできません（category=dont では必須です）" }, null, 2);
   }
 
+  const scenario = args.scenario as string | undefined;
+  const whyCore = args.whyCore as string | undefined;
+
   const params: SaveParams = {
     category: args.category as MemoryCategory,
     title: args.title as string,
@@ -117,6 +128,8 @@ export async function handleMemorySave(
     scope: args.scope as string | undefined,
     intensity,
     positiveAction,
+    scenario,
+    whyCore,
   };
 
   // LocalEmbedding初期化
