@@ -256,6 +256,37 @@ export function migrateV2ToV3(db: Database.Database): void {
 }
 
 /**
+ * v3→v4 マイグレーション
+ *
+ * 変更内容:
+ *   - memories に scenario TEXT カラムを追加（NULL 許容）
+ *   - memories に why_core TEXT カラムを追加（NULL 許容）
+ *
+ * 動作:
+ *   - scenario カラムが既に存在するならスキップ（冪等）
+ */
+export function migrateV3ToV4(db: Database.Database): void {
+  const scenarioExists = (db.prepare(
+    "SELECT COUNT(*) as cnt FROM pragma_table_info('memories') WHERE name = 'scenario'"
+  ).get() as { cnt: number }).cnt > 0;
+
+  if (scenarioExists) {
+    return;
+  }
+
+  const transaction = db.transaction(() => {
+    db.exec(`ALTER TABLE memories ADD COLUMN scenario TEXT`);
+    db.exec(`ALTER TABLE memories ADD COLUMN why_core TEXT`);
+
+    db.prepare(
+      "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, datetime('now'))"
+    ).run(4);
+  });
+
+  transaction();
+}
+
+/**
  * vectors.jsonからメタデータ（accessCount等）のみをvector_metadataテーブルに移行。
  * v1のembeddingは768次元（Gemini）、v2は384次元（ローカル）で互換性がないためスキップ。
  */

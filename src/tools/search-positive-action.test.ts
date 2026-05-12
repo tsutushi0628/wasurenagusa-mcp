@@ -165,4 +165,60 @@ describe("angerHistory positiveAction フォールバック", () => {
     expect(result.angerHistory[0].positiveAction).toBe("肯定形アクションA");
     expect(result.angerHistory[1].positiveAction).toBe("タイトルB（フォールバック対象）");
   });
+
+  it("angerHistory エントリに scenario / whyCore があれば slimAngerEntry に含まれる", async () => {
+    mockStorageSearchHybrid.mockReturnValue({
+      results: [],
+      totalCount: 0,
+      hint: "",
+    });
+    mockStorageSearchVectors.mockReturnValue([]);
+    mockListHighIntensityDonts.mockReturnValue([
+      {
+        id: "mow30vwu-731c",
+        timestamp: "2026-01-01T00:00:00+09:00",
+        category: "dont",
+        title: "データは完全形保存／表示は表示層で制御",
+        tags: [],
+        intensity: 9,
+        positiveAction: "データ保存時は完全形を保持し、表示文字数制限はCSS truncationまたはdisplay:noneで表示層に委譲する",
+        scenario: "politician-checker パイプラインで公報原文先頭20字を切り捨てて格納",
+        whyCore: "データ層で切り詰めると後で完全形が必要な時に取り戻せない",
+      },
+    ]);
+
+    const resultJson = await handleMemorySearch({ query: "テスト" }, "/tmp/project");
+    const result = JSON.parse(resultJson);
+
+    expect(result.angerHistory).toHaveLength(1);
+    expect(result.angerHistory[0].scenario).toBe("politician-checker パイプラインで公報原文先頭20字を切り捨てて格納");
+    expect(result.angerHistory[0].whyCore).toBe("データ層で切り詰めると後で完全形が必要な時に取り戻せない");
+  });
+
+  it("angerHistory エントリに scenario / whyCore がなければそのフィールドは返らない", async () => {
+    mockStorageSearchHybrid.mockReturnValue({
+      results: [],
+      totalCount: 0,
+      hint: "",
+    });
+    mockStorageSearchVectors.mockReturnValue([]);
+    mockListHighIntensityDonts.mockReturnValue([
+      {
+        id: "old-dont-id",
+        timestamp: "2026-01-01T00:00:00+09:00",
+        category: "dont",
+        title: "旧タイトル",
+        tags: [],
+        intensity: 9,
+        positiveAction: "肯定形アクション",
+      },
+    ]);
+
+    const resultJson = await handleMemorySearch({ query: "テスト" }, "/tmp/project");
+    const result = JSON.parse(resultJson);
+
+    expect(result.angerHistory).toHaveLength(1);
+    expect(result.angerHistory[0].scenario).toBeUndefined();
+    expect(result.angerHistory[0].whyCore).toBeUndefined();
+  });
 });

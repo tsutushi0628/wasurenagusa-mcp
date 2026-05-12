@@ -26,6 +26,8 @@ export interface MemoryEntry {
   intensity?: number;    // 怒られ度（1〜10）。1=提案〜5=激怒。6以上=手動ピン留め
   knowledgeGap?: string[]; // dontカテゴリ時: この失敗を防ぐために覚えておくべき具体的知識
   positiveAction?: string; // dontカテゴリ時: 次に取るべき自律行動（肯定形）
+  scenario?: string;     // dontカテゴリ時: 何が起きたかの事象1行（40〜80字）
+  whyCore?: string;      // dontカテゴリ時: なぜダメかの核心1行（30〜80字）
 }
 
 // メモリエントリ（軽量インデックス - 動的取得用）
@@ -39,6 +41,8 @@ export interface MemoryIndexEntry {
   scope?: string;        // スコープ
   intensity?: number;    // 怒られ度（1〜10）
   positiveAction?: string; // dontカテゴリ時: 次に取るべき自律行動（肯定形）
+  scenario?: string;     // dontカテゴリ時: 何が起きたかの事象1行（40〜80字）
+  whyCore?: string;      // dontカテゴリ時: なぜダメかの核心1行（30〜80字）
 }
 
 // 保存パラメータ
@@ -53,6 +57,8 @@ export interface SaveParams {
   intensity?: number;    // 怒られ度（1〜10、手動指定 or LLM自動判定）
   knowledgeGap?: string[]; // dontカテゴリ時: 失敗を防ぐために覚えておくべき具体的知識
   positiveAction?: string; // dontカテゴリ時: 次に取るべき自律行動（肯定形）
+  scenario?: string;     // dontカテゴリ時: 何が起きたかの事象1行（40〜80字）
+  whyCore?: string;      // dontカテゴリ時: なぜダメかの核心1行（30〜80字）
 }
 
 // 保存結果
@@ -112,6 +118,8 @@ export interface AnalysisResult {
   intensity?: number;      // LLMが判定した怒られ度（1〜10）
   knowledgeGap?: string[]; // dontカテゴリ時: この失敗を防ぐために覚えておくべき具体的知識
   positiveAction?: string; // dontカテゴリ時: 次に取るべき自律行動（肯定形）
+  scenario?: string;       // dontカテゴリ時: 何が起きたかの事象1行（40〜80字）
+  whyCore?: string;        // dontカテゴリ時: なぜダメかの核心1行（30〜80字）
   sessionTopic?: string;   // セッションのトピック要約（shouldSaveに関係なく毎回出力）
 }
 
