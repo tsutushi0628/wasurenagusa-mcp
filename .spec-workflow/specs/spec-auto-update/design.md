@@ -211,11 +211,11 @@ graph TD
   {
     "timestamp": "2026-02-14T14:30:00+09:00",
     "project": "my-project",
-    "projectPath": "/Users/dev/projects/my-project",
+    "projectPath": "my-project",
     "changedFiles": ["src/api/handler.ts", "src/models/user.ts"],
     "specPaths": {
-      "steering": "/Users/dev/projects/my-project/.spec-workflow/steering",
-      "specs": ["/Users/dev/projects/my-project/.spec-workflow/specs/feature-a"]
+      "steering": "my-project/.spec-workflow/steering",
+      "specs": ["my-project/.spec-workflow/specs/feature-a"]
     }
   }
 ]
@@ -229,7 +229,7 @@ graph TD
     "type": "change-based",
     "priority": 1,
     "project": "my-project",
-    "projectPath": "/Users/dev/projects/my-project",
+    "projectPath": "my-project",
     "specPaths": { "steering": "...", "specs": ["..."] },
     "changedFiles": ["src/api/handler.ts"],
     "status": "pending",
@@ -244,7 +244,7 @@ graph TD
   "projects": [
     {
       "name": "my-project",
-      "path": "/Users/dev/projects/my-project",
+      "path": "my-project",
       "specPaths": {
         "steering": ".spec-workflow/steering",
         "specs": [".spec-workflow/specs/feature-a"]
