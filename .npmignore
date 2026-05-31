@@ -1,6 +1,6 @@
 # Source (dist/ is published, src/ is not)
+# prompts/ は publish 同梱対象（dream.txt 等を実行時に loadPrompt で読むため。package.json files 参照）
 src/
-prompts/
 
 # Dev & test
 *.test.ts

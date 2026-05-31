@@ -53,6 +53,7 @@
   },
   "files": [
     "dist/",
+    "prompts/",
     "README.md",
     "LICENSE"
   ],
