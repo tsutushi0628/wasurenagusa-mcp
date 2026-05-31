@@ -8,16 +8,16 @@
 import { basename } from "path";
 import { homedir } from "os";
 import { join } from "path";
+import { fileURLToPath } from "url";
 import { ActiveProjectsTracker } from "../active-projects.js";
-import { MarkdownStorage } from "../storage/index.js";
 import { SQLiteStorage } from "../storage/sqlite.js";
 import { DontConsolidator } from "../consolidator/dont-consolidator.js";
 import { ConfigConsolidator } from "../consolidator/config-consolidator.js";
 import {
   writeConsolidatedDont,
   writeConsolidatedConfig,
-  isConsolidationStale,
-  isConfigConsolidationStale,
+  isConsolidationStaleSqlite,
+  isConfigConsolidationStaleSqlite,
 } from "../consolidator/staleness.js";
 import {
   persistConsolidatedDontToSqlite,
@@ -26,20 +26,38 @@ import {
 } from "../consolidator/persistence-helper.js";
 import { runDreamGenerationForProject } from "./dream-worker.js";
 import { config, getMemoryPath } from "../config.js";
+import type { GenerateTextFn } from "../llm/provider.js";
 
 function log(message: string): void {
   process.stderr.write(message + "\n");
 }
 
-async function consolidateProject(projectPath: string): Promise<void> {
+/**
+ * 1プロジェクトのメモリを再統合する。
+ *
+ * 鮮度判定・エントリ読み出しは SQLite を真実源とする（v2 経路）。
+ * memory_save は SQLite のみに書き込み、SQLiteStorage.initialize() が起動時に
+ * 旧 Markdown(v1) を SQLite へ自動移行するため、Markdown 運用環境のデータも
+ * SQLite 側に存在する。よって SQLite を見れば後方互換を保てる。
+ * 旧ファイル版の鮮度判定は dont.md / config.md が物理的に無いと false を返すため、
+ * Markdown ファイルを持たない SQLite-only 環境（Windows 等）では統合が永久に
+ * スキップされてしまう。そのため CLI では使わない。
+ *
+ * テスト用に generateTextFn を注入できる（省略時は実 LLM）。
+ */
+export async function consolidateProject(
+  projectPath: string,
+  options: { generateTextFn?: GenerateTextFn } = {},
+): Promise<void> {
+  const { generateTextFn } = options;
   const currentProject = basename(projectPath);
   const memoryPath = getMemoryPath(projectPath);
-  const storage = new MarkdownStorage(projectPath);
+  const dbPath = join(memoryPath, config.sqliteFile);
 
   // dont統合（embedding ベースのクラスタリングで「同一テーマ重複」だけを統合する重複排除）
-  if (await isConsolidationStale(memoryPath)) {
-    const sqliteForRead = new SQLiteStorage(join(memoryPath, config.sqliteFile));
-    sqliteForRead.initialize(memoryPath);
+  const sqliteForRead = new SQLiteStorage(dbPath);
+  sqliteForRead.initialize(memoryPath);
+  if (isConsolidationStaleSqlite(sqliteForRead)) {
     const dontEntries = sqliteForRead.readAliveDontEntries(currentProject);
 
     // クラスタリング: 各 entry の embedding を取得し、greedy に類似 entry を集める
@@ -69,7 +87,7 @@ async function consolidateProject(projectPath: string): Promise<void> {
     // クラスタ size>=2 だけを LLM で重複排除統合（singleton はそのまま放置）
     const dupClusters = clusters.filter(c => c.length >= 2);
     if (dupClusters.length > 0) {
-      const consolidator = new DontConsolidator();
+      const consolidator = new DontConsolidator(generateTextFn);
       const principles = [];
       for (const cluster of dupClusters) {
         const merged = await consolidator.mergeCluster(cluster);
@@ -96,13 +114,17 @@ async function consolidateProject(projectPath: string): Promise<void> {
     } else {
       log(`[consolidate-all] ${currentProject}: clusters=${clusters.length} (no duplicates found)`);
     }
+  } else {
+    sqliteForRead.close();
   }
 
   // config統合
-  if (await isConfigConsolidationStale(memoryPath)) {
-    const configEntries = await storage.readConfigEntries(currentProject);
+  const sqliteForConfig = new SQLiteStorage(dbPath);
+  sqliteForConfig.initialize(memoryPath);
+  if (isConfigConsolidationStaleSqlite(sqliteForConfig)) {
+    const configEntries = sqliteForConfig.readConfigEntries(currentProject);
     if (configEntries.length > 0) {
-      const consolidator = new ConfigConsolidator();
+      const consolidator = new ConfigConsolidator(generateTextFn);
       const result = await consolidator.consolidate(configEntries);
       if (result) {
         await writeConsolidatedConfig(memoryPath, result);
@@ -110,12 +132,14 @@ async function consolidateProject(projectPath: string): Promise<void> {
       }
     }
   }
+  sqliteForConfig.close();
 
   // F3: 夢生成（夜間バッチ後段。直近24h以内にdreamがあればスキップ、fail-open）
   try {
     const dreamResult = await runDreamGenerationForProject({
       memoryPath,
       projectRoot: projectPath,
+      generateTextFn,
     });
     if (dreamResult) {
       log(`[consolidate-all] dream generated for ${currentProject}: ${dreamResult.title}`);
@@ -157,8 +181,15 @@ async function main(): Promise<void> {
   log("[consolidate-all] Done.");
 }
 
-main().catch((err: unknown) => {
-  const message = err instanceof Error ? err.message : String(err);
-  log(`[consolidate-all] Fatal: ${message}`);
-  process.exit(1);
-});
+// CLI エントリ判定: import 時に main を実行しない（テストから consolidateProject を import できるように）
+const isCliEntry =
+  process.argv[1] !== undefined &&
+  fileURLToPath(import.meta.url) === process.argv[1];
+
+if (isCliEntry) {
+  main().catch((err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`[consolidate-all] Fatal: ${message}`);
+    process.exit(1);
+  });
+}
