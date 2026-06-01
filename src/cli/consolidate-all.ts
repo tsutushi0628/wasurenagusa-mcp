@@ -8,7 +8,6 @@
 import { basename } from "path";
 import { homedir } from "os";
 import { join } from "path";
-import { fileURLToPath } from "url";
 import { ActiveProjectsTracker } from "../active-projects.js";
 import { SQLiteStorage } from "../storage/sqlite.js";
 import { DontConsolidator } from "../consolidator/dont-consolidator.js";
@@ -26,7 +25,16 @@ import {
 } from "../consolidator/persistence-helper.js";
 import { runDreamGenerationForProject } from "./dream-worker.js";
 import { config, getMemoryPath } from "../config.js";
+import { isMainModule } from "../utils/cli-entry.js";
 import type { GenerateTextFn } from "../llm/provider.js";
+import type { ConsolidatedDont } from "../types.js";
+
+function jstTimestamp(): string {
+  const now = new Date();
+  const jstOffset = 9 * 60 * 60 * 1000;
+  const jst = new Date(now.getTime() + jstOffset);
+  return jst.toISOString().replace("Z", "+09:00");
+}
 
 function log(message: string): void {
   process.stderr.write(message + "\n");
@@ -54,85 +62,86 @@ export async function consolidateProject(
   const memoryPath = getMemoryPath(projectPath);
   const dbPath = join(memoryPath, config.sqliteFile);
 
-  // dont統合（embedding ベースのクラスタリングで「同一テーマ重複」だけを統合する重複排除）
-  const sqliteForRead = new SQLiteStorage(dbPath);
-  sqliteForRead.initialize(memoryPath);
-  if (isConsolidationStaleSqlite(sqliteForRead)) {
-    const dontEntries = sqliteForRead.readAliveDontEntries(currentProject);
+  // 読み取り・鮮度判定は1接続を使い回す（try/finally で必ず閉じる）。
+  // 統合結果の書き込み（ファイル＋SQLite）は既存の fail-open ヘルパが個別に開閉する。
+  const storage = new SQLiteStorage(dbPath);
+  storage.initialize(memoryPath);
+  try {
+    // dont統合（embedding ベースのクラスタリングで「同一テーマ重複」だけを統合する重複排除）
+    if (isConsolidationStaleSqlite(storage)) {
+      const dontEntries = storage.readAliveDontEntries(currentProject);
 
-    // クラスタリング: 各 entry の embedding を取得し、greedy に類似 entry を集める
-    const SIM_DISTANCE_THRESHOLD = 0.6; // 距離 0.6（保守めの類似度。様子見しつつ調整する）
-    const clusters: typeof dontEntries[] = [];
-    const assigned = new Set<string>();
-    for (const entry of dontEntries) {
-      if (assigned.has(entry.id)) continue;
-      const eEmb = sqliteForRead.getEmbedding(entry.id);
-      const cluster = [entry];
-      assigned.add(entry.id);
-      if (eEmb) {
-        const similar = sqliteForRead.searchVectors(eEmb, SIM_DISTANCE_THRESHOLD, 30);
-        for (const r of similar) {
-          if (assigned.has(r.id) || r.id === entry.id) continue;
-          const candidate = dontEntries.find(e => e.id === r.id);
-          if (candidate) {
-            cluster.push(candidate);
-            assigned.add(r.id);
+      // クラスタリング: 各 entry の embedding を取得し、greedy に類似 entry を集める
+      const SIM_DISTANCE_THRESHOLD = 0.6; // 距離 0.6（保守めの類似度。様子見しつつ調整する）
+      const clusters: typeof dontEntries[] = [];
+      const assigned = new Set<string>();
+      for (const entry of dontEntries) {
+        if (assigned.has(entry.id)) continue;
+        const eEmb = storage.getEmbedding(entry.id);
+        const cluster = [entry];
+        assigned.add(entry.id);
+        if (eEmb) {
+          const similar = storage.searchVectors(eEmb, SIM_DISTANCE_THRESHOLD, 30);
+          for (const r of similar) {
+            if (assigned.has(r.id) || r.id === entry.id) continue;
+            const candidate = dontEntries.find(e => e.id === r.id);
+            if (candidate) {
+              cluster.push(candidate);
+              assigned.add(r.id);
+            }
           }
         }
+        clusters.push(cluster);
       }
-      clusters.push(cluster);
-    }
-    sqliteForRead.close();
 
-    // クラスタ size>=2 だけを LLM で重複排除統合（singleton はそのまま放置）
-    const dupClusters = clusters.filter(c => c.length >= 2);
-    if (dupClusters.length > 0) {
-      const consolidator = new DontConsolidator(generateTextFn);
+      // クラスタ size>=2 だけを LLM で重複排除統合（singleton はそのまま放置）
+      const dupClusters = clusters.filter(c => c.length >= 2);
       const principles = [];
-      for (const cluster of dupClusters) {
-        const merged = await consolidator.mergeCluster(cluster);
-        if (merged) principles.push(merged);
+      if (dupClusters.length > 0) {
+        const consolidator = new DontConsolidator(generateTextFn);
+        for (const cluster of dupClusters) {
+          const merged = await consolidator.mergeCluster(cluster);
+          if (merged) principles.push(merged);
+        }
       }
-      if (principles.length > 0) {
-        const now = new Date();
-        const jstOffset = 9 * 60 * 60 * 1000;
-        const jst = new Date(now.getTime() + jstOffset);
-        const timestamp = jst.toISOString().replace("Z", "+09:00");
-        const result = {
-          principles,
-          consolidatedAt: timestamp,
-          sourceEntryCount: dontEntries.length,
-          version: 1,
-        };
-        await writeConsolidatedDont(memoryPath, result);
-        persistConsolidatedDontToSqlite(memoryPath, result, log);
-        const mergeStats = mergePrinciplesIntoMemories(memoryPath, principles, currentProject, log);
-        log(`[consolidate-all] ${currentProject}: clusters=${clusters.length} dup=${dupClusters.length} merged=${mergeStats.merged} softDeleted=${mergeStats.softDeleted}`);
-      } else {
-        log(`[consolidate-all] ${currentProject}: clusters=${clusters.length} dup=${dupClusters.length} (LLM merge failed for all)`);
-      }
-    } else {
-      log(`[consolidate-all] ${currentProject}: clusters=${clusters.length} (no duplicates found)`);
-    }
-  } else {
-    sqliteForRead.close();
-  }
 
-  // config統合
-  const sqliteForConfig = new SQLiteStorage(dbPath);
-  sqliteForConfig.initialize(memoryPath);
-  if (isConfigConsolidationStaleSqlite(sqliteForConfig)) {
-    const configEntries = sqliteForConfig.readConfigEntries(currentProject);
-    if (configEntries.length > 0) {
-      const consolidator = new ConfigConsolidator(generateTextFn);
-      const result = await consolidator.consolidate(configEntries);
-      if (result) {
-        await writeConsolidatedConfig(memoryPath, result);
-        persistConsolidatedConfigToSqlite(memoryPath, result, log);
+      // 統合 principle を memories へ反映（新規 dont 保存＋元 source の論理削除）
+      let mergeStats = { merged: 0, softDeleted: 0 };
+      if (principles.length > 0) {
+        mergeStats = mergePrinciplesIntoMemories(memoryPath, principles, currentProject, log);
+      }
+
+      // 収束: 統合後の「生存 dont 件数」を source_entry_count として記録する。これを残さないと
+      // 鮮度判定が永久に stale=true のままになり毎晩クラスタリングを無駄に再実行する。
+      // principle が無い回でも既存の principles を保持したまま件数だけ更新して鮮度を確定させる。
+      const aliveAfter = storage.readAliveDontEntries(currentProject).length;
+      const prior = storage.readConsolidated("dont") as ConsolidatedDont | null;
+      const result: ConsolidatedDont = {
+        principles: principles.length > 0 ? principles : (prior?.principles ?? []),
+        consolidatedAt: jstTimestamp(),
+        sourceEntryCount: aliveAfter,
+        version: 1,
+      };
+      await writeConsolidatedDont(memoryPath, result);
+      persistConsolidatedDontToSqlite(memoryPath, result, log);
+      log(`[consolidate-all] ${currentProject}: clusters=${clusters.length} dup=${dupClusters.length} merged=${mergeStats.merged} softDeleted=${mergeStats.softDeleted} alive=${aliveAfter}`);
+    }
+
+    // config統合
+    if (isConfigConsolidationStaleSqlite(storage)) {
+      const configEntries = storage.readConfigEntries(currentProject);
+      if (configEntries.length > 0) {
+        const consolidator = new ConfigConsolidator(generateTextFn);
+        const result = await consolidator.consolidate(configEntries);
+        if (result) {
+          await writeConsolidatedConfig(memoryPath, result);
+          persistConsolidatedConfigToSqlite(memoryPath, result, log);
+        }
       }
     }
+  } finally {
+    storage.close();
   }
-  sqliteForConfig.close();
 
   // F3: 夢生成（夜間バッチ後段。直近24h以内にdreamがあればスキップ、fail-open）
   try {
@@ -181,12 +190,9 @@ async function main(): Promise<void> {
   log("[consolidate-all] Done.");
 }
 
-// CLI エントリ判定: import 時に main を実行しない（テストから consolidateProject を import できるように）
-const isCliEntry =
-  process.argv[1] !== undefined &&
-  fileURLToPath(import.meta.url) === process.argv[1];
-
-if (isCliEntry) {
+// import 時に main を実行しない（テストから consolidateProject を import できるように）。
+// bin(symlink) 経由でも起動するよう realpath 比較する isMainModule を使う。
+if (isMainModule(import.meta.url)) {
   main().catch((err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
     log(`[consolidate-all] Fatal: ${message}`);

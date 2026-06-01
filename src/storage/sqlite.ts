@@ -627,8 +627,11 @@ export class SQLiteStorage {
 
     if (!consolidated) return true;
 
+    // 生存エントリのみを数える。論理削除(deleted_at)済み行まで数えると、統合が source を
+    // soft delete した後に件数が永久に一致せず stale=true のままになり、毎回再統合（config 側は
+    // 毎晩 LLM 空振り）が起きる。鮮度の意味は「生存エントリが前回統合時から変わったか」。
     const currentCount = this.db.prepare(
-      "SELECT COUNT(*) as count FROM memories WHERE category = ?"
+      "SELECT COUNT(*) as count FROM memories WHERE category = ? AND deleted_at IS NULL"
     ).get(type) as { count: number };
 
     return currentCount.count !== consolidated.source_entry_count;

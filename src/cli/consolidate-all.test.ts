@@ -83,6 +83,8 @@ describe("consolidate-all: SQLite-only 環境で統合がスキップされな�
     const consolidated = check.readConsolidated("dont") as ConsolidatedDont | null;
     // 統合された principle が新規 dont として保存され、検索結果に現れる
     const aliveDont = check.readAliveDontEntries("myproject");
+    // 収束: 統合後は鮮度判定が false（次回以降は再クラスタリング・再LLMを呼ばない）
+    const stillStale = check.isConsolidationStale("dont");
     check.close();
 
     expect(consolidated).not.toBeNull();
@@ -90,8 +92,14 @@ describe("consolidate-all: SQLite-only 環境で統合がスキップされな�
     expect(consolidated!.principles[0].theme).toBe("タグ直書き禁止");
     // ファイル側（PreToolUse / Stop guard が直読する）も二重書きされている
     expect(existsSync(join(memoryPath, config.consolidatedDontFile))).toBe(true);
-    // 統合 principle が memories に追加されている（元の重複は論理削除されるので alive に principle が含まれる）
+    // 統合 principle が新規 dont として memories に追加されている
     expect(aliveDont.some(e => e.title === "タグ直書き禁止")).toBe(true);
+    // dedup の核心: 元の重複2件は論理削除され、生存集合から消えている
+    // （softDelete が壊れて元エントリが残ると重複排除の本義が崩れるので、ここで明示検証する）
+    expect(aliveDont.find(e => e.id === a.id)).toBeUndefined();
+    expect(aliveDont.find(e => e.id === b.id)).toBeUndefined();
+    // 統合後は stale=false（論理削除済みを件数に含めず収束する）
+    expect(stillStale).toBe(false);
   });
 
   it("config が consolidated('config') に統合される（config.md 不在）", async () => {
@@ -115,9 +123,12 @@ describe("consolidate-all: SQLite-only 環境で統合がスキップされな�
     const check = new SQLiteStorage(dbPath);
     check.initialize(memoryPath);
     const consolidated = check.readConsolidated("config") as ConsolidatedConfig | null;
+    const stillStale = check.isConsolidationStale("config");
     check.close();
 
     expect(consolidated).not.toBeNull();
     expect(existsSync(join(memoryPath, config.consolidatedConfigFile))).toBe(true);
+    // config 側も統合後は収束する
+    expect(stillStale).toBe(false);
   });
 });

@@ -17,7 +17,7 @@
  */
 
 import { join, basename } from "path";
-import { fileURLToPath } from "url";
+import { isMainModule } from "../utils/cli-entry.js";
 import { SQLiteStorage } from "../storage/sqlite.js";
 import { config } from "../config.js";
 import type { GenerateTextFn } from "../llm/provider.js";
@@ -305,12 +305,8 @@ async function main(): Promise<void> {
   await runDreamGenerationForProject({ memoryPath, projectRoot });
 }
 
-// CLI エントリ判定: import 時に main を実行しない（isDirectRun パターン）
-const isCliEntry =
-  process.argv[1] !== undefined &&
-  fileURLToPath(import.meta.url) === process.argv[1];
-
-if (isCliEntry) {
+// import 時に main を実行しない。bin(symlink) 経由でも起動するよう realpath 比較する。
+if (isMainModule(import.meta.url)) {
   main().catch(() => {
     // 想定外エラー → fail-open（exit 0）
     process.exit(0);

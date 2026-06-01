@@ -212,6 +212,24 @@ describe("SQLiteStorage", () => {
       });
       expect(storage.isConsolidationStale("dont")).toBe(false);
     });
+
+    it("isConsolidationStale は論理削除済みエントリを件数に含めない（統合後に収束する）", () => {
+      // 生存2件 → 統合が1件を論理削除 → 生存1件、という統合後の状態を再現する
+      const a = storage.save({ category: "dont", title: "dup1", content: "c1", tags: [] });
+      const b = storage.save({ category: "dont", title: "dup2", content: "c2", tags: [] });
+      storage.softDelete([b.id]);
+      // 統合は「生存件数(=1)」を source_entry_count として記録する
+      storage.writeConsolidated("dont", {
+        principles: [],
+        consolidatedAt: "2026-01-01T00:00:00+09:00",
+        sourceEntryCount: 1,
+        version: 1,
+      });
+      // 論理削除済みの b を件数に含めれば 2≠1 で stale=true になってしまうが、
+      // 生存件数のみ数えれば 1=1 で false（毎晩の無駄な再統合を防ぐ）。
+      expect(storage.isConsolidationStale("dont")).toBe(false);
+      void a;
+    });
   });
 
   // =========================

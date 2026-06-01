@@ -10,7 +10,7 @@
  */
 
 import { basename } from "path";
-import { fileURLToPath } from "url";
+import { isMainModule } from "../utils/cli-entry.js";
 import { MarkdownStorage } from "../storage/index.js";
 import { config } from "../config.js";
 import { DontConsolidator } from "../consolidator/dont-consolidator.js";
@@ -116,12 +116,8 @@ async function main() {
   }
 }
 
-// CLI エントリ判定: import 時に main を実行しない
-const isCliEntry =
-  process.argv[1] !== undefined &&
-  fileURLToPath(import.meta.url) === process.argv[1];
-
-if (isCliEntry) {
+// import 時に main を実行しない。bin(symlink) 経由でも起動するよう realpath 比較する。
+if (isMainModule(import.meta.url)) {
   main().catch(() => {
     process.exit(1);
   });

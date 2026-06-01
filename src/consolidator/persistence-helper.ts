@@ -83,6 +83,13 @@ export function mergePrinciplesIntoMemories(
         // 元の source エントリを論理削除
         const result = sqliteStorage.softDelete(p.sourceIds);
         softDeleted += result.softDeleted.length;
+
+        // 統合で吸収済みの重複 source のベクトルを除去する。残すと searchVectors が
+        // 死んだ ID を近傍として返し続け、k 件の枠を食って生きた近重複の検出を妨げる。
+        // （復元が必要になった場合は backfill-worker が埋め込みを再生成する）
+        if (result.softDeleted.length > 0) {
+          sqliteStorage.deleteVectors(result.softDeleted);
+        }
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         logger(`[consolidator-merge] principle '${p.theme}' merge failed: ${message}`);
