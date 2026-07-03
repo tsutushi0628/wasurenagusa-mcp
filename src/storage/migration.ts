@@ -287,6 +287,41 @@ export function migrateV3ToV4(db: Database.Database): void {
 }
 
 /**
+ * v4→v5 マイグレーション（予測誤差ループ spec）
+ *
+ * 変更内容:
+ *   - memories に predicted_factors TEXT カラムを追加（NULL 許容・JSON配列文字列）
+ *   - memories に actual_factors TEXT カラムを追加（NULL 許容・JSON配列文字列）
+ *   - memories に prediction_error REAL カラムを追加（NULL 許容・0〜1）
+ *   - memories に prediction_delta TEXT カラムを追加（NULL 許容）
+ *
+ * 動作:
+ *   - predicted_factors カラムが既に存在するならスキップ（冪等）
+ */
+export function migrateV4ToV5(db: Database.Database): void {
+  const columnExists = (db.prepare(
+    "SELECT COUNT(*) as cnt FROM pragma_table_info('memories') WHERE name = 'predicted_factors'"
+  ).get() as { cnt: number }).cnt > 0;
+
+  if (columnExists) {
+    return;
+  }
+
+  const transaction = db.transaction(() => {
+    db.exec(`ALTER TABLE memories ADD COLUMN predicted_factors TEXT`);
+    db.exec(`ALTER TABLE memories ADD COLUMN actual_factors TEXT`);
+    db.exec(`ALTER TABLE memories ADD COLUMN prediction_error REAL`);
+    db.exec(`ALTER TABLE memories ADD COLUMN prediction_delta TEXT`);
+
+    db.prepare(
+      "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, datetime('now'))"
+    ).run(5);
+  });
+
+  transaction();
+}
+
+/**
  * vectors.jsonからメタデータ（accessCount等）のみをvector_metadataテーブルに移行。
  * v1のembeddingは768次元（Gemini）、v2は384次元（ローカル）で互換性がないためスキップ。
  */

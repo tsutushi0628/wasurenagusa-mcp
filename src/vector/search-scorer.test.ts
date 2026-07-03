@@ -174,6 +174,84 @@ describe("SearchScorer", () => {
     });
   });
 
+  describe("errorBoost（予測誤差ループ）", () => {
+    it("predictionError未指定なら従来値と完全一致（恒等元1.0）", () => {
+      const baseline = SearchScorer.score({
+        vectorSimilarity: 0.85,
+        matchedTagWeights: [0.5],
+        daysSinceLastAccess: 3,
+        accessCount: 2,
+      });
+      const withUndefined = SearchScorer.score({
+        vectorSimilarity: 0.85,
+        matchedTagWeights: [0.5],
+        daysSinceLastAccess: 3,
+        accessCount: 2,
+        predictionError: undefined,
+      });
+      // 予測誤差を渡さない場合、後方互換でスコアは不変
+      expect(withUndefined).toBe(baseline);
+    });
+
+    it("predictionError=0 はスコア不変（的中は加点しない）", () => {
+      const baseline = SearchScorer.score({
+        vectorSimilarity: 1.0,
+        matchedTagWeights: [],
+        daysSinceLastAccess: 0,
+        accessCount: 0,
+      });
+      const withZero = SearchScorer.score({
+        vectorSimilarity: 1.0,
+        matchedTagWeights: [],
+        daysSinceLastAccess: 0,
+        accessCount: 0,
+        predictionError: 0,
+      });
+      expect(withZero).toBeCloseTo(baseline, 5);
+    });
+
+    it("予測誤差が大きいほどスコアが上がる（surface加点）", () => {
+      const low = SearchScorer.score({
+        vectorSimilarity: 1.0,
+        matchedTagWeights: [],
+        daysSinceLastAccess: 0,
+        accessCount: 0,
+        predictionError: 0.2,
+      });
+      const high = SearchScorer.score({
+        vectorSimilarity: 1.0,
+        matchedTagWeights: [],
+        daysSinceLastAccess: 0,
+        accessCount: 0,
+        predictionError: 0.8,
+      });
+      expect(high).toBeGreaterThan(low);
+    });
+
+    it("predictionError=1 でも boost は cap 1.3 で頭打ち", () => {
+      const score = SearchScorer.score({
+        vectorSimilarity: 1.0,
+        matchedTagWeights: [],
+        daysSinceLastAccess: 0,
+        accessCount: 0,
+        predictionError: 1,
+      });
+      // 1.0 * 1.0 * 1.0 * 1.0 * 1.3 = 1.3
+      expect(score).toBeCloseTo(1.3, 5);
+    });
+
+    it("predictionErrorが1超でも cap 1.3 を超えない（防御）", () => {
+      const score = SearchScorer.score({
+        vectorSimilarity: 1.0,
+        matchedTagWeights: [],
+        daysSinceLastAccess: 0,
+        accessCount: 0,
+        predictionError: 99,
+      });
+      expect(score).toBeCloseTo(1.3, 5);
+    });
+  });
+
   describe("composite score", () => {
     it("all neutral returns 1.0", () => {
       const score = SearchScorer.score({

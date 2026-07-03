@@ -164,6 +164,8 @@ export async function handleMemorySearch(
     try {
       const allIds = result.results.map(r => r.id);
       const metadata = storage.getVectorMetadata(allIds);
+      // 予測誤差: 差分が大きいエントリほど surface 加点する（無いエントリは恒等で素通り）
+      const predictionErrors = storage.getPredictionErrors(allIds);
 
       const scored = result.results.map(entry => {
         const meta = metadata.get(entry.id);
@@ -180,6 +182,7 @@ export async function handleMemorySearch(
           matchedTagWeights,
           daysSinceLastAccess,
           accessCount,
+          predictionError: predictionErrors.get(entry.id),
         });
 
         return { entry, score };

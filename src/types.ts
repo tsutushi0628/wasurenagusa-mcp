@@ -28,6 +28,11 @@ export interface MemoryEntry {
   positiveAction?: string; // dontカテゴリ時: 次に取るべき自律行動（肯定形）
   scenario?: string;     // dontカテゴリ時: 何が起きたかの事象1行（40〜80字）
   whyCore?: string;      // dontカテゴリ時: なぜダメかの核心1行（30〜80字）
+  // 予測誤差ループ用（着手前の見立てと実測の差分を世界モデル更新信号にする）
+  predictedFactors?: string[]; // 着手前に「この問題で効く」と見立てた変数（最大3）
+  actualFactors?: string[];    // 終了後に実際効いた変数
+  predictionError?: number;    // 予測と実測の差分スカラ（0〜1）。コードで自動算出
+  predictionDelta?: string;    // 差分の核心を人間可読1行で（任意・30〜80字）
 }
 
 // メモリエントリ（軽量インデックス - 動的取得用）
@@ -43,6 +48,8 @@ export interface MemoryIndexEntry {
   positiveAction?: string; // dontカテゴリ時: 次に取るべき自律行動（肯定形）
   scenario?: string;     // dontカテゴリ時: 何が起きたかの事象1行（40〜80字）
   whyCore?: string;      // dontカテゴリ時: なぜダメかの核心1行（30〜80字）
+  predictionError?: number; // 予測誤差スカラ（0〜1）。差分大を検索結果一覧で表面化する
+  predictionDelta?: string; // 差分の核心1行
 }
 
 // 保存パラメータ
@@ -59,6 +66,11 @@ export interface SaveParams {
   positiveAction?: string; // dontカテゴリ時: 次に取るべき自律行動（肯定形）
   scenario?: string;     // dontカテゴリ時: 何が起きたかの事象1行（40〜80字）
   whyCore?: string;      // dontカテゴリ時: なぜダメかの核心1行（30〜80字）
+  // 予測誤差ループ用
+  predictedFactors?: string[]; // 着手前に「この問題で効く」と見立てた変数（最大3）
+  actualFactors?: string[];    // 終了後に実際効いた変数
+  predictionError?: number;    // 予測と実測の差分スカラ（0〜1）。コードで自動算出
+  predictionDelta?: string;    // 差分の核心を人間可読1行で（任意・30〜80字）
 }
 
 // 保存結果
@@ -103,6 +115,7 @@ export interface GetDetailResult {
 export interface ContextResult {
   config: string;
   dont: string;
+  worldModelUpdates?: string; // 予測が大きく外れた上位N件（世界モデル更新ブロック）
 }
 
 // Gemini分析結果

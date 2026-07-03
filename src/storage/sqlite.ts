@@ -22,7 +22,7 @@ import {
 } from "../types.js";
 import { config } from "../config.js";
 import { initializeSchema, initializeVectors, getSchemaVersion, CURRENT_SCHEMA_VERSION } from "./schema.js";
-import { migrateV1ToV2, migrateV1ToV2_categoryAndKnowledgeGap, migrateV2ToV3, migrateV3ToV4 } from "./migration.js";
+import { migrateV1ToV2, migrateV1ToV2_categoryAndKnowledgeGap, migrateV2ToV3, migrateV3ToV4, migrateV4ToV5 } from "./migration.js";
 import { existsSync } from "fs";
 import { join } from "path";
 import { formatEntry } from "./formatter.js";
@@ -31,6 +31,10 @@ export interface VectorSearchResult {
   id: string;
   distance: number;
 }
+
+// 世界モデルブロック（getContext）の閾値・件数（マジックナンバー禁止）
+const WORLD_MODEL_MIN_ERROR = 0.5; // この予測誤差以上を「学ぶべき外れ」として surface
+const WORLD_MODEL_LIMIT = 3;        // surface する上限件数（dream の SEED_LIMIT=3 に倣う）
 
 export class SQLiteStorage {
   private db: Database.Database;
@@ -62,6 +66,11 @@ export class SQLiteStorage {
     // v3→v4: scenario / why_core カラム追加（カラム存在チェックで冪等）
     if (memoriesTableExists) {
       migrateV3ToV4(this.db);
+    }
+
+    // v4→v5: 予測誤差ループの4カラム追加（カラム存在チェックで冪等）
+    if (memoriesTableExists) {
+      migrateV4ToV5(this.db);
     }
 
     // 論理削除カラム migration（既存DBに対しても idempotent。consolidator が source エントリを論理削除する用途）
@@ -109,6 +118,11 @@ export class SQLiteStorage {
     const positiveAction = params.positiveAction ?? null;
     const scenario = params.scenario ?? null;
     const whyCore = params.whyCore ?? null;
+    // 予測誤差ループ: 配列2つは undefined なら NULL、配列（空含む）なら JSON 文字列で保存（knowledgeGap と同じパターン）
+    const predictedFactors = params.predictedFactors !== undefined ? JSON.stringify(params.predictedFactors) : null;
+    const actualFactors = params.actualFactors !== undefined ? JSON.stringify(params.actualFactors) : null;
+    const predictionError = params.predictionError ?? null;
+    const predictionDelta = params.predictionDelta ?? null;
 
     if (params.replaceId) {
       const existing = this.db.prepare("SELECT id FROM memories WHERE id = ?").get(params.replaceId) as { id: string } | undefined;
@@ -117,13 +131,16 @@ export class SQLiteStorage {
           UPDATE memories SET
             timestamp = ?, category = ?, title = ?, content = ?, tags = ?,
             project = ?, scope = ?, intensity = ?, knowledge_gap = ?, positive_action = ?,
-            scenario = ?, why_core = ?, updated_at = datetime('now')
+            scenario = ?, why_core = ?,
+            predicted_factors = ?, actual_factors = ?, prediction_error = ?, prediction_delta = ?,
+            updated_at = datetime('now')
           WHERE id = ?
         `);
         updateStmt.run(
           timestamp, params.category, params.title, params.content, tags,
           params.project ?? null, params.scope ?? null, params.intensity ?? null,
           knowledgeGap, positiveAction, scenario, whyCore,
+          predictedFactors, actualFactors, predictionError, predictionDelta,
           params.replaceId
         );
         return {
@@ -136,13 +153,14 @@ export class SQLiteStorage {
     }
 
     const insertStmt = this.db.prepare(`
-      INSERT INTO memories (id, timestamp, category, title, content, tags, project, scope, intensity, knowledge_gap, positive_action, scenario, why_core)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO memories (id, timestamp, category, title, content, tags, project, scope, intensity, knowledge_gap, positive_action, scenario, why_core, predicted_factors, actual_factors, prediction_error, prediction_delta)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     insertStmt.run(
       id, timestamp, params.category, params.title, params.content, tags,
       params.project ?? null, params.scope ?? null, params.intensity ?? null,
-      knowledgeGap, positiveAction, scenario, whyCore
+      knowledgeGap, positiveAction, scenario, whyCore,
+      predictedFactors, actualFactors, predictionError, predictionDelta
     );
 
     return {
@@ -453,10 +471,24 @@ export class SQLiteStorage {
     const dontEntries = this.readDontEntries(currentProject);
     const dontFormatted = dontEntries.map((e) => formatEntry(e)).join("");
 
-    return {
+    // 世界モデル更新: 予測が大きく外れた上位N件を surface（学ぶべき外れ）
+    const worldModelEntries = this.listHighErrorEntries(WORLD_MODEL_MIN_ERROR, WORLD_MODEL_LIMIT);
+    const worldModelFormatted = worldModelEntries
+      .map((e) => {
+        const errPct = Math.round((e.predictionError ?? 0) * 100);
+        const delta = e.predictionDelta ? `\n${e.predictionDelta}` : "";
+        return `### ${e.title}（予測ずれ ${errPct}%）${delta}`;
+      })
+      .join("\n\n");
+
+    const result: ContextResult = {
       config: configFormatted || "（設定情報なし）",
       dont: dontFormatted || "（ルールなし）",
     };
+    if (worldModelFormatted) {
+      result.worldModelUpdates = worldModelFormatted;
+    }
+    return result;
   }
 
   readConfigEntries(currentProject?: string): MemoryEntry[] {
@@ -765,6 +797,80 @@ export class SQLiteStorage {
     });
   }
 
+  // 予測が大きく外れたエントリ（prediction_error >= minError）の軽量インデックスを取得（世界モデルブロック用）
+  listHighErrorEntries(minError: number, limit: number): Array<{
+    id: string;
+    timestamp: string;
+    category: MemoryCategory;
+    title: string;
+    tags: string[];
+    project?: string;
+    scope?: string;
+    predictionError?: number;
+    predictionDelta?: string;
+  }> {
+    const rows = this.db
+      .prepare(
+        "SELECT id, timestamp, category, title, tags, project, scope, prediction_error, prediction_delta FROM memories WHERE prediction_error IS NOT NULL AND prediction_error >= ? AND deleted_at IS NULL ORDER BY prediction_error DESC, timestamp DESC LIMIT ?"
+      )
+      .all(minError, limit) as Array<{
+        id: string;
+        timestamp: string;
+        category: string;
+        title: string;
+        tags: string;
+        project: string | null;
+        scope: string | null;
+        prediction_error: number | null;
+        prediction_delta: string | null;
+      }>;
+
+    return rows.map((row) => {
+      const entry: {
+        id: string;
+        timestamp: string;
+        category: MemoryCategory;
+        title: string;
+        tags: string[];
+        project?: string;
+        scope?: string;
+        predictionError?: number;
+        predictionDelta?: string;
+      } = {
+        id: row.id,
+        timestamp: row.timestamp,
+        category: row.category as MemoryCategory,
+        title: row.title,
+        tags: JSON.parse(row.tags),
+      };
+      if (row.project) { entry.project = row.project; }
+      if (row.scope) { entry.scope = row.scope; }
+      if (row.prediction_error !== null && row.prediction_error !== undefined) { entry.predictionError = row.prediction_error; }
+      if (row.prediction_delta !== null && row.prediction_delta !== undefined) { entry.predictionDelta = row.prediction_delta; }
+      return entry;
+    });
+  }
+
+  // 指定IDの prediction_error を一括取得（検索スコアリングの加点用）。NULL のものは Map に載せない。
+  getPredictionErrors(ids: string[]): Map<string, number> {
+    const map = new Map<string, number>();
+    if (ids.length === 0) {
+      return map;
+    }
+    const placeholders = ids.map(() => "?").join(",");
+    const rows = this.db
+      .prepare(
+        `SELECT id, prediction_error FROM memories WHERE id IN (${placeholders}) AND prediction_error IS NOT NULL`
+      )
+      .all(...ids) as Array<{ id: string; prediction_error: number | null }>;
+    for (const row of rows) {
+      if (row.prediction_error !== null && row.prediction_error !== undefined) {
+        map.set(row.id, row.prediction_error);
+      }
+    }
+    return map;
+  }
+
   private readEntriesByCategory(category: MemoryCategory, currentProject?: string): MemoryEntry[] {
     let query = "SELECT * FROM memories WHERE category = ? AND deleted_at IS NULL";
     const queryParams: string[] = [category];
@@ -807,6 +913,26 @@ export class SQLiteStorage {
     }
     if (row.why_core !== null && row.why_core !== undefined) {
       entry.whyCore = row.why_core;
+    }
+    if (row.predicted_factors !== null && row.predicted_factors !== undefined) {
+      try {
+        entry.predictedFactors = JSON.parse(row.predicted_factors);
+      } catch {
+        // パース失敗時は省略（fail-open: 既存エントリの保護）
+      }
+    }
+    if (row.actual_factors !== null && row.actual_factors !== undefined) {
+      try {
+        entry.actualFactors = JSON.parse(row.actual_factors);
+      } catch {
+        // パース失敗時は省略
+      }
+    }
+    if (row.prediction_error !== null && row.prediction_error !== undefined) {
+      entry.predictionError = row.prediction_error;
+    }
+    if (row.prediction_delta !== null && row.prediction_delta !== undefined) {
+      entry.predictionDelta = row.prediction_delta;
     }
     return entry;
   }
@@ -868,6 +994,10 @@ interface MemoryRow {
   positive_action: string | null;
   scenario: string | null;
   why_core: string | null;
+  predicted_factors: string | null;
+  actual_factors: string | null;
+  prediction_error: number | null;
+  prediction_delta: string | null;
   created_at: string;
   updated_at: string;
 }

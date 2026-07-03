@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-export const CURRENT_SCHEMA_VERSION = 4;
+export const CURRENT_SCHEMA_VERSION = 5;
 
 export const DDL = `
 -- メモリエントリ本体
@@ -18,6 +18,10 @@ CREATE TABLE IF NOT EXISTS memories (
     positive_action TEXT,
     scenario TEXT,
     why_core TEXT,
+    predicted_factors TEXT,
+    actual_factors TEXT,
+    prediction_error REAL,
+    prediction_delta TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

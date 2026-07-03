@@ -4,7 +4,7 @@ import { join } from "path";
 import { tmpdir } from "os";
 import Database from "better-sqlite3";
 import { initializeSchema, getSchemaVersion } from "./schema.js";
-import { migrateV1ToV2, migrateV1ToV2_categoryAndKnowledgeGap } from "./migration.js";
+import { migrateV1ToV2, migrateV1ToV2_categoryAndKnowledgeGap, migrateV4ToV5 } from "./migration.js";
 
 function createV1Files(memoryPath: string): void {
   // config.md
@@ -578,5 +578,128 @@ describe("migrateV1ToV2_categoryAndKnowledgeGap", () => {
     expect(row?.id).toBe("rb-001");
     // schema_version は v1 のまま
     expect(getSchemaVersion(db)).toBe(1);
+  });
+});
+
+// ============================================================
+// マイグレーション v4→v5: 予測誤差ループの4カラム追加
+// ============================================================
+describe("migrateV4ToV5", () => {
+  let tmpDir: string;
+  let db: Database.Database;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "wasurenagusa-migration-v5-test-"));
+    db = new Database(join(tmpDir, "test.db"));
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  // v4相当スキーマ（予測4カラム無し）を直接作る
+  function createV4Schema(): void {
+    db.exec(`
+      CREATE TABLE memories (
+          id TEXT PRIMARY KEY,
+          timestamp TEXT NOT NULL,
+          category TEXT NOT NULL CHECK(category IN ('config','dont','decision','log','snippet','dream','success')),
+          title TEXT NOT NULL,
+          content TEXT NOT NULL,
+          tags TEXT NOT NULL DEFAULT '[]',
+          project TEXT,
+          scope TEXT,
+          intensity INTEGER,
+          knowledge_gap TEXT,
+          positive_action TEXT,
+          scenario TEXT,
+          why_core TEXT,
+          deleted_at TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE schema_version (
+          version INTEGER PRIMARY KEY,
+          applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO schema_version (version) VALUES (4);
+    `);
+  }
+
+  function columnNames(): string[] {
+    return (db.prepare("PRAGMA table_info('memories')").all() as Array<{ name: string }>)
+      .map((r) => r.name);
+  }
+
+  it("v4スキーマに予測4カラムが追加され schema_version=5 になる", () => {
+    createV4Schema();
+    expect(getSchemaVersion(db)).toBe(4);
+
+    migrateV4ToV5(db);
+
+    const cols = columnNames();
+    expect(cols).toContain("predicted_factors");
+    expect(cols).toContain("actual_factors");
+    expect(cols).toContain("prediction_error");
+    expect(cols).toContain("prediction_delta");
+    expect(getSchemaVersion(db)).toBe(5);
+  });
+
+  it("既存v4データ（予測フィールド無し）は無害に保持される", () => {
+    createV4Schema();
+    db.prepare(
+      "INSERT INTO memories (id, timestamp, category, title, content) VALUES (?, ?, ?, ?, ?)"
+    ).run("old-001", "2026-01-01T00:00:00+09:00", "log", "旧データ", "本文");
+
+    migrateV4ToV5(db);
+
+    const row = db.prepare("SELECT * FROM memories WHERE id = ?").get("old-001") as {
+      id: string; predicted_factors: string | null; prediction_error: number | null;
+    };
+    expect(row.id).toBe("old-001");
+    expect(row.predicted_factors).toBeNull();
+    expect(row.prediction_error).toBeNull();
+  });
+
+  it("追加後は予測4カラムに値を保存できる", () => {
+    createV4Schema();
+    migrateV4ToV5(db);
+
+    db.prepare(
+      "INSERT INTO memories (id, timestamp, category, title, content, predicted_factors, actual_factors, prediction_error, prediction_delta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).run(
+      "pe-001", "2026-06-30T00:00:00+09:00", "log", "見立てズレ", "本文",
+      JSON.stringify(["auth"]), JSON.stringify(["db", "auth"]), 0.5, "認証だと思ったらDBだった"
+    );
+
+    const row = db.prepare("SELECT * FROM memories WHERE id = ?").get("pe-001") as {
+      predicted_factors: string; actual_factors: string; prediction_error: number; prediction_delta: string;
+    };
+    expect(JSON.parse(row.predicted_factors)).toEqual(["auth"]);
+    expect(JSON.parse(row.actual_factors)).toEqual(["db", "auth"]);
+    expect(row.prediction_error).toBe(0.5);
+    expect(row.prediction_delta).toBe("認証だと思ったらDBだった");
+  });
+
+  it("再実行しても破壊しない（冪等：カラム存在チェックで2回目はスキップ）", () => {
+    createV4Schema();
+
+    migrateV4ToV5(db);
+    // 2回目を呼んでも例外を投げない（重複ALTERにならない）
+    expect(() => migrateV4ToV5(db)).not.toThrow();
+
+    const cols = columnNames();
+    // カラムは重複追加されず4つのまま
+    expect(cols.filter((c) => c === "predicted_factors").length).toBe(1);
+    expect(getSchemaVersion(db)).toBe(5);
+  });
+
+  it("最新スキーマ（initializeSchema）には無害適用される", () => {
+    initializeSchema(db);
+    // 最新DDLには既に予測4カラムが含まれるため、ALTERはスキップされる
+    expect(() => migrateV4ToV5(db)).not.toThrow();
+    const cols = columnNames();
+    expect(cols).toContain("prediction_error");
   });
 });

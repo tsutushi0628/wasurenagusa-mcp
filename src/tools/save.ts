@@ -7,6 +7,7 @@ import { SaveParams, MemoryCategory } from "../types.js";
 import { LocalEmbedding } from "../vector/local-embedding.js";
 import { TagEnricher } from "../vector/tag-enricher.js";
 import { formatWeightedTags } from "../vector/weighted-tag.js";
+import { computePredictionError } from "../vector/prediction-error.js";
 import { config, getMemoryPath } from "../config.js";
 
 export const memorySaveTool: Tool = {
@@ -59,6 +60,20 @@ titleには検索しやすい具体的な名詞を含めること。`,
       whyCore: {
         type: "string",
         description: "category=dont 時に推奨。なぜその行動がダメなのかの核心を1行（30〜80字）。根本的な問題構造を記述"
+      },
+      predictedFactors: {
+        type: "array",
+        items: { type: "string" },
+        description: "着手前に『この問題で効く』と見立てた変数（最大3）。後で actualFactors と突合して予測誤差を自動算出する"
+      },
+      actualFactors: {
+        type: "array",
+        items: { type: "string" },
+        description: "終了後に実際効いた変数。predictedFactors と両方あると predictionError が自動計算される"
+      },
+      predictionDelta: {
+        type: "string",
+        description: "予測と実測の差分の核心を1行（任意、30〜80字）"
       }
     },
     required: ["category", "title", "content"]
@@ -119,6 +134,17 @@ export async function handleMemorySave(
   const scenario = args.scenario as string | undefined;
   const whyCore = args.whyCore as string | undefined;
 
+  // 予測誤差ループ: 渡された見立て・実測を配列化（normalizeTags を流用）
+  const predictedFactors = args.predictedFactors !== undefined ? normalizeTags(args.predictedFactors) : undefined;
+  const actualFactors = args.actualFactors !== undefined ? normalizeTags(args.actualFactors) : undefined;
+  const predictionDelta = args.predictionDelta as string | undefined;
+
+  // 両方が非空なら差分を自動算出（undefined ならフィールド省略）。差分計算はコード側で完結（LLM不使用）。
+  let predictionError: number | undefined;
+  if (predictedFactors && predictedFactors.length > 0 && actualFactors && actualFactors.length > 0) {
+    predictionError = computePredictionError(predictedFactors, actualFactors);
+  }
+
   const params: SaveParams = {
     category: args.category as MemoryCategory,
     title: args.title as string,
@@ -130,6 +156,10 @@ export async function handleMemorySave(
     positiveAction,
     scenario,
     whyCore,
+    predictedFactors,
+    actualFactors,
+    predictionError,
+    predictionDelta,
   };
 
   // LocalEmbedding初期化
