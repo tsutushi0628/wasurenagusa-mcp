@@ -1,5 +1,9 @@
 # Technology Stack
 
+> 【同期注記（2026-07-03）】本書は改修前の設計を記述している。
+> 記憶の注入、統合、検索、ガードに関する記述は、memory-redesign の完了までの間、`.spec-workflow/specs/memory-redesign/` 配下のSteering三点を正本とする。
+> memory-redesign の完了後に本書を全面改訂する。
+
 ## Related Documents
 
 - **[docs/spec.md](../../docs/spec.md)** - 完全実装仕様書（技術詳細・コード例含む）
