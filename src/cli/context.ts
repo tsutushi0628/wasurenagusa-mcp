@@ -21,6 +21,7 @@
 import { basename, join } from "path";
 import { homedir } from "os";
 import { readFile } from "fs/promises";
+import { realpathSync } from "fs";
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
 import { findProjectRoot } from "../utils/projectRoot.js";
@@ -382,6 +383,80 @@ async function handleUserPromptSubmit(): Promise<void> {
   // UserPromptSubmitの記憶想起はプロジェクト側のhooksで管理する
 }
 
+/**
+ * トークン概算（保守的・過小評価しない側に倒す）。
+ * 「文字数 ÷ 2」と「UTF-8バイト数 ÷ 3」の2通りで見積もり、大きい方を採用する。
+ * 正確なトークナイザではなく概算だが、日本語のようなマルチバイト文字を含む
+ * テキストでも実トークン数を下回らないことを優先する。
+ */
+export function estimateTokens(text: string): number {
+  if (text.length === 0) return 0;
+  const charEstimate = Math.ceil(text.length / 2);
+  const byteEstimate = Math.ceil(Buffer.byteLength(text, "utf-8") / 3);
+  return Math.max(charEstimate, byteEstimate);
+}
+
+/** 注入トークンバジェットの既定値（環境変数 WASURENAGUSA_INJECTION_TOKEN_BUDGET 未設定時） */
+export const DEFAULT_INJECTION_TOKEN_BUDGET = 8000;
+
+export interface InjectionBudgetResult {
+  /** バジェット適用後の最終出力文字列 */
+  text: string;
+  /** 切り詰めが発生したか */
+  truncated: boolean;
+  /** 切り詰めで省略された概算トークン数（truncated=falseなら0） */
+  omittedTokens: number;
+}
+
+/**
+ * 注入文字列にトークンバジェット上限を適用する。
+ * 上限内なら素通し。超過時は行境界で末尾から切り詰め、可視マーカー行を残す。
+ * 無言で切らない・フォールバックで全文をそのまま流す経路は作らない
+ * （呼び出し側は必ず本関数の戻り値をそのまま出力に使う）。
+ */
+export function enforceInjectionTokenBudget(
+  text: string,
+  budgetTokens: number,
+): InjectionBudgetResult {
+  const totalTokens = estimateTokens(text);
+  if (totalTokens <= budgetTokens) {
+    return { text, truncated: false, omittedTokens: 0 };
+  }
+
+  const lines = text.split("\n");
+  const keptLines: string[] = [];
+  let keptTokens = 0;
+  for (const line of lines) {
+    const lineTokens = estimateTokens(line);
+    if (keptTokens + lineTokens > budgetTokens) break;
+    keptLines.push(line);
+    keptTokens += lineTokens;
+  }
+
+  const omittedTokens = totalTokens - keptTokens;
+  const marker = `（注入がバジェット上限で切り詰められました: 約${omittedTokens} トークン省略）`;
+
+  return {
+    text: [...keptLines, marker].join("\n"),
+    truncated: true,
+    omittedTokens,
+  };
+}
+
+/**
+ * 注入バジェット超過時のfail-loud警告をstderrへ1行出力する。
+ * truncated=falseのときは何も出力しない（無言で切っていないため警告は不要）。
+ */
+export function logInjectionBudgetWarning(
+  budgetTokens: number,
+  result: InjectionBudgetResult,
+): void {
+  if (!result.truncated) return;
+  console.error(
+    `[context] 注入がトークンバジェット上限(${budgetTokens})を超過したため切り詰めました: 約${result.omittedTokens} トークン省略`,
+  );
+}
+
 async function main() {
   // stdinからHook入力JSONを読み取る
   let cwd: string;
@@ -653,8 +728,14 @@ async function main() {
     output.push("- 上記の設定情報（config）は過去にユーザーが覚えさせた重要情報。作業対象に関連するものは必ず参照すること");
   }
 
-  // stdoutに出力（Hooksがこれをコンテキストに注入する）
-  console.log(output.join("\n"));
+  // 注入トークンバジェットを強制してからstdoutに出力（Hooksがこれをコンテキストに注入する）
+  const budgetTokens = parseInt(
+    process.env.WASURENAGUSA_INJECTION_TOKEN_BUDGET || String(DEFAULT_INJECTION_TOKEN_BUDGET),
+    10,
+  );
+  const budgetResult = enforceInjectionTokenBudget(output.join("\n"), budgetTokens);
+  logInjectionBudgetWarning(budgetTokens, budgetResult);
+  console.log(budgetResult.text);
 
   storage.close();
 }
@@ -705,11 +786,26 @@ function extractTitleTokens(title: string): string[] {
   return tokens;
 }
 
-// CLI エントリ判定: import 時に main を実行しない（isDirectRun パターン）
-const isCliEntry =
-  process.argv[1] !== undefined &&
-  fileURLToPath(import.meta.url) === process.argv[1];
+/**
+ * CLIエントリ判定: 現在のモジュールが `node <path>` で直接実行されたか判定する。
+ * npmグローバルbinはsymlinkとして配置されるため、argv[1]（symlink自体のパス）と
+ * import.meta.url由来の実ファイルパスは生パス比較だと不一致になり、main()が
+ * 呼ばれない（記憶ストアの注入が無言で0バイトになる）事故が起きていた。
+ * 両辺をrealpathで実体パス解決してから比較することで、symlink経由の起動も検知する。
+ * realpath解決が例外（存在しないパス等）の場合は生パス比較にフォールバックする
+ * （fail-open: 判定不能時に起動を握りつぶさない。従来の直接node実行の挙動は維持）。
+ */
+export function isDirectRun(argv1: string | undefined, moduleUrl: string): boolean {
+  if (argv1 === undefined) return false;
 
-if (isCliEntry) {
+  const modulePath = fileURLToPath(moduleUrl);
+  try {
+    return realpathSync(argv1) === realpathSync(modulePath);
+  } catch {
+    return argv1 === modulePath;
+  }
+}
+
+if (isDirectRun(process.argv[1], import.meta.url)) {
   main().catch(console.error);
 }
