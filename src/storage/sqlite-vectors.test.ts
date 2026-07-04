@@ -219,6 +219,98 @@ describe("SQLiteStorage - Vector Operations", () => {
       const without = storage.getEntriesWithoutEmbedding();
       expect(without).toEqual([]);
     });
+
+    it("論理削除済み(deleted_at)のエントリはembedding未生成でも再埋め込み対象から除外される", () => {
+      const alive = storage.save({ category: "config", title: "t1", content: "c1" });
+      const deleted = storage.save({ category: "config", title: "t2", content: "c2" });
+
+      // どちらもembedding未生成の状態で、deletedだけ論理削除する
+      storage.softDelete([deleted.id]);
+
+      const without = storage.getEntriesWithoutEmbedding();
+      expect(without).toContain(alive.id);
+      expect(without).not.toContain(deleted.id);
+    });
+  });
+});
+
+describe("SQLiteStorage - Tombstone Purge", () => {
+  let storage: SQLiteStorage;
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "wasurenagusa-tombstone-test-"));
+    storage = new SQLiteStorage(join(tmpDir, "test.db"));
+    storage.initialize();
+  });
+
+  afterEach(() => {
+    storage.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  describe("countTombstones", () => {
+    it("論理削除済みエントリの件数と、対応するvectors/vector_metadataの件数を数える（生存エントリは数えない）", () => {
+      const alive = storage.save({ category: "config", title: "alive", content: "c" });
+      storage.upsertVector(alive.id, dummyVector(0));
+
+      const deletedWithVector = storage.save({ category: "config", title: "deleted-with-vec", content: "c" });
+      storage.upsertVector(deletedWithVector.id, dummyVector(1));
+      storage.softDelete([deletedWithVector.id]);
+
+      const deletedWithoutVector = storage.save({ category: "config", title: "deleted-no-vec", content: "c" });
+      storage.softDelete([deletedWithoutVector.id]);
+
+      const counts = storage.countTombstones();
+      expect(counts.memories).toBe(2);
+      expect(counts.vectors).toBe(1);
+      expect(counts.vectorMetadata).toBe(1);
+    });
+
+    it("tombstoneが無い場合は全て0", () => {
+      storage.save({ category: "config", title: "alive", content: "c" });
+
+      const counts = storage.countTombstones();
+      expect(counts).toEqual({ memories: 0, vectors: 0, vectorMetadata: 0 });
+    });
+  });
+
+  describe("purgeTombstones", () => {
+    it("tombstone済みmemoriesと対応するvectors/vector_metadataだけが物理削除され、生存エントリは無傷", () => {
+      const alive = storage.save({ category: "config", title: "alive", content: "c" });
+      storage.upsertVector(alive.id, dummyVector(0));
+
+      const deleted = storage.save({ category: "config", title: "deleted", content: "c" });
+      storage.upsertVector(deleted.id, dummyVector(1));
+      storage.softDelete([deleted.id]);
+
+      const result = storage.purgeTombstones();
+      expect(result).toEqual({ deletedMemories: 1, deletedVectors: 1, deletedVectorMetadata: 1 });
+
+      // 生存エントリと対応vectorは無傷
+      const aliveDetail = storage.getDetail({ ids: [alive.id] });
+      expect(aliveDetail.entries.length).toBe(1);
+      expect(storage.getVectorMetadata([alive.id]).has(alive.id)).toBe(true);
+      const aliveVectorResults = storage.searchVectors(dummyVector(0), 999, 10);
+      expect(aliveVectorResults.some((r) => r.id === alive.id)).toBe(true);
+
+      // tombstoneは物理削除済み（get_detailでも引けなくなる）
+      const deletedDetail = storage.getDetail({ ids: [deleted.id] });
+      expect(deletedDetail.entries.length).toBe(0);
+      expect(deletedDetail.notFound).toContain(deleted.id);
+
+      // 再度数えると残存tombstoneは0
+      expect(storage.countTombstones()).toEqual({ memories: 0, vectors: 0, vectorMetadata: 0 });
+    });
+
+    it("tombstoneが無い場合は何も削除されない", () => {
+      const alive = storage.save({ category: "config", title: "alive", content: "c" });
+
+      const result = storage.purgeTombstones();
+      expect(result).toEqual({ deletedMemories: 0, deletedVectors: 0, deletedVectorMetadata: 0 });
+
+      expect(storage.getDetail({ ids: [alive.id] }).entries.length).toBe(1);
+    });
   });
 });
 

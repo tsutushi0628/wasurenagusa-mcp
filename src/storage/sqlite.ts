@@ -342,6 +342,63 @@ export class SQLiteStorage {
     return { softDeleted, notFound };
   }
 
+  // tombstone（論理削除済み=deleted_at IS NOT NULL）の件数を数える（dry-run用・DBは書き換えない）。
+  // memories: 論理削除済み行数。vectors / vectorMetadata: その論理削除済みmemoriesに対応する行数。
+  countTombstones(): { memories: number; vectors: number; vectorMetadata: number } {
+    const memories = (this.db.prepare(
+      "SELECT COUNT(*) as c FROM memories WHERE deleted_at IS NOT NULL"
+    ).get() as { c: number }).c;
+
+    const vectors = (this.db.prepare(`
+      SELECT COUNT(*) as c FROM vectors
+      WHERE id IN (SELECT id FROM memories WHERE deleted_at IS NOT NULL)
+    `).get() as { c: number }).c;
+
+    const vectorMetadata = (this.db.prepare(`
+      SELECT COUNT(*) as c FROM vector_metadata
+      WHERE id IN (SELECT id FROM memories WHERE deleted_at IS NOT NULL)
+    `).get() as { c: number }).c;
+
+    return { memories, vectors, vectorMetadata };
+  }
+
+  // tombstone（論理削除済み）のmemories行と、対応するvectors/vector_metadata行を物理削除する。
+  // 実行前にPRAGMA integrity_checkで健全性を確認し、削除は1トランザクションで原子的に行う。
+  purgeTombstones(): { deletedMemories: number; deletedVectors: number; deletedVectorMetadata: number } {
+    const integrityRows = this.db.pragma("integrity_check") as { integrity_check: string }[];
+    const isHealthy = integrityRows.length === 1 && integrityRows[0].integrity_check === "ok";
+    if (!isHealthy) {
+      throw new Error(`purgeTombstones中止: PRAGMA integrity_check異常 - ${JSON.stringify(integrityRows)}`);
+    }
+
+    const purge = this.db.transaction(() => {
+      const tombstoneIds = (this.db.prepare(
+        "SELECT id FROM memories WHERE deleted_at IS NOT NULL"
+      ).all() as { id: string }[]).map((row) => row.id);
+
+      let deletedVectors = 0;
+      let deletedVectorMetadata = 0;
+      const deleteVec = this.db.prepare("DELETE FROM vectors WHERE id = ?");
+      const deleteMeta = this.db.prepare("DELETE FROM vector_metadata WHERE id = ?");
+      for (const id of tombstoneIds) {
+        deletedVectors += deleteVec.run(id).changes;
+        deletedVectorMetadata += deleteMeta.run(id).changes;
+      }
+
+      const memoriesResult = this.db.prepare(
+        "DELETE FROM memories WHERE deleted_at IS NOT NULL"
+      ).run();
+
+      return {
+        deletedVectors,
+        deletedVectorMetadata,
+        deletedMemories: memoriesResult.changes,
+      };
+    });
+
+    return purge();
+  }
+
   updateIntensity(id: string, intensity: number): { success: boolean; id: string; category: MemoryCategory } {
     const row = this.db.prepare("SELECT category FROM memories WHERE id = ?").get(id) as { category: MemoryCategory } | undefined;
     if (!row) {
@@ -681,7 +738,7 @@ export class SQLiteStorage {
     const rows = this.db.prepare(`
       SELECT m.id FROM memories m
       LEFT JOIN vector_metadata vm ON m.id = vm.id
-      WHERE vm.id IS NULL
+      WHERE vm.id IS NULL AND m.deleted_at IS NULL
     `).all() as { id: string }[];
 
     return rows.map((row) => row.id);
