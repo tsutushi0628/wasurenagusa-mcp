@@ -103,4 +103,89 @@ describe("DontConsolidator", () => {
     expect(result).not.toBeNull();
     expect(result!.consolidatedAt).toContain("+09:00");
   });
+
+  it("LLM出力にguardPattern/guardMessageが含まれていても、consolidated結果からは常に除去される（ガード自動生成の再混入防止）", async () => {
+    const responseWithGuardPattern = JSON.stringify({
+      principles: [
+        {
+          theme: "テスト統合",
+          rule: "❌ 統合された問題 💡 統合された理由 ✅ 統合された対策",
+          tags: ["test", "統合"],
+          sourceCount: 3,
+          sourceIds: ["test-1", "test-2", "test-3"],
+          // LLMが指示に反して自動生成したガードパターン（過剰に広い例: アルファベット全般）
+          guardPattern: "[a-zA-Z]+",
+          guardMessage: "アルファベットを使うな",
+        },
+      ],
+    });
+    const mockGenerate = vi.fn().mockResolvedValue(responseWithGuardPattern);
+    const consolidator = new DontConsolidator(mockGenerate);
+
+    const result = await consolidator.consolidate(createDontEntries(3));
+
+    expect(result).not.toBeNull();
+    expect(result!.principles).toHaveLength(1);
+    expect(result!.principles[0].guardPattern).toBeUndefined();
+    expect(result!.principles[0].guardMessage).toBeUndefined();
+    expect("guardPattern" in result!.principles[0]).toBe(false);
+    expect("guardMessage" in result!.principles[0]).toBe(false);
+  });
+
+  it("50件超のchunk分割経路でも、各chunkのLLM出力に含まれるguardPatternが結合後の全principleから除去される", async () => {
+    const responseWithGuardPattern = (id: string) =>
+      JSON.stringify({
+        principles: [
+          {
+            theme: `テスト統合${id}`,
+            rule: "❌〜 💡〜 ✅〜",
+            tags: ["test"],
+            sourceCount: 1,
+            sourceIds: [id],
+            guardPattern: "NG",
+            guardMessage: "NGを使うな",
+          },
+        ],
+      });
+    let callCount = 0;
+    const mockGenerate = vi.fn().mockImplementation(() => {
+      callCount += 1;
+      return Promise.resolve(responseWithGuardPattern(`chunk-${callCount}`));
+    });
+    const consolidator = new DontConsolidator(mockGenerate);
+
+    const result = await consolidator.consolidate(createDontEntries(51));
+
+    expect(result).not.toBeNull();
+    expect(result!.principles.length).toBeGreaterThan(0);
+    for (const principle of result!.principles) {
+      expect(principle.guardPattern).toBeUndefined();
+      expect(principle.guardMessage).toBeUndefined();
+    }
+  });
+
+  it("mergeClusterでもLLM出力にguardPattern/guardMessageが含まれていれば常に除去される", async () => {
+    const responseWithGuardPattern = JSON.stringify({
+      principle: {
+        theme: "クラスタ統合",
+        rule: "❌〜 💡〜 ✅〜",
+        positiveRule: "正しく行動する",
+        tags: ["test"],
+        sourceCount: 2,
+        sourceIds: ["test-1", "test-2"],
+        guardPattern: "NG",
+        guardMessage: "NGを使うな",
+      },
+    });
+    const mockGenerate = vi.fn().mockResolvedValue(responseWithGuardPattern);
+    const consolidator = new DontConsolidator(mockGenerate);
+
+    const result = await consolidator.mergeCluster(createDontEntries(2));
+
+    expect(result).not.toBeNull();
+    expect(result!.guardPattern).toBeUndefined();
+    expect(result!.guardMessage).toBeUndefined();
+    expect("guardPattern" in result!).toBe(false);
+    expect("guardMessage" in result!).toBe(false);
+  });
 });

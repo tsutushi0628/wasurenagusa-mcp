@@ -4,14 +4,6 @@ import { escapePromptVariable } from "../utils/prompt-escape.js";
 import { GenerateTextFn, createGenerateTextFn } from "../llm/provider.js";
 import { formatConsolidatedDont } from "./formatter.js";
 
-/**
- * ネストした量指定子によるReDoSリスクを簡易検出する。
- * (x+)+, (x*)*,  (x+)* 等のパターンを検出。
- */
-function hasReDoSRisk(pattern: string): boolean {
-  return /(\([^)]*[+*][^)]*\))[+*]/.test(pattern);
-}
-
 export class DontConsolidator {
   private generateText: GenerateTextFn;
 
@@ -48,19 +40,10 @@ export class DontConsolidator {
       }
       principle.maxIntensity = maxIntensity;
       principle.score = (principle.sourceIds?.length ?? 0) * maxIntensity;
-      // guardPattern バリデーション
-      if (principle.guardPattern) {
-        try {
-          new RegExp(principle.guardPattern);
-          if (hasReDoSRisk(principle.guardPattern)) {
-            delete principle.guardPattern;
-            delete principle.guardMessage;
-          }
-        } catch {
-          delete principle.guardPattern;
-          delete principle.guardMessage;
-        }
-      }
+      // guardPattern/guardMessageは自動生成禁止（ガードは承認制のみ）。
+      // LLM出力に含まれていても常に除去し、自動生成パターンを一切採用しない。
+      delete principle.guardPattern;
+      delete principle.guardMessage;
       return principle;
     } catch {
       return null;
@@ -142,19 +125,10 @@ export class DontConsolidator {
         principle.maxIntensity = maxIntensity;
         principle.score = principle.sourceCount * maxIntensity;
 
-        // guardPatternのバリデーション: 正規表現として無効 or ReDoSリスクありなら除去
-        if (principle.guardPattern) {
-          try {
-            new RegExp(principle.guardPattern);
-            if (hasReDoSRisk(principle.guardPattern)) {
-              delete principle.guardPattern;
-              delete principle.guardMessage;
-            }
-          } catch {
-            delete principle.guardPattern;
-            delete principle.guardMessage;
-          }
-        }
+        // guardPattern/guardMessageは自動生成禁止（ガードは承認制のみ）。
+        // LLM出力に含まれていても常に除去し、自動生成パターンを一切採用しない。
+        delete principle.guardPattern;
+        delete principle.guardMessage;
       }
 
       const now = new Date();
