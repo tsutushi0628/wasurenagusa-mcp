@@ -20,7 +20,7 @@ describe("consolidate-all: SQLite-only 環境で統合がスキップされな�
   let memoryPath: string;
   let dbPath: string;
 
-  // 2 つのほぼ同一ベクトル（L2 距離 < 0.6 で同一クラスタに入る）
+  // 2 つのほぼ同一ベクトル（L2 距離 < 0.25 で同一クラスタに入る。SIM_DISTANCE_THRESHOLD 参照）
   function nearbyVector(seed: number): number[] {
     const v = new Array(config.localEmbeddingDimensions).fill(0);
     v[0] = 1;

@@ -73,7 +73,8 @@ export const config = {
 
   // Storage Engine v2 設定
   sqliteFile: "memory.db",
-  localEmbeddingModel: "Xenova/all-MiniLM-L6-v2",
+  // 多言語モデル（日本語の意味検索精度が英語専用モデルより大幅に高い。次元384は不変）
+  localEmbeddingModel: "Xenova/multilingual-e5-small",
   localEmbeddingDimensions: 384,
   modelsDir: "models",
   stashDefaultTtlHours: 24,

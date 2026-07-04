@@ -105,7 +105,7 @@ export async function handleMemorySearch(
 
   if (embeddingAvailable) {
     try {
-      const queryEmbedding = await localEmbedding.embed(params.query);
+      const queryEmbedding = await localEmbedding.embed(params.query, "query");
 
       // ハイブリッド検索（FTS5 + ベクトル）
       result = storage.searchHybrid(params, queryEmbedding);
@@ -212,7 +212,7 @@ export async function handleMemorySearch(
         let projResults;
         if (embeddingAvailable) {
           try {
-            const projQueryEmbedding = await localEmbedding.embed(params.query);
+            const projQueryEmbedding = await localEmbedding.embed(params.query, "query");
             projResults = projStorage.searchHybrid(
               { query: params.query, category: params.category, limit: params.limit },
               projQueryEmbedding

@@ -72,7 +72,10 @@ export async function consolidateProject(
       const dontEntries = storage.readAliveDontEntries(currentProject);
 
       // クラスタリング: 各 entry の embedding を取得し、greedy に類似 entry を集める
-      const SIM_DISTANCE_THRESHOLD = 0.6; // 距離 0.6（保守めの類似度。様子見しつつ調整する）
+      // multilingual-e5-small の距離分布に合わせた再較正値・実運用で要チューニング。
+      // 旧モデル(all-MiniLM-L6-v2)の距離分布(最近傍平均0.7)を前提にした0.6は、新モデルの
+      // 距離分布(最近傍平均0.32へ収縮)ではほぼ弁別せず過統合の懸念があるため、保守的に絞った。
+      const SIM_DISTANCE_THRESHOLD = 0.25;
       const clusters: typeof dontEntries[] = [];
       const assigned = new Set<string>();
       for (const entry of dontEntries) {

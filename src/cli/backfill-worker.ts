@@ -57,7 +57,7 @@ async function main() {
       }
       const entry = detail.entries[0];
       const textToEmbed = entry.title + " " + entry.content;
-      const embedding = await localEmbedding.embed(textToEmbed);
+      const embedding = await localEmbedding.embed(textToEmbed, "passage");
       storage.upsertVector(id, embedding);
       processed++;
       console.error(`[backfill] ${processed}/${batch.length} embedded: ${id}`);

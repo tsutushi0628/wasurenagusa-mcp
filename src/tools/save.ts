@@ -196,7 +196,7 @@ export async function handleMemorySave(
   if (embeddingAvailable) {
     const textToEmbed = params.title + " " + params.content;
     promises.push(
-      localEmbedding.embed(textToEmbed).catch((error) => {
+      localEmbedding.embed(textToEmbed, "passage").catch((error) => {
         console.error("[save] embedding生成失敗:", error);
         return null;
       })

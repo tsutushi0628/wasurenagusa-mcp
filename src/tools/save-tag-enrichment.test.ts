@@ -87,6 +87,18 @@ describe("save.ts tag enrichment integration", () => {
     expect(savedParams.tags).toEqual(["rate-limit:0.9", "API:0.3"]);
   });
 
+  it("保存経路は passage 用途で埋め込む（e5系の非対称プレフィックス: 文書側）", async () => {
+    mockEnrich.mockResolvedValueOnce({ tags: [], newThemes: [] });
+
+    await handleMemorySave(
+      { category: "config", title: "本番API URL", content: "本番APIは https://api.example.com" },
+      "/tmp/project",
+    );
+
+    expect(mockEmbed).toHaveBeenCalledTimes(1);
+    expect(mockEmbed).toHaveBeenCalledWith("本番API URL 本番APIは https://api.example.com", "passage");
+  });
+
   it("falls back to original tags on enrichment error", async () => {
     mockEnrich.mockRejectedValueOnce(new Error("Gemini API error"));
 

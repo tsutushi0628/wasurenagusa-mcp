@@ -117,4 +117,13 @@ describe("search.ts scoring integration", () => {
     expect(result.results).toHaveLength(1);
     expect(result.results[0].id).toBe("vector-only-hit");
   });
+
+  it("検索クエリは query 用途で埋め込む（e5系の非対称プレフィックス: クエリ側）", async () => {
+    mockStorageSearchHybrid.mockReturnValue({ results: [], totalCount: 0, hint: "" });
+    mockStorageSearchVectors.mockReturnValue([]);
+
+    await handleMemorySearch({ query: "本番APIのURLはどこ？" }, "/tmp/project");
+
+    expect(mockEmbed).toHaveBeenCalledWith("本番APIのURLはどこ？", "query");
+  });
 });
