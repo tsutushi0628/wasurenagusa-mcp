@@ -36,6 +36,100 @@ export interface VectorSearchResult {
 const WORLD_MODEL_MIN_ERROR = 0.5; // この予測誤差以上を「学ぶべき外れ」として surface
 const WORLD_MODEL_LIMIT = 3;        // surface する上限件数（dream の SEED_LIMIT=3 に倣う）
 
+// --- ハイブリッド検索: FTS5(trigram)トークナイズ + RRF関連度統合 ---
+//
+// 背景: memories_fts は tokenize='trigram' で構築されている（schema.ts）。
+// 実測（better-sqlite3 + sqlite-vec 直接検証）で確認した trigram トークナイザの性質:
+//   1. クエリ文字列も同じトークナイザでトークン化されるため、3文字未満の語句は
+//      内容側にその部分文字列が存在しても絶対にヒットしない（0個のtrigramしか
+//      生成できないため）。
+//   2. クエリ全体を1フレーズとして二重引用すると、内容側にその「全体」が完全に
+//      連続する部分文字列として存在しない限り0件になる。自然文クエリは保存済み
+//      タイトル・本文の表現と完全一致することがほぼ無いため、この既存実装
+//      （escapeFtsQuery が単一フレーズを返す）が検索空振りの主因だった。
+//
+// 対策: クエリを語（ひらがな連続・カタカナ連続・漢字連続・英数字連続）に分割し、
+// 各語を独立フレーズとして OR 結合する（recall優先）。3文字未満の語はトリグラム
+// では原理的にマッチしないため候補から除外し、除外の結果トークンが0個になった
+// 場合のみ従来のフレーズ化にフォールバックする。
+
+const MIN_FTS_TOKEN_LENGTH = 3; // trigramトークナイザは3文字未満の語を絶対にマッチさせない（実測済み）
+
+// ハイブリッド検索の候補プールサイズ。FTS5のrank順・ベクトルのdistance順それぞれ
+// 上位N件を取得し、その和集合をRRF統合の母集団にする（最終的な返却件数はparams.limit）。
+export const SEARCH_CANDIDATE_POOL = 50;
+
+// RRF (Reciprocal Rank Fusion) の減衰定数。値が大きいほど下位順位の寄与が緩やかに減る（一般的な既定値=60）。
+const RRF_K = 60;
+
+type FtsCharClass = "hiragana" | "katakana" | "kanji" | "alnum";
+
+function classifyFtsChar(ch: string): FtsCharClass | null {
+  if (/[\u3040-\u309f]/.test(ch)) return "hiragana";
+  if (/[\u30a0-\u30ff]/.test(ch)) return "katakana";
+  if (/[\u4e00-\u9fff\u3400-\u4dbf]/.test(ch)) return "kanji";
+  if (/[A-Za-z0-9]/.test(ch)) return "alnum";
+  return null;
+}
+
+// クエリをFTS5(trigram)向けの語に分割する。ひらがな連続・カタカナ連続・漢字連続・
+// 英数字連続をそれぞれ1語として拾い（extractTitleTokens系の考え方に倣うが、スクリプト
+// 境界で分割する点が異なる）、3文字未満（trigramでは絶対にマッチしない）の語は捨てる。
+export function tokenizeForFts(query: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let currentClass: FtsCharClass | null = null;
+
+  for (const ch of query) {
+    const cls = classifyFtsChar(ch);
+    if (cls === null) {
+      if (current) tokens.push(current);
+      current = "";
+      currentClass = null;
+      continue;
+    }
+    if (cls === currentClass) {
+      current += ch;
+    } else {
+      if (current) tokens.push(current);
+      current = ch;
+      currentClass = cls;
+    }
+  }
+  if (current) tokens.push(current);
+
+  return tokens.filter((t) => t.length >= MIN_FTS_TOKEN_LENGTH);
+}
+
+// FTS5 MATCH式を構築する。トークン分割してOR結合することで、自然文クエリでも
+// 「クエリ全体と完全一致する部分文字列が保存内容に無い限り0件」だった問題を解消する
+// （recall優先）。トークンが0個（記号のみ・短い語のみ等）の場合は従来通りクエリ
+// 全体を1フレーズとして扱う（空クエリ呼び出しはしない前提＝呼び出し元でガード済み）。
+export function escapeFtsQuery(query: string): string {
+  const escapeToken = (t: string): string => `"${t.replace(/"/g, '""')}"`;
+  const tokens = tokenizeForFts(query);
+
+  if (tokens.length === 0) {
+    return escapeToken(query);
+  }
+
+  return tokens.map(escapeToken).join(" OR ");
+}
+
+// 複数の順位付きIDリスト（各リストは関連度が高い順に並んでいる前提、0始まりindex）を
+// RRF (Reciprocal Rank Fusion) で統合する。片方のリストにしか出現しないIDは、出現した
+// リストの項のみ加算する（もう片方を満点扱いしたり0点扱いしたりしない）。
+export function computeRrfScores(rankedLists: string[][]): Map<string, number> {
+  const scores = new Map<string, number>();
+  for (const list of rankedLists) {
+    list.forEach((id, position) => {
+      const contribution = 1 / (RRF_K + position);
+      scores.set(id, (scores.get(id) ?? 0) + contribution);
+    });
+  }
+  return scores;
+}
+
 export class SQLiteStorage {
   private db: Database.Database;
   private vecLoaded = false;
@@ -274,7 +368,7 @@ export class SQLiteStorage {
         INNER JOIN memories_fts fts ON m.rowid = fts.rowid
         WHERE memories_fts MATCH ? AND m.deleted_at IS NULL
       `;
-      queryParams.push(this.escapeFtsQuery(params.query!));
+      queryParams.push(escapeFtsQuery(params.query!));
     } else if (usesLike) {
       const likePattern = `%${trimmedQuery}%`;
       query = `SELECT * FROM memories WHERE (title LIKE ? OR content LIKE ? OR tags LIKE ?) AND deleted_at IS NULL`;
@@ -299,8 +393,12 @@ export class SQLiteStorage {
       queryParams.push(params.scope);
     }
 
-    const orderColumn = usesFts ? "m.timestamp" : "timestamp";
-    query += ` ORDER BY ${orderColumn} DESC LIMIT ?`;
+    // FTS5経路は関連度（fts.rank昇順=最も一致する順）で並べる。timestamp単独順だと
+    // 「一致度に関わらず新しい順」になり、本当に関連性の高い結果が古いという理由だけで
+    // 候補から漏れる（LIMITで切り捨てられる）。LIKE/空クエリ経路には関連度シグナルが
+    // 無いため、従来通りtimestamp DESCを維持する。
+    const orderClause = usesFts ? "fts.rank" : "timestamp DESC";
+    query += ` ORDER BY ${orderClause} LIMIT ?`;
     queryParams.push(limit);
 
     const rows = this.db.prepare(query).all(...queryParams) as MemoryRow[];
@@ -351,13 +449,16 @@ export class SQLiteStorage {
   }
 
 
-  // --- ハイブリッド検索 (TASK-015) ---
+  // --- ハイブリッド検索 (TASK-015、関連度RRF統合) ---
 
   searchHybrid(params: SearchParams, queryEmbedding: number[]): SearchResult {
     const limit = params.limit ?? config.defaultSearchLimit;
 
-    // 1. FTS5キーワード検索（3文字未満はLIKEフォールバック）
-    const ftsIds = new Set<string>();
+    // 1. FTS5キーワード候補プール（3文字未満はLIKEフォールバック）。
+    //    いずれの経路も「関連度が高い順」に並べて取得する（FTSはrank昇順、
+    //    LIKEには関連度シグナルが無いのでtimestamp DESCで決定的に順序付ける）。
+    //    順位（0始まりindex）がそのままRRF統合時のpositionになる。
+    const ftsRankedIds: string[] = [];
     if (params.query && params.query.trim()) {
       const trimmedQ = params.query.trim();
       let ftsQuery: string;
@@ -369,7 +470,7 @@ export class SQLiteStorage {
           INNER JOIN memories_fts fts ON m.rowid = fts.rowid
           WHERE memories_fts MATCH ? AND m.deleted_at IS NULL
         `;
-        ftsParams.push(this.escapeFtsQuery(params.query));
+        ftsParams.push(escapeFtsQuery(trimmedQ));
 
         if (params.category && params.category !== "all") {
           ftsQuery += " AND m.category = ?";
@@ -383,6 +484,7 @@ export class SQLiteStorage {
           ftsQuery += " AND (m.scope IS NULL OR m.scope = 'general' OR m.scope = ?)";
           ftsParams.push(params.scope);
         }
+        ftsQuery += " ORDER BY fts.rank";
       } else {
         const likePattern = `%${trimmedQ}%`;
         ftsQuery = `SELECT id FROM memories WHERE (title LIKE ? OR content LIKE ? OR tags LIKE ?) AND deleted_at IS NULL`;
@@ -400,30 +502,32 @@ export class SQLiteStorage {
           ftsQuery += " AND (scope IS NULL OR scope = 'general' OR scope = ?)";
           ftsParams.push(params.scope);
         }
+        ftsQuery += " ORDER BY timestamp DESC";
       }
 
       ftsQuery += ` LIMIT ?`;
-      ftsParams.push(limit);
+      ftsParams.push(SEARCH_CANDIDATE_POOL);
 
       const ftsRows = this.db.prepare(ftsQuery).all(...ftsParams) as { id: string }[];
       for (const row of ftsRows) {
-        ftsIds.add(row.id);
+        ftsRankedIds.push(row.id);
       }
     }
 
-    // 2. ベクトルKNN検索
-    const vectorResults = this.searchVectors(queryEmbedding, 999, limit);
-    const vectorDistanceMap = new Map<string, number>();
-    for (const vr of vectorResults) {
-      vectorDistanceMap.set(vr.id, vr.distance);
-    }
+    // 2. ベクトルKNN候補プール（distance昇順=関連度降順で返る。既存のsearchVectorsをそのまま使う）
+    const vectorResults = this.searchVectors(queryEmbedding, 999, SEARCH_CANDIDATE_POOL);
+    const vectorRankedIds = vectorResults.map((r) => r.id);
 
-    // 3. IDをUNION
-    const allIds = new Set<string>([...ftsIds, ...vectorResults.map((r) => r.id)]);
+    // 3. RRF (Reciprocal Rank Fusion) で2つの順位リストをスコア付き統合する。
+    //    従来はIDをSetでUNIONして関連度情報を全て捨て、最後にtimestamp DESCで
+    //    並べ直していた（=関連度無視の時系列順）。ここでは順位情報を保持したまま
+    //    合成スコアを持たせ、そのスコア降順を最終順位にする。
+    const rrfScores = computeRrfScores([ftsRankedIds, vectorRankedIds]);
 
-    // 4. project/scopeフィルタ + エントリ取得
-    const entries: MemoryIndexEntry[] = [];
-    for (const id of allIds) {
+    // 4. project/scope/categoryフィルタ + エントリ取得（deleted_atは各候補プール取得時点で
+    //    ある程度除外済みだが、ベクトル側は対象外のためここで最終確認する）
+    const scoredEntries: Array<{ entry: MemoryIndexEntry; score: number; timestamp: string }> = [];
+    for (const [id, score] of rrfScores) {
       const row = this.db.prepare("SELECT * FROM memories WHERE id = ? AND deleted_at IS NULL").get(id) as MemoryRow | undefined;
       if (!row) continue;
 
@@ -437,24 +541,33 @@ export class SQLiteStorage {
         continue;
       }
 
-      entries.push({
-        id: row.id,
+      scoredEntries.push({
+        entry: {
+          id: row.id,
+          timestamp: row.timestamp,
+          category: row.category as MemoryCategory,
+          title: row.title,
+          tags: JSON.parse(row.tags),
+          project: row.project ?? undefined,
+          scope: row.scope ?? undefined,
+          intensity: row.intensity ?? undefined,
+        },
+        score,
         timestamp: row.timestamp,
-        category: row.category as MemoryCategory,
-        title: row.title,
-        tags: JSON.parse(row.tags),
-        project: row.project ?? undefined,
-        scope: row.scope ?? undefined,
-        intensity: row.intensity ?? undefined,
       });
     }
 
-    entries.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-    const limited = entries.slice(0, limit);
+    // 5. 関連度（RRFスコア）降順。同点の場合のみtimestamp DESCでタイブレークする。
+    scoredEntries.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+    });
+
+    const limited = scoredEntries.slice(0, limit).map((e) => e.entry);
 
     return {
       results: limited,
-      totalCount: entries.length,
+      totalCount: scoredEntries.length,
       hint: limited.length > 0
         ? "詳細が必要なエントリのIDを memory_get_detail に渡してください。"
         : "該当するメモリが見つかりませんでした。",
@@ -935,10 +1048,6 @@ export class SQLiteStorage {
       entry.predictionDelta = row.prediction_delta;
     }
     return entry;
-  }
-
-  private escapeFtsQuery(query: string): string {
-    return `"${query.replace(/"/g, '""')}"`;
   }
 
   private deduplicateConfigEntries(entries: MemoryEntry[]): MemoryEntry[] {
