@@ -19,6 +19,7 @@ import {
 import { config, getMemoryPath } from "../config.js";
 import { parseMarkdown } from "./parser.js";
 import { formatEntry, getFileHeader } from "./formatter.js";
+import { buildSearchHint } from "./search-hint.js";
 
 export class MarkdownStorage {
   private memoryPath: string;
@@ -160,9 +161,7 @@ export class MarkdownStorage {
     return {
       results: indexEntries,
       totalCount: filtered.length,
-      hint: indexEntries.length > 0
-        ? "詳細が必要なエントリのIDを memory_get_detail に渡してください。"
-        : "該当するメモリが見つかりませんでした。"
+      hint: buildSearchHint(indexEntries.length),
     };
   }
 

@@ -6,6 +6,7 @@ import { TIER_THRESHOLDS, shouldPromoteToCritical } from "../vector/memory-tier.
 import { SearchScorer } from "../vector/search-scorer.js";
 import { parseWeightedTags } from "../vector/weighted-tag.js";
 import { config, getMemoryPath } from "../config.js";
+import { buildSearchHint } from "../storage/search-hint.js";
 import { homedir } from "os";
 import { join, basename } from "path";
 import { logOperation, setLastSearch, generateSearchSessionId, generateJstTimestamp } from "../utils/operation-logger.js";
@@ -321,7 +322,7 @@ export async function handleMemorySearch(
   } = {
     results: result.results.map(slimEntry),
     totalCount: result.totalCount,
-    hint: result.hint,
+    hint: buildSearchHint(result.results.length),
   };
   if (result.angerHistory && result.angerHistory.length > 0) {
     slimResult.angerHistory = result.angerHistory.map(slimAngerEntry);

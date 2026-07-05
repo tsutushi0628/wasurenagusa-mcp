@@ -26,6 +26,7 @@ import { migrateV1ToV2, migrateV1ToV2_categoryAndKnowledgeGap, migrateV2ToV3, mi
 import { existsSync } from "fs";
 import { join } from "path";
 import { formatEntry } from "./formatter.js";
+import { buildSearchHint } from "./search-hint.js";
 
 export interface VectorSearchResult {
   id: string;
@@ -499,9 +500,7 @@ export class SQLiteStorage {
     return {
       results: indexEntries,
       totalCount: countRow.count,
-      hint: indexEntries.length > 0
-        ? "詳細が必要なエントリのIDを memory_get_detail に渡してください。"
-        : "該当するメモリが見つかりませんでした。",
+      hint: buildSearchHint(indexEntries.length),
     };
   }
 
@@ -625,9 +624,7 @@ export class SQLiteStorage {
     return {
       results: limited,
       totalCount: scoredEntries.length,
-      hint: limited.length > 0
-        ? "詳細が必要なエントリのIDを memory_get_detail に渡してください。"
-        : "該当するメモリが見つかりませんでした。",
+      hint: buildSearchHint(limited.length),
     };
   }
 
