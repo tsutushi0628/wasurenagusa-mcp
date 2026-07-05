@@ -67,14 +67,15 @@ export const config = {
 
   // ベクトル記憶層設定
   vectorStoreFile: "vectors.json",
-  embeddingModel: "gemini-embedding-001",
+  // 遠隔埋め込みモデル名の単一真実源は src/vector/embedding-service.ts の EMBEDDING_MODEL
+  // （旧 embeddingModel 設定はどこからも参照されない死設定だったため除去済み）
   embeddingDimensions: 768,
   backfillBatchSize: 20,
 
   // Storage Engine v2 設定
   sqliteFile: "memory.db",
-  // 多言語モデル（日本語の意味検索精度が英語専用モデルより大幅に高い。次元384は不変）
-  localEmbeddingModel: "Xenova/multilingual-e5-small",
+  // 埋め込みモデル名の単一真実源は src/vector/local-embedding.ts の DEFAULT_MODEL
+  // （旧 localEmbeddingModel 設定はどこからも参照されない死設定だったため除去済み）
   localEmbeddingDimensions: 384,
   modelsDir: "models",
   stashDefaultTtlHours: 24,
