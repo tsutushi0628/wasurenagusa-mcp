@@ -8,7 +8,7 @@ export type LLMProvider = "gemini" | "openai" | "anthropic";
 
 export type GenerateTextFn = (prompt: string) => Promise<string>;
 
-const DEFAULT_MODELS: Record<LLMProvider, string> = {
+export const DEFAULT_MODELS: Record<LLMProvider, string> = {
   gemini: "gemini-3.1-flash-lite",
   openai: "gpt-5-nano",
   anthropic: "claude-haiku-4-5-20251001",

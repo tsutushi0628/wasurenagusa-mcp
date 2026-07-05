@@ -19,9 +19,15 @@ vi.mock("../analyzer/prompt-loader.js", () => ({
   loadPrompt: vi.fn().mockResolvedValue("mock prompt {{title}} {{content}} {{existingTags}}"),
 }));
 
-import { TagEnricher } from "./tag-enricher.js";
+import { TagEnricher, TAG_MODEL } from "./tag-enricher.js";
+import { DEFAULT_MODELS } from "../llm/provider.js";
 
 describe("TagEnricher", () => {
+  it("TAG_MODEL is aligned with the repo-standard Gemini default (drift detection)", () => {
+    // provider.ts 側だけ世代更新されて tag-enricher が旧世代のまま取り残される
+    // ドリフトを検知する（実行時のimport結合はせず、定数一致だけを検証する）。
+    expect(TAG_MODEL).toBe(DEFAULT_MODELS.gemini);
+  });
   let enricher: TagEnricher;
 
   beforeEach(() => {

@@ -2,7 +2,10 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { WeightedTag } from "../types.js";
 import { loadPrompt } from "../analyzer/prompt-loader.js";
 
-const TAG_MODEL = "gemini-2.0-flash";
+// リポジトリ標準のGemini世代（src/llm/provider.ts の既定）に揃える。
+// 旧 gemini-2.0-flash は提供終了で404を返すことを実APIで確認済み（2026-07-05）。
+// provider側だけ世代更新されたときのドリフトは tag-enricher.test.ts の一致テストが検知する。
+export const TAG_MODEL = "gemini-3.1-flash-lite";
 
 export interface EnrichResult {
   tags: WeightedTag[];
