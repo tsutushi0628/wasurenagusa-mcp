@@ -41,6 +41,10 @@ titleには検索しやすい具体的な名詞を含めること。`,
         items: { type: "string" },
         description: "検索用タグ（オプション、最大5個）"
       },
+      project: {
+        type: "string",
+        description: "この記憶の実作業プロジェクト名（省略時は起動プロジェクト名。別プロジェクト作業中は必ずそのプロジェクト名を渡す）"
+      },
       scope: {
         type: "string",
         description: "スコープ（オプション）。推奨候補: frontend, backend, infra, design, spec, ai, general。自由入力も可"
@@ -145,12 +149,19 @@ export async function handleMemorySave(
     predictionError = computePredictionError(predictedFactors, actualFactors);
   }
 
+  let project: string;
+  if (typeof args.project === "string" && args.project.trim() !== "") {
+    project = args.project.trim();
+  } else {
+    project = basename(projectRoot);
+  }
+
   const params: SaveParams = {
     category: args.category as MemoryCategory,
     title: args.title as string,
     content: args.content as string,
     tags: normalizeTags(args.tags),
-    project: basename(projectRoot),
+    project,
     scope: args.scope as string | undefined,
     intensity,
     positiveAction,
