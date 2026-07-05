@@ -9,6 +9,13 @@
 // 対象DBは実データのコピーのみ（原本は一切書き換えない）。実行するたびに
 // 同じ結果になるよう、サンプリング・順序は完全に決定的な手順で行う。
 //
+// 前提: 対象コピーDBのベクトルは現行モデル（local-embedding.ts の DEFAULT_MODEL）で
+// 生成済みであること。旧モデルで生成したベクトルが残るDBでは、クエリ側と文書側の
+// 埋め込み空間が食い違い、測定結果が意味を持たない。
+//
+// 注意: クエリ埋め込みに query プレフィックスを付与する修正（2026-07-05）より前に
+// 採取したベースライン数値とは測定条件が異なるため、直接比較できない。
+//
 // 使い方:
 //   node scripts/eval/self-retrieval.mjs [dbPath]
 //   dbPath省略時は下記 DEFAULT_DB_PATH（実データのコピー専用ディレクトリ）を使う。
@@ -27,7 +34,8 @@ const DEFAULT_DB_PATH =
   "/private/tmp/claude-502/-Users-s-tsukamoto-projects-firebase-kit/05b4cbb4-7aba-4a66-aafc-90a8cb669941/scratchpad/search-eval/memory.db";
 
 // ローカル埋め込みモデルは新規ダウンロードせず、既に本プロジェクトにキャッシュ済みの
-// モデル（Xenova/all-MiniLM-L6-v2）を読み取り専用で再利用する（オフラインで再現可能にする）。
+// 現行モデル（local-embedding.ts の DEFAULT_MODEL）を読み取り専用で再利用する。e5系の
+// query/passage プレフィックスは embed() の用途引数が自動付与する（手動付与しない）。
 const MODELS_DIR = join(PROJECT_ROOT, ".wasurenagusa", "models");
 
 const SAMPLE_TARGET = 150; // 生存エントリから決定的に抽出するサンプル件数
@@ -81,7 +89,7 @@ async function main() {
   for (const entry of sample) {
     let resultIds;
     if (embeddingAvailable) {
-      const queryEmbedding = await localEmbedding.embed(entry.title);
+      const queryEmbedding = await localEmbedding.embed(entry.title, "query");
       const result = storage.searchHybrid({ query: entry.title, limit: PROBE_LIMIT }, queryEmbedding);
       resultIds = result.results.map((r) => r.id);
     } else {
