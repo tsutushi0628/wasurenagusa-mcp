@@ -58,15 +58,16 @@
     "LICENSE"
   ],
   "dependencies": {
+    "@anthropic-ai/tokenizer": "0.0.4",
     "@genkit-ai/anthropic": "^0.2.0",
     "@genkit-ai/compat-oai": "^1.29.0",
     "@genkit-ai/google-genai": "^1.29.0",
     "@google/generative-ai": "^0.24.1",
+    "@huggingface/transformers": "^4.0.1",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "better-sqlite3": "^12.8.0",
     "dotenv": "^16.4.0",
     "genkit": "^1.29.0",
-    "@huggingface/transformers": "^4.0.1",
     "sqlite-vec": "^0.1.9"
   },
   "devDependencies": {
