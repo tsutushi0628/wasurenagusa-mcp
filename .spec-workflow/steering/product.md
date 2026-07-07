@@ -85,6 +85,7 @@
 28. **Slack通知** - スケジューラサイクルサマリー（1サイクル1通に統合）/人間エスカレーション/リトライ上限到達/デイリーサマリーをSlack Webhook経由で通知（`SLACK_WEBHOOK_URL`環境変数で有効化、オプション）
 29. **記憶想起リマインド** - 【UserPromptSubmit Hook】記憶想起機能はプロジェクト側のhooksに移譲。wasurenagusa-context内の`handleUserPromptSubmit()`は空実装（何も出力しない）
 30. **Smart Tag Retrieval** - memory_save時にGemini APIで重み付きタグ（0.0〜1.0）を自動生成。検索時はfreshness（時間減衰）× tagWeightScore × accessBoostの複合スコアでランキング最適化。新テーマ検出時はバックグラウンドで過去エントリを非同期再タグ付け。データ削除は一切行わず、取り出し優先順位のみを最適化
+    - 既知事項: このタグ付けLLM呼び出しが提供終了モデル指定により404で失敗しfail-open（フォールバックで保存自体は継続）していた事象があった。モデル名更新（`gemini-3.1-flash-lite`）で止血済み（2026-07-05）
 
 ## Memory Categories
 
@@ -102,7 +103,7 @@
 
 | フィールド | 用途 | 取得方法 |
 |-----------|------|---------|
-| **project** | どのプロジェクトに紐づく知識か | cwdのディレクトリ名から自動取得 |
+| **project** | どのプロジェクトに紐づく知識か | memory_saveのproject引数で明示指定した場合はそれを優先。省略時のみcwdのディレクトリ名から自動取得（起動プロジェクトと実作業プロジェクトが異なる場合の誤帰属を防止） |
 | **scope** | 知識の領域分類 | Gemini分析で自動判定 or 手動指定 |
 
 ### scope候補

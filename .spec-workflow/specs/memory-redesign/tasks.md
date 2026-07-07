@@ -8,25 +8,29 @@
 - ゲートスクリプト、ゴールデンセット、ラベル付きペアは検証役（qa-engineer）が作成する。実装者は編集しない（R-M3）
 - 実装招聘は1エージェント15〜25タスク目安でフェーズ単位に分割する
 - design.md の non-goals（各フェーズ②）と禁止フォールバック一覧に反する変更は、発見次第差し戻す
+- 完了条件の標準形：全実装タスクは `npm run build` でdist再生成→`npx vitest run` 緑→`node scripts/verify/production-path-smoke.mjs` 全PASS を完了条件に含む（TypeScript修正はビルドしないと全起動経路に発効しない。push=発効ではない）
+- 実行標準：着手前にsteering3文書（product.md／structure.md／tech.md）と本spec該当節を読む。作業中に文書と実コードの食い違いを発見したら、推測で進めず作業を止めて乖離内容を報告する
+- 完了マークは `[x]`＋コミットハッシュ＋日付で記録し、1タスク=1コミットとする
 
 ## Phase 0：止血
 
 目的：出血源を止め、計測を最初に出荷し、全データを可逆にする。
 着手条件：作業ツリーがコミット済みHEADのクリーン状態であること（タスク0.0で成立させる。タスク0.0自身の着手条件はなし）。
 完了条件：ゲートG0の全項目PASSと出力貼付。
+注記：本フェーズ内の完了マーク済みタスクは、フェーズゲート運用開始前の先行実施であり、ゲート証跡（G0）は本タスクでは未整備。
 
-- [ ] 0.0 作業ツリーの清算と版数ベースライン確定
-  - File: 退避パッチはローカルデータ領域（${WASURENAGUSA_EVAL_DIR}/wip/ 等、Git外）、記録は Implementation Logs
-  - (a) 未コミットWIP（予測誤差ループ一式。追跡済み11ファイルの差分と、未追跡の予測誤差系4ファイル: docs/spec-prediction-error-loop.md、src/storage/prediction-error-loop.test.ts、src/vector/prediction-error.test.ts、src/vector/prediction-error.ts）を退避パッチとしてローカルデータ領域へ保存する
-  - (b) 作業ツリーをコミット済みHEADのクリーン状態へ復帰させ、未追跡の予測誤差系4ファイルも退避のうえ除去する。作業ツリーを戻す操作は破壊的なので、実行前にオーナー承認を得る（具体的なコマンド選定は実行者が承認時に提示する）。本Specディレクトリ（.spec-workflow/specs/memory-redesign/）は未追跡でも除去対象ではなく保持する
-  - (c) 版数ベースライン=v4（src/storage/schema.ts:3 の CURRENT_SCHEMA_VERSION=4、schema_version テーブルの MAX(version)=4）を確定し、Implementation Log に記録する
-  - 注記: 予測誤差ループはこのWIP破棄で除去され、Phase 4 の死機能削除の対象から外れる
-  - Purpose: 全file:line引用と版数連鎖（4→5→6→7）の基準を正史（HEAD）に固定する
-  - 完了条件: git status がクリーンで、ベースライン=v4の記録と退避パッチの所在が貼付されている
-  - 検証: git status 出力と schema_version 照会結果の貼付
-  - _Leverage: git（退避と復帰の手段は承認時に提示）_
+- [ ] 0.0 予測誤差ループの扱い判断と版数ベースライン確定
+  - File: 判断記録は Implementation Logs
+  - (a) 予測誤差ループ一式（docs/spec-prediction-error-loop.md、src/storage/prediction-error-loop.test.ts、src/vector/prediction-error.test.ts、src/vector/prediction-error.ts ほか関連差分）は退避すべき未コミットWIPではない。コミット8b915a5（オーナー裁定2026-07-03）で本体へ既に反映済みである。本タスクは「温存するか、物理削除を再計画するか」の判断のみを行う（確定はPdM承認）
+  - (b) 判断が「物理削除」の場合は本タスクでは実行せず、判断結果をPhase 4の死機能削除（タスク4.8）へ引き継ぐ旨を記録する。判断が「温存」の場合は、タスク4.8の削除対象から本ループを外す旨を記録する
+  - (c) 版数ベースライン=v5（src/storage/schema.ts:3 の CURRENT_SCHEMA_VERSION=5、schema_version テーブルの MAX(version)=5）を確定する。v5は予測誤差ループ由来の predicted_factors／actual_factors／prediction_error／prediction_delta カラム（migrateV4ToV5）で占有済みであり、Phase 1以降が新設する状態機械・帰属信頼度・埋め込みモデル列の移行先ではない
+  - (d) 本Specの移行版数連鎖は v5（ベースライン）→v6（Phase 1 土台列。タスク1.3〜1.4）→v7（Phase 3 lineage/principles。タスク3.1〜3.2）→v8（Phase 4 guards。タスク4.1）で確定（PdM裁定2026-07-05）
+  - Purpose: 全file:line引用と版数ベースラインの基準を正史（HEAD）に固定する
+  - 完了条件: 予測誤差ループの扱い判断が記録され、ベースライン=v5の記録が貼付されている
+  - 検証: schema_version 照会結果の貼付と判断記録
+  - _Leverage: git, schema_version テーブル_
   - _Requirements: R-A1, R-A3_
-  - _Prompt: Role: scm-engineer | Task: WIPを退避のうえ作業ツリーをHEADへ復帰させ版数ベースラインv4を記録する | Restrictions: オーナー承認前に破壊的操作をしない。退避パッチを削除しない。本Specディレクトリを除去しない | Success: クリーンな作業ツリーとv4記録が残る_
+  - _Prompt: Role: scm-engineer | Task: 予測誤差ループの扱いを判断記録し版数ベースラインv5を記録する | Restrictions: 判断確定前に物理削除を実行しない。既存コミットへのforce操作をしない | Success: 扱い判断とv5記録が残る_
 
 - [ ] 0.1 sqlite-vec APIの実在確認スパイク
   - File: scripts/spikes/spike-sqlite-vec.ts（新規）
@@ -98,7 +102,7 @@
   - _Requirements: R-A3_
   - _Prompt: Role: backend-engineer | Task: v1 Markdown統合系への書き込み経路をテスト先行で物理遮断する | Restrictions: アーカイブファイルを削除や移動しない。検索やスキーマに触れない | Success: セッション開始と保存でv1ファイルが不変_
 
-- [ ] 0.7 ガードパターン自動生成の停止
+- [x] 0.7 ガードパターン自動生成の停止（コミット c4a1635・2026-07-04）
   - File: src/consolidator/dont-consolidator.ts（変更）, 対応テスト
   - ①「統合を実行しても guardPattern が統合キャッシュへ永続化されない」を失敗するテストとして先に書く
   - ②生成経路の実体は「LLM統合出力の guardPattern フィールドが検証を経て統合キャッシュへ受け入れられる」箇所（src/consolidator/dont-consolidator.ts:51-60）である。ここを検証つき受け入れから無条件除去へ変更する
@@ -133,7 +137,7 @@
   - _Requirements: R-M1_
   - _Prompt: Role: backend-engineer | Task: 5指標の計数と警報をテスト先行で実装する | Restrictions: 計数失敗で本処理を落とさないが、失敗自体は計数する。既存ログ形式を壊さない | Success: 実経路から5指標が記録される_
 
-- [ ] 0.10 SessionStart注入の修復と注入バジェット強制の同時着地
+- [x] 0.10 SessionStart注入の修復と注入バジェット強制の同時着地（コミット 3a6b0e7・2026-07-03）
   - File: src/cli/context.ts（変更）, src/injection/budget.ts（新規）, 対応テスト
   - ①「シンボリックリンク経由の実行で注入本文が出力される」「注入は常にトークンバジェット以下」「サマリ欠落時に全文フォールバックせずスキップ計数される」を失敗するテストとして先に書く
   - ②CLIエントリ判定（src/cli/context.ts:709-713）を実体パス解決（realpath比較）へ修正する。判定不能は無言 exit 0 でなくエラー出力
@@ -176,6 +180,7 @@
 目的：状態機械、帰属、埋め込みモデル、並列耐性の土台を固める。
 着手条件：G0全項目PASSの出力本文が Implementation Logs に貼付済みであること。
 完了条件：ゲートG1の全項目PASSと出力貼付。
+注記：本フェーズ内の完了マーク済みタスクは、フェーズゲート運用開始前の先行実施であり、ゲート証跡（G1）は本タスクでは未整備。
 
 - [ ] 1.1 多言語埋め込みモデル候補の実在確認スパイク
   - File: scripts/spikes/spike-multilingual-embedding.ts（新規）
@@ -199,26 +204,27 @@
   - _Requirements: R-B1, R-M3_
   - _Prompt: Role: backend-engineer | Task: クエリ側トークナイズ変更だけの効果をスナップショットで再計測する | Restrictions: 本実装に進まない。出力にクエリ本文を載せない | Success: 主因寄与が数値で確定する_
 
-- [ ] 1.3 スキーマv5移行のテスト作成
-  - File: src/storage/migration-v5.test.ts（新規）
+- [ ] 1.3 スキーマv6移行のテスト作成
+  - File: src/storage/migration-v6.test.ts（新規）
+  - 版数注記: v5は予測誤差ループ（コミット8b915a5）で占有済みのため、本Specの土台列移行はv6となる（タスク0.0の版数ベースライン=v5参照）
   - 「state列とproject_confidence列とembedding_model列が追加される」「既存行のstateがdeleted_atから正しくバックフィルされる」「移行前にバックアップが走り、失敗時は移行が中止される」を失敗するテストとして先に書く
   - Purpose: R-A1とR-A2の移行要件をテストで固定する（Red）
   - 完了条件: 移行要件のテストが存在し、実装前は失敗する
   - 検証: テスト実行出力（Red確認）
   - _Leverage: src/storage/migration.test.ts の既存パターン_
   - _Requirements: R-A1, R-A2, R-A4_
-  - _Prompt: Role: backend-engineer | Task: v5移行の業務要件をテストで先に固定する | Restrictions: 実装を書かない | Success: 要件どおりの失敗テストが揃う_
+  - _Prompt: Role: backend-engineer | Task: v6移行の業務要件をテストで先に固定する | Restrictions: 実装を書かない | Success: 要件どおりの失敗テストが揃う_
 
-- [ ] 1.4 スキーマv5移行の実装
+- [ ] 1.4 スキーマv6移行の実装
   - File: src/storage/migration.ts（変更）, src/storage/sqlite.ts（変更）, src/storage/schema.ts（変更）
-  - design.md Phase 1 ①の手順どおり、版数 4→5 の移行を migrateV4ToV5 として src/storage/migration.ts へ追加し、src/storage/sqlite.ts:44-72 の移行ディスパッチへ配線する。CURRENT_SCHEMA_VERSION（src/storage/schema.ts:3）を5へ更新する
+  - design.md Phase 1 ①の手順（列定義）どおり、版数 5→6 の移行を migrateV5ToV6 として src/storage/migration.ts へ追加し、src/storage/sqlite.ts:44-72 の移行ディスパッチへ配線する。CURRENT_SCHEMA_VERSION（src/storage/schema.ts:3）を6へ更新する
   - タスク1.3のテストを緑にし、リファクタする
   - Purpose: 状態機械と帰属信頼度とモデル版数の土台列を入れる
-  - 完了条件: 実スナップショットで移行が成功し schema_version テーブルの MAX(version)=5 になる
+  - 完了条件: 実スナップショットで移行が成功し schema_version テーブルの MAX(version)=6 になる
   - 検証: テスト緑と、スナップショットでの移行実行出力
   - _Leverage: src/storage/migration.ts の migrateVXToVY 関数群, src/storage/sqlite.ts:44-72 の移行ディスパッチ, scripts/backup-store.ts_
   - _Requirements: R-A2, R-A4, R-B5_
-  - _Prompt: Role: backend-engineer | Task: v5移行を既存機構に追記しテストを緑にする | Restrictions: 既存列の削除や改名をしない。新規移行フレームワークを作らない | Success: 移行後の全件でstateとdeleted_atが同期_
+  - _Prompt: Role: backend-engineer | Task: v6移行を既存機構に追記しテストを緑にする | Restrictions: 既存列の削除や改名をしない。新規移行フレームワークを作らない | Success: 移行後の全件でstateとdeleted_atが同期_
 
 - [ ] 1.5 読み経路への状態可視性の適用
   - File: src/storage/sqlite.ts（変更）, src/tools/getDetail.ts（変更）, 対応テスト
@@ -231,7 +237,8 @@
   - _Requirements: R-A2_
   - _Prompt: Role: backend-engineer | Task: 可視性マトリクスをテスト先行で全読み経路へ適用する | Restrictions: ランキング変更に踏み込まない（Phase 2対象） | Success: deletedがどの経路からも返らない_
 
-- [ ] 1.6 backfillの蘇生禁止と削除済みベクトル751件の一括掃除
+- [x] 1.6 backfillの蘇生禁止と削除済みベクトル751件の一括掃除（コミット 56cb443・2026-07-04）
+  - 実装注記: 実体は scripts/maintenance/purge-tombstones.mjs。掃除対象は tombstone（論理削除済み）行に対応する vectors／vector_metadata 行に加え、tombstone化した memories 行自体も物理削除する（本タスク原文の「memories本体の行を消さない」制約とは異なる実装。dry-run既定・--applyで実削除）
   - File: src/storage/sqlite.ts（変更）, scripts/cleanup-orphan-vectors.ts（新規）, 対応テスト
   - ①「backfill対象の抽出が active に限定される」「掃除後に deleted 対応のベクトル行が0件」を失敗するテストとして先に書く
   - ②getEntriesWithoutEmbedding（src/storage/sqlite.ts:535-543）へ状態フィルタを追加する
@@ -254,7 +261,7 @@
   - _Requirements: R-A2, R-M3_
   - _Prompt: Role: qa-engineer | Task: 状態機械の不変条件をfast-checkでプロパティテスト化する | Restrictions: 実装コードを修正しない。違反発見時は再現最小ケースを添えて差し戻す | Success: 生成ケースで不変条件が全件成立_
 
-- [ ] 1.8 埋め込みモデルの日本語実測評価と差替え判断
+- [x] 1.8 埋め込みモデルの日本語実測評価と差替え判断（コミット a9cb7ab・2026-07-04）
   - File: scripts/evaluate-embedding-models.ts（新規）
   - 現行モデルと候補モデルで、実スナップショット由来の日本語ペア（類似ペアと非類似ペア）の分離度を実測する
   - 差替えるか据え置くかの判断と根拠を1行で記録する（判断はPdM承認）
@@ -265,7 +272,8 @@
   - _Requirements: R-B5_
   - _Prompt: Role: backend-engineer | Task: 現行と候補モデルの日本語分離度を実測し判断材料を作る | Restrictions: 出力に記憶本文を載せない。判断の確定はPdMに委ねる | Success: モデル選定が実測数値で裏づけられる_
 
-- [ ] 1.9 新ベクトル表と全件再埋め込み（混在禁止アサート込み）
+- [x] 1.9 新ベクトル表と全件再埋め込み（混在禁止アサート込み）（コミット a9cb7ab・2026-07-04）
+  - 実装注記: 新旧モデルが同一次元（384）だったため、別名の新ベクトル表・embedding_model列によるバージョン管理・起動時の混在拒否アサートは実装されていない。既存の vectors 表を使い回した直接差し替え＋全件再埋め込み（scripts/maintenance/reembed-all.mjs）で完了した
   - File: src/vector/local-embedding.ts（変更）, src/storage/schema.ts（変更）, scripts/reembed-all.ts（新規）, 対応テスト
   - 対象の特定: 検索用の再埋め込み対象はローカル埋め込み（src/vector/local-embedding.ts、384次元）。src/vector/embedding-service.ts はGemini経由のクラウド埋め込み（768次元、別用途）であり、その再埋め込みは本タスクのnon-goal（触らない）
   - ①「再埋め込み完了前は新モデル検索が起動時アサートで拒否される」「完了後の embedding_model が単一値」「正規化されていないベクトルの保存が拒否される」を失敗するテストとして先に書く
@@ -279,27 +287,28 @@
   - _Requirements: R-B5_
   - _Prompt: Role: backend-engineer | Task: 版数管理つき再埋め込みをテスト先行で実装する | Restrictions: 旧表を削除しない。完了ゲート前に新モデル検索を有効化しない | Success: 混在状態が起動時に検出され拒否される_
 
-- [ ] 1.10 保存時project刻印の修正
-  - File: src/tools/save.ts（変更）, src/index.ts（変更）, 対応テスト
-  - ①「保存時のprojectが呼び出し文脈由来で刻印される」「特定できない場合は unknown が明示刻印される」を失敗するテストとして先に書く
-  - ②サーバ起動cwd固定の刻印（src/tools/save.ts:127、PROJECT_ROOT固定は src/index.ts:45）を、ツール引数とフック呼び出し元cwdの優先順で解決する実装へ変える
+- [ ] 1.10 保存時project刻印の修正（残: project省略時のunknown明示化）
+  - File: src/tools/save.ts（変更）, 対応テスト
+  - 完了済み: project任意引数の追加（コミット 2911955・2026-07-05）。呼び出し側が project を明示すればその値が刻印される
+  - 残作業: ①「project省略時の保存で project 列が unknown 明示刻印される」「省略時に標準エラー警告が出る」を失敗するテストとして先に書く ②project省略時の暗黙cwdフォールバック（src/tools/save.ts:152-156 の basename(projectRoot) 代入）を、unknown明示刻印＋標準エラー警告へ置換する（design.md 禁止フォールバック#5に整合）
   - Purpose: 全件が単一project刻印になる構造（症状①の一因）の根治
-  - 完了条件: 保存経路で暗黙の固定刻印が発生しない
-  - 検証: テスト緑（複数呼び出し文脈のケースを含む）
-  - _Leverage: 既存の save系テスト_
+  - 完了条件: project省略保存でproject列が unknown になること・既存テストと本番経路スモークが緑のこと
+  - 検証: テスト緑（project省略ケースを含む）と production-path-smoke の結果
+  - _Leverage: 既存の save系テスト, src/tools/save-project-attribution.test.ts_
   - _Requirements: R-A4_
-  - _Prompt: Role: backend-engineer | Task: project刻印を呼び出し文脈由来へテスト先行で修正する | Restrictions: 特定不能時に推測で埋めない（unknownを明示する） | Success: 文脈ごとに正しい刻印がつく_
+  - _Prompt: Role: backend-engineer | Task: project省略時の暗黙フォールバックをテスト先行でunknown明示化する | Restrictions: 特定不能時に推測で埋めない（unknownを明示する） | Success: 省略時に必ずunknownが刻印される_
 
-- [ ] 1.11 projectの決定論バックフィルとフィルタ無効化の解除条件
-  - File: scripts/backfill-project.ts（新規）, src/storage/sqlite.ts（変更）, 対応テスト
-  - ①「決定論的手掛かり（保存時の文脈記録、タグ、本文中のリポジトリ相対パス）で confirmed / inferred を付与し、それ以外は unknown のまま」「unknown は既定で検索対象」「バックフィル完了フラグが立つまで projectフィルタは無効」を失敗するテストとして先に書く
-  - ②バックフィルスクリプトを実装する。LLMによる一括再分類はしない
+- [ ] 1.11 projectの決定論バックフィル（残: strictティア158件の承認結果反映）
+  - File: scripts/maintenance/backfill-project-attribution.mjs（実装済み）
+  - 実装済み: 決定論的手掛かり（title/tagsに既知プロジェクト名がちょうど1個出現し、起動プロジェクト名と共起しない）のみで判定するprecision優先方式。--tier 3段（recommended/strict/loose）でdry-run既定、--applyで実更新。LLMによる一括再分類はしない
+  - recommendedティアは適用済み（1,498件を再帰属）。strictティア該当158件はオーナー承認待ち（2026-07-05判断）。残り約7,875件は現状維持で確定
+  - 残作業: strictティア158件のオーナー承認結果を得て、承認分のみ --apply で反映する
   - Purpose: 誤帰属の沈黙欠損を避けつつ帰属を回復する（R-A4）
-  - 完了条件: 全件に信頼度が付与され、フィルタ有効化条件がコードで表現されている
-  - 検証: テスト緑と、ゲートG1の project-confidence 項目
-  - _Leverage: src/storage/sqlite.ts:412-414 の既存フィルタ_
+  - 完了条件: strictティア158件の去就（適用／見送り）が承認結果どおりに確定している
+  - 検証: 実行出力（件数のみ）の記録
+  - _Leverage: scripts/maintenance/backfill-project-attribution.mjs_
   - _Requirements: R-A4_
-  - _Prompt: Role: data-investigator | Task: 決定論手掛かりのみでprojectバックフィルを実装する | Restrictions: LLM分類を使わない。確信のない行を推測で埋めない | Success: 信頼度分布が出力され、unknownが検索から消えない_
+  - _Prompt: Role: data-investigator | Task: strictティア158件のオーナー承認結果を反映する | Restrictions: LLM分類を使わない。承認外の行に手を加えない | Success: 158件の去就が承認どおりに確定する_
 
 - [ ] 1.12 書き込み失敗計数の導入とWAL設定の確認固定
   - File: src/storage/sqlite.ts（変更）, 対応テスト
@@ -350,6 +359,7 @@
 目的：段階フォールバックとRRFと時間減衰で検索を再建し、実測比較後に切り替える。
 着手条件：G1全項目PASSの出力本文が Implementation Logs に貼付済みであること。
 完了条件：ゲートG2の全項目PASSと出力貼付。
+注記：本フェーズ内の完了マーク済みタスクは、フェーズゲート運用開始前の先行実施であり、ゲート証跡（G2）は本タスクでは未整備。
 
 - [ ] 2.1 ゴールデンセットの採取と凍結（検証役）
   - File: ローカルデータ領域 ${WASURENAGUSA_EVAL_DIR}/golden-queries.jsonl（Git外）
@@ -385,7 +395,8 @@
   - _Requirements: R-B6, R-M3_
   - _Prompt: Role: qa-engineer | Task: ゴールデン評価スクリプトを作成し現行成績を出す | Restrictions: 実装者のコードを修正しない。本文を出力しない | Success: recallと正しくゼロ件の成績が数値で出る_
 
-- [ ] 2.4 段階フォールバッククエリビルダ
+- [x] 2.4 段階フォールバッククエリビルダ（コミット 89e5813・2026-07-04）
+  - 実装注記: 実体は独立モジュールではなく src/storage/sqlite.ts への直接実装（2.5・2.6と同一コミット）
   - File: src/search/query-builder.ts, src/search/query-builder.test.ts（新規）
   - ①「フレーズ→AND→OR の順で試行し、最初にヒットした段を採用する」「各段の発火が計数される」「2文字以下の語の扱いがスパイク確認どおり」を失敗するテストとして先に書く
   - ②タスク0.2で確認済みの構文のみでビルダを実装する
@@ -396,7 +407,8 @@
   - _Requirements: R-B1_
   - _Prompt: Role: backend-engineer | Task: 段階フォールバッククエリビルダをテスト先行で実装する | Restrictions: スパイク未確認の構文を使わない。順位付けに踏み込まない | Success: 各段の発火が観測できる_
 
-- [ ] 2.5 候補プール拡大とRRF統合
+- [x] 2.5 候補プール拡大とRRF統合（コミット 89e5813・2026-07-04）
+  - 実装注記: 実体は独立モジュールではなく src/storage/sqlite.ts への直接実装（2.4・2.6と同一コミット）
   - File: src/search/rrf.ts, src/search/rrf.test.ts（新規）, src/storage/sqlite.ts（変更）
   - ①「FTSとベクトルの候補プールが各20件」「RRFが経路ごとの順位のみを使う」「欠損経路のスコアが捏造されない（禁止フォールバック#2）」を失敗するテストとして先に書く
   - ②LIMIT 5 の候補取得（src/storage/sqlite.ts:405-406、:415）を拡大し、RRF統合を実装する
@@ -407,7 +419,8 @@
   - _Requirements: R-B1_
   - _Prompt: Role: backend-engineer | Task: 候補プール拡大とRRFをテスト先行で実装する | Restrictions: 欠損経路に既定スコアを与えない | Success: 両経路の順位が統合結果に反映される_
 
-- [ ] 2.6 時間減衰ランキング
+- [x] 2.6 時間減衰ランキング（コミット 89e5813・2026-07-04）
+  - 実装注記: 実体は独立モジュールではなく src/storage/sqlite.ts への直接実装（2.4・2.5と同一コミット）。タスク2.7〜2.9が前提とする新旧並走モジュール構成（src/search/配下の別実装とshadow.ts）は存在せず、本番コードを直接置換した
   - File: src/search/time-decay.ts, src/search/time-decay.test.ts（新規）
   - ①「最終順位が rrfScore × 半減期減衰 で決まる」「時系列単独の並びが存在しない」を失敗するテストとして先に書く
   - ②半減期は設定値（既定90日）とし、timestamp DESC の最終並び（src/storage/sqlite.ts:452-453）を置き換える
@@ -420,48 +433,52 @@
 
 - [ ] 2.7 読み経路の書き込み副作用の廃止
   - File: src/tools/search.ts（変更）, 対応テスト
+  - 前提注記: 新検索は89e5813で本番実装（src/storage/sqlite.ts）へ直接置換済みで、新旧並走のモジュール構成（src/search/配下の別実装）は存在しない。効果確認は2.1〜2.3の評価体系（ゴールデンセット＋凍結スナップショット＋評価スクリプト）と本番経路スモークで行う
   - ①「検索実行後にいかなるエントリの intensity も timestamp も変わらない」を失敗するテストとして先に書く
   - ②検索中の破壊的自動昇格（src/tools/search.ts:125-152）を除去し、利用実績の反映は既存の検索スコア加点に一本化する
   - ③search.ts に try/finally を入れてDBハンドルのリークも同時に塞ぐ（同一関数の根治範囲）
   - Purpose: 読み取りの無副作用（不変条件I3）。時間減衰順位の汚染防止
   - 完了条件: 読み経路に書き込みが存在しない
-  - 検証: テスト緑と、PT-01の再実行
+  - 検証: テスト緑と、PT-01の再実行と、本番経路スモーク
   - _Leverage: src/vector/search-scorer.ts_
   - _Requirements: R-B2, R-A2_
   - _Prompt: Role: backend-engineer | Task: 検索の書き込み副作用をテスト先行で廃止する | Restrictions: スコア加点ロジック自体は変えない | Success: 検索前後でDB内容が不変_
 
 - [ ] 2.8 自己検索性プロパティテスト PT-04 の作成と修正ループ（検証役と実装者）
   - File: tests/properties/self-search.property.test.ts（新規）
+  - 前提注記: 検査対象は本番検索実装（src/storage/sqlite.ts。89e5813で直接置換済み）。並走用の別実装は存在しない
   - 検証役が「全生存エントリは自身の本文をクエリにすると上位10件に入る」を実スナップショット全件で検査するテストを書く
   - 失敗が出た場合、実装者が原因を分類して修正し、再実行する（失敗の出力は件数と分類のみ）
   - Purpose: 「保存した記憶はその内容自身で必ず見つかる」の全件保証（R-B3）
   - 完了条件: 全件で自己検索性が成立する
   - 検証: PT-04の実行出力（達成率100%）
-  - _Leverage: src/search/ 一式, スナップショット_
+  - _Leverage: src/storage/sqlite.ts の検索実装, scripts/eval/self-retrieval.mjs, スナップショット_
   - _Requirements: R-B3, R-M3_
   - _Prompt: Role: qa-engineer | Task: 自己検索性を全件プロパティテスト化する | Restrictions: 実装都合で基準を緩めない。本文を出力しない | Success: 達成率100%が出力で確認できる_
 
-- [ ] 2.9 新旧シャドー並走と実測比較レポート
-  - File: src/search/shadow.ts（新規）, レポートはローカルデータ領域
-  - 本番応答は旧検索が返し続け、新検索は同一クエリをログのみで並走させる
-  - 並走期間の比較（ゼロヒット率、ヒット順位、レイテンシ）をレポート化する
-  - Purpose: fixture合格だけで切り替えない（R-B6-5）
-  - 完了条件: 比較レポートが存在し、新系が主要指標で旧系以上である
-  - 検証: レポート本文（数値のみ）の貼付
-  - _Leverage: src/observability/counters.ts_
+- [ ] 2.9 検索再建の実測評価（シャドー並走の代替）
+  - File: レポートはローカルデータ領域
+  - 再定義注記: 新検索は89e5813で本番へ直接置換済みのため、旧検索を本番に残したままのシャドー並走は成立しない。切替妥当性の事後確認へ目的を変更する
+  - 2.1〜2.3の評価体系（ゴールデンセット＋凍結スナップショット＋評価スクリプト）で現行検索の成績（recall@k、正しくゼロ件、ゼロヒット率）を測る。切替前成績は旧検索実装（89e5813の親コミットのビルド）を同一の凍結スナップショットとゴールデンセットに対して実行して取得し、前後対比レポートを作る
+  - 併せて本番経路スモーク（scripts/verify/production-path-smoke.mjs）で実起動経路の動作を確認する
+  - 主要指標に退行があれば、89e5813系コミットのrevertによる切り戻しをPdMへ提案する
+  - Purpose: fixture合格だけで切替済みとしない（R-B6-5の趣旨を事後評価で担保）
+  - 完了条件: 前後対比レポートが存在し、現行系が主要指標で切替前以上である（またはrevert提案が出ている）
+  - 検証: レポート本文（数値のみ）の貼付とスモーク結果
+  - _Leverage: scripts/gates/eval-golden.ts, scripts/verify/production-path-smoke.mjs, src/observability/counters.ts_
   - _Requirements: R-B6_
-  - _Prompt: Role: backend-engineer | Task: シャドー並走を実装し比較レポートを作る | Restrictions: 並走中に新系を本番応答へ出さない | Success: 新旧比較が実流量の数値で残る_
+  - _Prompt: Role: qa-engineer | Task: ゴールデン評価と本番経路スモークで切替前後の対比レポートを作る | Restrictions: 結論を先に決めて測らない。退行を隠さない | Success: 前後対比が同一物差しの数値で残る_
 
-- [ ] 2.10 カットオーバー切替
-  - File: src/tools/search.ts（変更）
-  - 参照切替の単一コミットで新検索を本番応答にする。ロールバックはこのコミットの revert
-  - hint出力に発火したフォールバック段とヒット状況を含める
-  - Purpose: 可逆な切替（design.md Phase 2 ④）
-  - 完了条件: 新検索が本番応答になり、切替コミットが単独で特定できる
-  - 検証: 切替後の実検索でのhint確認と、カウンタのゼロヒット率
-  - _Leverage: src/search/ 一式_
+- [ ] 2.10 検索hintへのフォールバック段ラベル追加
+  - File: src/storage/search-hint.ts（変更）, src/tools/search.ts（変更）, 対応テスト
+  - 済み: ヒント文言の一元化とマージ後件数からの再導出（src/storage/search-hint.ts、コミット 626f8d1）
+  - 残作業: hint出力に発火したフォールバック段（フレーズ／AND／OR）のラベルを追加する
+  - Purpose: ヒットの経路可視化
+  - 完了条件: hintにフォールバック段ラベルが含まれる
+  - 検証: テスト緑と、実検索でのhint確認
+  - _Leverage: src/storage/search-hint.ts_
   - _Requirements: R-B1, R-B6_
-  - _Prompt: Role: backend-engineer | Task: 新検索への参照切替を単一コミットで行う | Restrictions: 切替に無関係の変更を混ぜない | Success: revert一発で旧検索に戻せる_
+  - _Prompt: Role: backend-engineer | Task: hintへフォールバック段ラベルを追加する | Restrictions: 既存のヒント文言・件数再導出ロジックを変えない | Success: hintに発火段が見える_
 
 - [ ] 2.11 ゲートG2スクリプトの作成（検証役）
   - File: scripts/gates/g2-search.ts（新規）
@@ -489,25 +506,25 @@
 着手条件：G2全項目PASSの出力本文が Implementation Logs に貼付済みであること。
 完了条件：ゲートG3の全項目PASSと出力貼付。
 
-- [ ] 3.1 スキーマv6移行のテスト作成
-  - File: src/storage/migration-v6.test.ts（新規）
+- [ ] 3.1 スキーマv7移行のテスト作成
+  - File: src/storage/migration-v7.test.ts（新規）
   - 「lineage と principles テーブルが design.md の定義どおり作られる」「必須列欠落の行が拒否される」「移行前バックアップが走る」を失敗するテストとして先に書く
   - Purpose: 系譜と昇格の土台要件を固定する（Red）
   - 完了条件: 移行要件のテストが存在し、実装前は失敗する
   - 検証: テスト実行出力（Red確認）
-  - _Leverage: src/storage/migration-v5.test.ts_
+  - _Leverage: src/storage/migration-v6.test.ts_
   - _Requirements: R-A6, R-A7_
-  - _Prompt: Role: backend-engineer | Task: v6移行の要件をテストで先に固定する | Restrictions: 実装を書かない | Success: 要件どおりの失敗テストが揃う_
+  - _Prompt: Role: backend-engineer | Task: v7移行の要件をテストで先に固定する | Restrictions: 実装を書かない | Success: 要件どおりの失敗テストが揃う_
 
-- [ ] 3.2 スキーマv6移行の実装
+- [ ] 3.2 スキーマv7移行の実装
   - File: src/storage/schema.ts（変更）, src/storage/migration.ts（変更）
-  - design.md Phase 3 ①の手順どおり、schema_version テーブルの MAX(version) を 5→6 にする移行を migrateV5ToV6 として実装し、タスク3.1を緑にする
+  - design.md Phase 3 ①の手順（テーブル定義）どおり、schema_version テーブルの MAX(version) を 6→7 にする移行を migrateV6ToV7 として実装し、タスク3.1を緑にする
   - Purpose: 追記型統合と人間ゲートのデータ土台
-  - 完了条件: スナップショットで移行が成功し schema_version テーブルの MAX(version)=6 になる
+  - 完了条件: スナップショットで移行が成功し schema_version テーブルの MAX(version)=7 になる
   - 検証: テスト緑と移行実行出力
   - _Leverage: src/storage/migration.ts の migrateVXToVY 関数群, src/storage/sqlite.ts:44-72 の移行ディスパッチ_
   - _Requirements: R-A6, R-A7_
-  - _Prompt: Role: backend-engineer | Task: v6移行を実装しテストを緑にする | Restrictions: 既存テーブルの列を変更しない | Success: 新テーブル2つが制約つきで存在する_
+  - _Prompt: Role: backend-engineer | Task: v7移行を実装しテストを緑にする | Restrictions: 既存テーブルの列を変更しない | Success: 新テーブル2つが制約つきで存在する_
 
 - [ ] 3.3 距離尺度の型封じ
   - File: src/vector/distance-types.ts, src/vector/distance-types.test.ts（新規）, src/vector/cosine-distance.ts（変更）
@@ -629,18 +646,34 @@
   - _Requirements: R-A6, R-B7_
   - _Prompt: Role: data-investigator | Task: 統合台帳を追記型マージへ少量バッチで流す | Restrictions: 削除区分に触れない。原本を壊さない | Success: 処理とスキップの内訳が数値で残る_
 
-- [ ] 3.14 アーカイブ4,567件のサルベージ判定と取り込み
+- [ ] 3.14 アーカイブ4,567件の選別投入とコールドストレージ確定
   - File: scripts/salvage-archive.ts（新規）, 対応テスト
-  - ①「アーカイブ由来のエントリが archived 状態で取り込まれ、採用判定されたものだけ active になる」「取り込みが評価スナップショットへ影響しない」を失敗するテストとして先に書く
-  - ②キュレーションLLM判定（意味判断のみ、ガード経由）と人間サンプル確認を経て取り込む。コールド保管と判定されたものは索引のみ張る
+  - 実態（2026-07-05実測）: 実体は各プロジェクト .wasurenagusa/ 直下の dont-archive.md／decisions-archive.md（v1形式Markdown・計4,567件・全件DB不在）。active記憶とのタイトル重複は0.6%
+  - 処置方針: dont系3,225件のみ統合パイプラインへの選別投入対象とする。decisions系1,342件はコールドストレージ確定（検索編入しない・削除もしない）
+  - ①「アーカイブ形式（見出し＋idメタ）が構造化パースされる」「重複判定がタイトル正規化一致→埋め込み近接の2段で行われる」を失敗するテストとして先に書く
+  - ②5段の手順で実装する: (i) アーカイブ形式パーサ (ii) active記憶と統合済み原則に対する重複判定（2段） (iii) 投入候補台帳の生成（件数レポート・dry-run既定） (iv) オーナー承認 (v) --applyで統合入力へ投入し実行ログを記録。decisions系1,342件は(iii)以降の投入対象に含めない
   - Purpose: 到達不能な死蔵領域（症状⑦）の去就確定（R-B7）
-  - 完了条件: 4,567件全件に判定が付き、採用分がDBに入っている
-  - 検証: テスト緑と、ゲートG3の salvage-report 項目
-  - _Leverage: src/consolidator/output-guard.ts, src/storage/markdown.ts のパーサ_
+  - 完了条件: dont系3,225件が台帳生成→承認→投入まで完了し、decisions系1,342件がコールドストレージとして確定記録されている
+  - 検証: テスト緑と、台帳の件数レポート・実行ログ
+  - _Leverage: src/consolidator/output-guard.ts_
   - _Requirements: R-B7_
-  - _Prompt: Role: data-investigator | Task: アーカイブのサルベージ判定と取り込みをテスト先行で実装する | Restrictions: アーカイブ原本ファイルを削除しない。評価コーパスに混ぜない | Success: 全件の判定内訳が数値で残る_
+  - _Prompt: Role: data-investigator | Task: アーカイブ形式パーサと重複判定をテスト先行で実装し、承認後にdont系のみ選別投入する | Restrictions: アーカイブ原本ファイルを削除しない。decisions系をコールドストレージから検索編入しない | Success: dont系の投入内訳とdecisions系のコールド確定が記録に残る_
 
-- [ ] 3.15 ゲートG3スクリプトの作成（検証役）
+- [ ] 3.15 保存経路タグ付けのGenkit統合と失敗の可観測化
+  - File: src/vector/tag-enricher.ts（変更）, src/vector/embedding-service.ts（変更）, src/llm/provider.ts（変更）, 対応テスト
+  - 前提: モデル名の1行止血（tag-enricher.ts の使用モデルを gemini-3.1-flash-lite化）は2026-07-05実施済み
+  - ①「タグ拡張呼び出しが src/llm/provider.ts のGenkit経路（createGenerateTextFn）経由になる」「呼び出し失敗がthrowせず警告計数される」を失敗するテストとして先に書く
+  - ②tag-enricher.ts の旧SDK（@google/generative-ai）直叩きを src/llm/provider.ts の createGenerateTextFn 経由へ差し替える。embedding-service.ts の旧SDK直叩きも同様に、provider.ts 側へGenkitの埋め込み呼び出しを新設した上でそちら経由へ差し替える
+  - ③両モジュールの失敗時catch（現状は代替値を返して正常系に偽装）に警告計数を追加する（throwにしないwarning設計。既存のfallback自体は残す）
+  - ④遠隔埋め込み経路（embedding-service）の同型根治: 旧SDK直叩き・モデル名リテラル・taskTypeが常時RETRIEVAL_DOCUMENTでクエリ/文書の非対称が欠落している点、および残る死設定（embeddingDimensions等）の生死判定
+  - Purpose: 旧SDK直叩きの重複実装解消と、沈黙していた呼び出し失敗の可観測化（llm-design原則）
+  - 完了条件: 2箇所ともGenkit経路経由になり、失敗が計数で可視化される
+  - 検証: テスト緑（呼び出し失敗ケースを含む）
+  - _Leverage: src/llm/provider.ts, src/observability/counters.ts_
+  - _Requirements: R-M3_
+  - _Prompt: Role: backend-engineer | Task: タグ拡張と埋め込みのLLM呼び出しをGenkit経路へ統合し失敗をテスト先行で警告計数化する | Restrictions: throwで強制しない。既存のfallback挙動を壊さない | Success: 呼び出し経路が単一化され失敗が計数で見える_
+
+- [ ] 3.16 ゲートG3スクリプトの作成（検証役）
   - File: scripts/gates/g3-metabolism.ts（新規）
   - design.md Phase 3 ③の契約どおりに実装する（誤統合率、append-only、lineage、batch-cap、human-gate、distance-types、salvage-report）
   - Purpose: 代謝フェーズの完了を実行可能な検査にする
@@ -650,7 +683,7 @@
   - _Requirements: R-M3_
   - _Prompt: Role: qa-engineer | Task: design.mdの契約どおりG3を実装する | Restrictions: 実装者のコードを修正しない | Success: PASSとFAILの両方が正しく判定される_
 
-- [ ] 3.16 G3実行と出力貼付
+- [ ] 3.17 G3実行と出力貼付
   - File: Implementation Logs（追記）
   - スナップショットとラベル付きペアでG3を実行し、結果本文を貼付する
   - Purpose: Phase 4 の着手条件を成立させる
@@ -666,16 +699,16 @@
 着手条件：G3全項目PASSの出力本文が Implementation Logs に貼付済みであること。
 完了条件：ゲートG4の全項目PASSと出力貼付、KPI再測定の完了。
 
-- [ ] 4.1 スキーマv7移行（guardsテーブル）
-  - File: src/storage/schema.ts（変更）, src/storage/migration.ts（変更）, src/storage/migration-v7.test.ts（新規）
+- [ ] 4.1 スキーマv8移行（guardsテーブル）
+  - File: src/storage/schema.ts（変更）, src/storage/migration.ts（変更）, src/storage/migration-v8.test.ts（新規）
   - ①「guards テーブルが design.md の定義どおり作られ、出所とTTLの欠落が拒否される」を失敗するテストとして先に書く
-  - ②schema_version テーブルの MAX(version) を 6→7 にする移行を migrateV6ToV7 として実装する（移行前自動バックアップ込み）
+  - ②schema_version テーブルの MAX(version) を 7→8 にする移行を migrateV7ToV8 として実装する（移行前自動バックアップ込み）
   - Purpose: ガード正本の一本化（R-C4）
-  - 完了条件: スナップショットで移行が成功し schema_version テーブルの MAX(version)=7 になる
+  - 完了条件: スナップショットで移行が成功し schema_version テーブルの MAX(version)=8 になる
   - 検証: テスト緑と移行実行出力
   - _Leverage: src/storage/migration.ts の migrateVXToVY 関数群, src/storage/sqlite.ts:44-72 の移行ディスパッチ_
   - _Requirements: R-C4_
-  - _Prompt: Role: backend-engineer | Task: v7移行をテスト先行で実装する | Restrictions: 既存テーブルに触れない | Success: 制約つきguardsテーブルが存在する_
+  - _Prompt: Role: backend-engineer | Task: v8移行をテスト先行で実装する | Restrictions: 既存テーブルに触れない | Success: 制約つきguardsテーブルが存在する_
 
 - [ ] 4.2 注入ビルダの再設計（最小索引と承認済み原則のみ）
   - File: src/injection/builder.ts, src/injection/builder.test.ts（新規）, src/cli/context.ts（変更）
@@ -714,7 +747,7 @@
 - [ ] 4.5 ガード承認制ランタイム
   - File: src/guards/registry.ts, src/guards/registry.test.ts（新規）, src/cli/pre-tool-use-guard.ts（変更）, src/cli/guard.ts（変更）
   - ①「評価されるのは state='active' かつ期限内の規則のみ」「未承認と失効は評価されない」「アクティブ規則数の上限超過の有効化がエラー」「ブロック表示に出所（事故ID）が含まれる」を失敗するテストとして先に書く
-  - ②guards テーブルを正本とするレジストリと承認CLI（wasurenagusa-guard approve）を実装し、統合キャッシュJSONの guardPatterns 読み取りを廃止する
+  - ②guards テーブルを正本とするレジストリと承認CLI（wasurenagusa-guard approve）を実装する。照合元を consolidated-dont.json からguardsレジストリへ差し替える（src/cli/pre-tool-use-guard.ts の読取部。現状は consolidated-dont.json の guardPattern を読む実装）。統合キャッシュJSONの guardPatterns 読み取りを廃止する
   - Purpose: 自動生成全廃後のガードの受け皿（R-C4）
   - 完了条件: ガードの正本がguardsテーブルのみになっている
   - 検証: テスト緑と、ゲートG4の guard-approval と guard-cap 項目
@@ -726,6 +759,7 @@
   - File: src/guards/circuit-breaker.ts, src/guards/kill-switch.ts（新規）, 対応テスト
   - ①「直近100回の評価でブロック率が10%を超えると全ガードが自動停止し警報が出る」「ストア直下の guards.kill ファイル存在で即時全停止する」を失敗するテストとして先に書く
   - ②両機構を実装し、PreToolUse評価の最前段に置く
+  - 前提条件: 本タスクの両機構が揃うことが settings.json への新ガード本配線（タスク4.15）の前提条件である。導入順序はキルスイッチ→サーキットブレーカ→観測（タスク4.15のdry-run観測）→本配線で固定し、順序を入れ替えない
   - Purpose: 自己DoSのロックアウト（64正規表現事故の再発形）の構造遮断（R-C4）
   - 完了条件: MCP外から touch 一発で全ガードが止まる
   - 検証: テスト緑と、ゲートG4の circuit-breaker と kill-switch 項目
@@ -747,11 +781,12 @@
 - [ ] 4.8 死機能の依存監査つき物理削除と死因記録
   - File: src/vector/prediction-error.ts ほか該当ファイル（削除）, src/cli/context.ts（変更）, src/tools/save.ts（変更）, docs/graveyard.md（新規）
   - 対象：予測誤差ループ（実データ0件）、UserPromptSubmit空回り配線（src/cli/context.ts:381-383）、Phase 0 で遮断済みのv1経路（consolidate-worker のMarkdown統合、retag-worker、staleness v1判定）、save.ts の replaceId デッドコード
+  - 条件: 予測誤差ループの削除はタスク0.0の判断が「物理削除」の場合のみ実施する。「温存」判断の場合は対象から外し、残り3系のみ削除する（v5スキーマ列自体は判断によらず本タスクで削除しない。列の去就は別途オーナー判断）
   - ①各対象の参照元を依存監査し、削除後に全テストとビルドが通ることを確認する
   - ②機能ごとに死因を1行で docs/graveyard.md に記録する（記録がないと将来再発明される）
   - stashとスケジューラは対象外（オーナー判断待ちの別タスク）
   - Purpose: 二重系統の最終清算（R-A3、症状⑧）
-  - 完了条件: 対象4系の実装コードが存在せず、死因記録がある
+  - 完了条件: 対象各系（タスク0.0の判断を反映した対象一覧）の実装コードが存在せず、死因記録がある
   - 検証: 依存監査の結果と、ゲートG4の dead-code-removed 項目
   - _Leverage: tsc とテストスイート全体_
   - _Requirements: R-A3_
@@ -820,3 +855,17 @@
   - _Leverage: git diff, design.md の non-goals_
   - _Requirements: R-M3_
   - _Prompt: Role: qa-engineer | Task: non-goals遵守を差分確認し別タスク提案を集約する | Restrictions: 提案を勝手に実装しない | Success: スコープ外変更ゼロが確認できる_
+
+- [ ] 4.15 dry-run観測モードを経た本配線
+  - File: src/guards/registry.ts（変更）, src/cli/pre-tool-use-guard.ts（変更）, 対応テスト
+  - ①「dry-runモードでは違反を検出してもブロックせずログにのみ記録する」「観測期間中のブロック率レポートが生成できる」を失敗するテストとして先に書く
+  - ②dry-run観測モードを実装し、一定期間ログ記録のみで運用する
+  - ③観測期間終了後、ブロック率レポートを生成しオーナー承認を得る
+  - ④承認後、settings.json のPreToolUseフックが新ガード（guardsレジストリ経由の承認済み規則）のブロック挙動を有効にする本配線へ進む
+  - 順序はタスク4.6（キルスイッチ→サーキットブレーカ）→本タスクの観測→オーナー承認→有効化で固定する
+  - Purpose: 新ガード配線を無評価でいきなり本番ブロックへ進めず、観測を経てから有効化する（自己DoS再発の追加防止）
+  - 完了条件: dry-run観測でのブロック率レポートが存在し、オーナー承認後に有効化されている
+  - 検証: テスト緑と、観測期間のブロック率レポート
+  - _Leverage: src/guards/circuit-breaker.ts, src/guards/kill-switch.ts, src/observability/counters.ts_
+  - _Requirements: R-C4_
+  - _Prompt: Role: backend-engineer | Task: dry-run観測モードをテスト先行で実装しブロック率レポートを作る | Restrictions: オーナー承認前に本配線を有効化しない | Success: 観測→承認→有効化の順序が守られる_

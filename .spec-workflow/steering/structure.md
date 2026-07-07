@@ -51,7 +51,8 @@ wasurenagusa-mcp/
 │   │   ├── migration.ts      # v1 Markdown→v2 SQLite自動マイグレーション
 │   │   ├── markdown.ts       # Markdown読み書き実装（v1レガシー、CLI互換用）
 │   │   ├── parser.ts         # Markdownパーサー（MemoryEntry配列に変換）
-│   │   └── formatter.ts      # MemoryEntryのMarkdownフォーマッター
+│   │   ├── formatter.ts      # MemoryEntryのMarkdownフォーマッター
+│   │   └── search-hint.ts    # 検索ヒント文言（詳細取得の案内／ゼロ件案内）の唯一の判定源。他モジュールに依存しない葉モジュール
 │   ├── analyzer/
 │   │   ├── index.ts              # Gemini連携エクスポート
 │   │   ├── gemini.ts             # LLM呼び出し・判定（genkit経由）
@@ -111,6 +112,11 @@ wasurenagusa-mcp/
 │   ├── project-initialize.txt    # プロジェクト初期設定プロンプト
 │   └── owner-profile-template.md # オーナープロフィールテンプレート
 ├── dist/                     # ビルド出力
+├── scripts/
+│   ├── verify/
+│   │   └── production-path-smoke.mjs        # 本番MCPツール経路（dist/index.js実起動+stdio JSON-RPC）の恒久スモークテスト
+│   └── maintenance/
+│       └── backfill-project-attribution.mjs # 既存記憶のプロジェクト帰属backfill（決定論・recommendedティア既定・precision優先）
 ├── docs/
 │   └── spec.md               # 完全実装仕様書
 ├── .spec-workflow/           # Spec Workflowドキュメント

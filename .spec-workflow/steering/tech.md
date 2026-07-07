@@ -188,6 +188,7 @@ wasurenagusa-spec-update
 - **Build System**: TypeScript Compiler (`tsc`)
 - **Package Management**: npm
 - **Development workflow**: `ts-node --esm` for development, `tsc` for production build
+- **発効制約**: TypeScriptの修正は `npm run build` で`dist/`を再生成しない限り、MCPサーバ本体・Hooks CLI群（`wasurenagusa-context`等）のいずれの起動経路にも反映されない（`bin`はすべて`dist/`配下を指す）。git pushの完了は発効を意味しない
 
 ### Code Quality Tools
 
@@ -195,6 +196,10 @@ wasurenagusa-spec-update
 - **Formatting**: Prettier（推奨）
 - **Testing Framework**: Vitest ^4.0.18
 - **Documentation**: README.md + inline JSDoc
+
+### 検証原則
+
+記憶ストアの品質検証は、本番と同一の起動経路（`dist/index.js`の実プロセス起動＋stdio JSON-RPC）に対し、自然文クエリと実際の絞り込み条件（project/scope等）を投げて行う。単体テストやモック経由の検証では代替しない。恒久化したスモークテストは `scripts/verify/production-path-smoke.mjs`（対象プロジェクトの`.wasurenagusa/memory.db`に対し保存・検索・削除を実行し、検索ヒントの整合性とproject列への反映を検証する）。
 
 ### Version Control & Collaboration
 

@@ -54,7 +54,7 @@ SQLiteベクトル拡張とFTS5トークナイザとトークン計数器は、L
 ### Existing Components to Leverage
 
 - **src/vector/cosine-distance.ts**: 距離変換の既存実装。距離尺度の型封じ（後述）の土台として拡張する
-- **src/storage/migration.ts の migrateVXToVY 関数群と src/storage/sqlite.ts:44-72 の移行ディスパッチ**: 版数は schema_version テーブルで管理する（テーブル定義 schema.ts:104、版数の記録 schema.ts:121-124、参照は `SELECT MAX(version)` schema.ts:130）。v4からv7への移行はこの既存機構へ追記する。新規の移行フレームワークは作らない。PRAGMA user_version は使われていない
+- **src/storage/migration.ts の migrateVXToVY 関数群と src/storage/sqlite.ts:44-72 の移行ディスパッチ**: 版数は schema_version テーブルで管理する（テーブル定義 schema.ts:108、版数の記録 schema.ts:124-129、参照は `SELECT MAX(version)` schema.ts:134）。v5からv8への移行はこの既存機構へ追記する。新規の移行フレームワークは作らない。PRAGMA user_version は使われていない
 - **操作ログJSONL（logs/operation-*.jsonl）**: 可観測性カウンタの出力先と、ゴールデンセットの採取元として流用する
 - **prompts/consolidate-cluster.txt（36行）と prompts/consolidate-config.txt（38行）**: 統合プロンプトとして維持する。いずれも100行以下の原則に適合済み
 - **dream系のredact処理（src/cli/dream-worker.ts:74-80）**: 実データスナップショット作成時の秘密値マスクに転用する
@@ -65,7 +65,7 @@ SQLiteベクトル拡張とFTS5トークナイザとトークン計数器は、L
 
 - **SessionStart / PreCompact / Stop フック**: 既存のフック配線は維持し、呼び先CLIの中身を差し替える
 - **launchd夜間ジョブ**: consolidate-all を唯一の統合系として維持し、v1経路を遮断する
-- **memory.db（SQLite）**: 既存スキーマ（v4。コミット済みHEADの CURRENT_SCHEMA_VERSION=4 が版数ベースライン）から段階移行する。ストアの置き場所と接続方式は変えない
+- **memory.db（SQLite）**: 既存スキーマ（v5。コミット済みHEADの CURRENT_SCHEMA_VERSION=5 が版数ベースライン。2026-07-03の予測誤差ループ保全コミット8b915a5がv5を占有したため、本Spec起草時点の想定であったv4から1段繰り上がっている）から段階移行する。ストアの置き場所と接続方式は変えない
 
 外部の共有基盤ライブラリについて：本リポジトリは公開のスタンドアロンnpmパッケージであり、開発チームが他プロジェクトで使う共有基盤への依存が存在しないことを確認した。
 流用するのはSpecテンプレートとチーム規約（TDD、タスク粒度）のみである。
@@ -151,7 +151,7 @@ export function isWithin<M extends string>(
 ```
 
 閾値は必ず `Threshold<M>` で保持し、生の number を閾値として持ち回ることを禁止する。
-既存の生数値閾値（src/cli/consolidate-all.ts:75 の0.6、src/vector/memory-tier.ts:9-13 のv1時代の値）はすべてこの型へ置換し、値そのものはラベル付きペア（後述）で較正し直す。
+既存の生数値閾値（src/cli/consolidate-all.ts:78 の0.25。旧値0.6は埋め込みモデル差替えに伴う距離分布収縮を受けてa9cb7abで0.25へ再較正済みだが、これは応急の目安値でありラベル付きペアでの実測較正と型封じ自体は未実施、src/vector/memory-tier.ts:9-13 のv1時代の値）はすべてこの型へ置換し、値そのものはラベル付きペア（後述）でさらに較正し直す。
 前提として、埋め込みはすべて保存時にL2正規化する（正規化されていないベクトルの保存は埋め込みサービスがエラーで拒否する）。
 
 ## 昇格の人間ゲート（系統A）
@@ -180,6 +180,7 @@ origin_tier（owner_confirmed / agent_observed）、evidence_ids（元記憶ID�
 - **サーキットブレーカ**：直近100回のPreToolUse評価でブロック率が10%を超えたら、全ガードを自動停止して警報する（自己DoS対策）
 - **外部キルスイッチ**：ストア直下に `guards.kill` ファイルが存在したら全ガードを即時停止する。MCPやフックのプロセスを経由せず、シェルから `touch` するだけで効く。ガードを直すツールまでブロックするロックアウトが最悪形であるため、外部から効く停止手段を初期仕様に含める
 - **既存64パターンの扱い**：全廃前に出所を採掘し、実事故由来と確認できたものだけを guards テーブルへ承認申請する。確認できないパターンは移行しない
+- **段階的ロールアウト**：本番投入は次の順序で固定し、逆順や飛び越しをしない。①外部キルスイッチの実装 ②サーキットブレーカの実装 ③dry-run観測モード（承認済み規則の照合は行うがブロックはせず、判定結果をログにのみ残す）での実運用観測 ④観測レポートの作成 ⑤オーナー承認 ⑥利用者側 `settings.json` へのフック配線。ブロック権限を持たせる前に、安全装置（キルスイッチ、サーキットブレーカ）と観測実績を先に揃える
 
 ## LLM呼び出し設計（llm-design 4原則への準拠）
 
@@ -206,7 +207,7 @@ LLM出力の業務整合性検査を throw で強制すると、LLMの責務（�
 
 内容：
 
-1. 作業ツリーの清算（未コミットWIPの退避と除去、版数ベースライン=v4の確定。タスク0.0）。Phase 0 の他タスクは作業ツリーがクリーンになってから着手する
+1. 作業ツリーの清算（未コミットWIPの退避と除去、版数ベースライン=v5の確定。タスク0.0）。Phase 0 の他タスクは作業ツリーがクリーンになってから着手する
 2. 全ストアの全量バックアップ（復元リハーサルは主ストアで実施、他ストアはチェックサム検証。これはデータ移行プロジェクトである）
 3. v1 Markdown統合系の書き込み経路の物理遮断（凍結の約束ではなくコード上の遮断。アーカイブファイル自体は保持）
 4. ガードパターン自動生成の停止（手動応急処置済み状態の恒久化）
@@ -214,7 +215,7 @@ LLM出力の業務整合性検査を throw で強制すると、LLMの責務（�
 6. 可観測性カウンタ5指標（ゼロヒット率、注入トークン数、統合件数、ブロック件数、蘇生件数）と閾値警報
 7. SessionStart注入の修復（シンボリックリンク実パス解決）と注入バジェット強制の同一タスク同時着地
 
-①スキーマ移行手順：スキーマ変更なし（schema_version テーブルの MAX(version)=4 のまま）。
+①スキーマ移行手順：スキーマ変更なし（schema_version テーブルの MAX(version)=5 のまま）。
 これは制約であり、Phase 0 でスキーマに触れる変更は差し戻し対象である。
 
 ②non-goals：
@@ -252,8 +253,8 @@ revert対象コミットの一覧を Implementation Log に記録する。
 6. 書き込み失敗計数の追加。WALとbusyタイムアウトはHEADで設定済み（src/storage/schema.ts:112-113）のため、確認とテスト固定のみ行う
 7. 埋め込みモデルの共有キャッシュ化（7重複522MBの回収）と旧世代 vectors.json の廃棄（バックアップ後）
 
-①スキーマ移行手順：版数 4→5。
-migrateV4ToV5 として src/storage/migration.ts へ追加し、src/storage/sqlite.ts:44-72 の移行ディスパッチへ配線する。
+①スキーマ移行手順：版数 5→6。
+migrateV5ToV6 として src/storage/migration.ts へ追加し、src/storage/sqlite.ts:44-72 の移行ディスパッチへ配線する。
 
 1. 移行開始前に Phase 0 のバックアップスクリプトを自動実行する。失敗時は移行を中止する
 2. memories へ `state` 列を追加する（TEXT NOT NULL DEFAULT 'active'、CHECK で active / archived / deleted に限定）
@@ -273,7 +274,7 @@ migrateV4ToV5 として src/storage/migration.ts へ追加し、src/storage/sqli
 ③検証ゲートG1（scripts/gates/g1-foundation.ts）：
 
 - 入力：`--store <ストアパス>`
-- 前提アサート：schema_version テーブルの MAX(version)=5、バックアップが存在する、memories 総件数が1,000件以上
+- 前提アサート：schema_version テーブルの MAX(version)=6、バックアップが存在する、memories 総件数が1,000件以上
 - 検査項目：state-consistency（state と deleted_at の同期が全件一致）、pt-invariants（PT-01とPT-05のテスト実行が緑）、resurrection-zero（deleted 行に対応するベクトル行が0件）、embedding-single-model（生存エントリのベクトルの embedding_model が単一値。モデル据え置きと判断した場合はその判断記録の存在）、project-confidence（confirmed / inferred / unknown の件数分布の出力と、バックフィル完了状態とprojectフィルタ有効化状態の整合）、wal（journal_mode が wal かつ busy_timeout が設定済み）、write-failure-counting（書き込み失敗が計数される検査が緑。R-A5 AC3の明示検査）、shared-cache（モデル実体が共有キャッシュ1箇所）、spike-report（トークナイザ再計測のbefore/afterゼロヒット率の記録が存在する）
 - 出力形式：G0と同形式
 
@@ -292,6 +293,8 @@ migrateV4ToV5 として src/storage/migration.ts へ追加し、src/storage/sqli
 3. RRF統合：`score = Σ 1/(60 + rank_i)`（経路=FTS段とベクトル）。各経路の順位のみを使い、欠損経路のスコアを捏造しない
 4. 時間減衰：`finalScore = rrfScore × 0.5^(ageDays / H)`。半減期Hは既定90日とし、ゴールデンセットで較正する。recency の反映元はこの time-decay ただ一つとし、既存の検索スコアラーの freshness 項（src/vector/search-scorer.ts:16-31、半減期14日）は除去する（二重減衰の禁止）。アクセス実績ブースト等の非recency素性は存置する
 5. 新着フォールバック：全段0件のとき新着N件を「フォールバック明示ラベル付き」で返す
+
+ヒント文言（0件時の案内、詳細取得への誘導）は `src/storage/search-hint.ts` の `buildSearchHint(count)` を唯一の判定源とし、呼び出し側は必ずマージ後の最終返却件数を渡して都度再導出する（他モジュールへのimportを持たない葉モジュール。626f8d1で実装済み）。project="active" の横断検索でマージ前に確定した文言をそのまま使い回す実装は、この一元化に反するため差し戻し対象とする。この一元化は「0件か否かで文言を出し分ける」既存の関心を解消済みであり、タスク2.10が扱うのはこれとは別の未着手事項（発火したフォールバック段そのもののラベルをヒントへ追加すること）に範囲が限定される。
 
 読み経路の無副作用：検索中の破壊的自動昇格（src/tools/search.ts:125-152。intensity書き換えとタイムスタンプ更新）を廃止する。
 読み取りがタイムスタンプを書き換えると時間減衰順位が汚染されるため、順位再設計の前提である。
@@ -330,7 +333,7 @@ migrateV4ToV5 として src/storage/migration.ts へ追加し、src/storage/sqli
 7. キュレーション台帳（ローカルデータ領域に作成済み）の統合区分の流し込み。削除区分の実行はオーナー承認後の別作業であり本Specに含めない
 8. アーカイブ4,567件のサルベージ判定と取り込み（検索評価の凍結解除後）
 
-①スキーマ移行手順：版数 5→6（migrateV5ToV6 として migration.ts へ追加）。
+①スキーマ移行手順：版数 6→7（migrateV6ToV7 として migration.ts へ追加）。
 
 1. 移行開始前に自動バックアップ
 2. `lineage` テーブルを新設する（id、child_id、parent_id、relation は CHECK で merged_from / supersedes に限定、created_at）
@@ -344,7 +347,7 @@ migrateV4ToV5 として src/storage/migration.ts へ追加し、src/storage/sqli
 ③検証ゲートG3（scripts/gates/g3-metabolism.ts）：
 
 - 入力：`--store <ストアパス>` `--labels <ラベル付きペアパス>`
-- 前提アサート：schema_version テーブルの MAX(version)=6、ラベル付きペアが存在し same 50件以上と different 50件以上、memories 総件数が1,000件以上
+- 前提アサート：schema_version テーブルの MAX(version)=7、ラベル付きペアが存在し same 50件以上と different 50件以上、memories 総件数が1,000件以上
 - 検査項目：merge-error-rate（different ペアの誤統合率が確定閾値以下。仮基準5%、確定値を出力に記録）、merge-recall（same ペアの統合検出率の記録）、append-only（統合実行の前後で原本行の本文ハッシュが全件不変、物理削除0件）、lineage-complete（マージ結果の100%に merged_from 系譜が存在）、batch-cap（1晩上限件数の遵守ログ）、human-gate（approved_at がNULLの原則が注入ビルダから返らない）、distance-types（尺度混同コードがコンパイルエラーになるネガティブテストが緑）、salvage-report（サルベージ判定の処理件数と採用件数の記録が存在）
 - 出力形式：G0と同形式
 
@@ -361,10 +364,10 @@ migrateV4ToV5 として src/storage/migration.ts へ追加し、src/storage/sqli
 2. angerHistory等の固定付帯ブロックのpull化と、memory_get_context の上限
 3. ガード承認制ランタイム（出所必須、TTL失効、規則数上限、サーキットブレーカ、外部キルスイッチ）
 4. 既存64パターンの出所採掘と選別承認申請
-5. 死機能の依存監査つき物理削除と死因記録（1行ずつ）。対象はUserPromptSubmit空回り配線、遮断済みv1経路、replaceIdデッドコード。予測誤差ループは未コミットWIPのみに存在し、Phase 0 の作業ツリー清算（タスク0.0）で除去済み
+5. 死機能の依存監査つき物理削除と死因記録（1行ずつ）。対象はUserPromptSubmit空回り配線、遮断済みv1経路、replaceIdデッドコード。予測誤差ループはコミット8b915a5（オーナー裁定2026-07-03）でHEADへ保全済みであり、存置か除去かの扱いはタスク0.0の判断に従う（除去と判断された場合のみ本項の対象へ加える）
 6. 注入前後の挙動比較（固定タスクスイートでの実測。注入ゼロ実験の部分採用として、削り幅の判断材料にする）
 
-①スキーマ移行手順：版数 6→7（migrateV6ToV7 として migration.ts へ追加）。
+①スキーマ移行手順：版数 7→8（migrateV7ToV8 として migration.ts へ追加）。
 
 1. 移行開始前に自動バックアップ
 2. `guards` テーブルを新設する（id、pattern、source_incident_id は NOT NULL、approved_at、expires_at は NOT NULL、state は CHECK で proposed / active / expired / disabled に限定、created_at）
@@ -378,7 +381,7 @@ migrateV4ToV5 として src/storage/migration.ts へ追加し、src/storage/sqli
 ③検証ゲートG4（scripts/gates/g4-injection-guard.ts）：
 
 - 入力：`--store <ストアパス（スナップショット可）>`
-- 前提アサート：schema_version テーブルの MAX(version)=7、memories 総件数が1,000件以上
+- 前提アサート：schema_version テーブルの MAX(version)=8、memories 総件数が1,000件以上
 - 検査項目：injection-budget（PT-02：fast-check生成の任意DB状態100ケース以上で注入トークン数がバジェット以下）、injection-composition（注入本文が Data Models「最小索引」の定義に適合し、最小索引と approved かつ有効期限内の原則のみで構成される）、fail-loud（サマリ欠損状態で全文が注入されず、スキップ計数と警報が出る）、pull-fixed-blocks（検索応答に固定付帯ブロックが含まれない）、get-context-cap（上限適用の確認）、guard-approval（未承認と失効のパターンが評価されない）、guard-cap（PT-03）、circuit-breaker（ブロック率注入試験での自動停止）、kill-switch（killファイル作成での即時全停止）、dead-code-removed（死機能の物理削除と死因記録の存在）、before-after（固定タスクスイートでの注入前後比較レポートの存在）
 - 出力形式：G0と同形式
 
@@ -403,6 +406,7 @@ guards テーブルはバックアップ復元。
 | 8 | ガードパターンの自動再生成 | LLM統合出力の guardPattern を検証して統合キャッシュへ受け入れる経路（src/consolidator/dont-consolidator.ts:51-60）。src/cli/guard.ts:89-93 は適用時の抽出フィルタであり生成経路ではない | 承認制のみ（自動生成経路を残さない） |
 | 9 | 欠損値を既定値で埋めて処理を続行する `??` / `\|\|` 代入 | 系全体の共通パターン | required化してfail-loud（関数引数の既定値のみ許可） |
 | 10 | アーカイブMarkdownへの書き込み再開 | src/cli/consolidate-worker.ts:52-54 | v1書き込みは物理遮断のまま維持する |
+| 11 | 保存経路のタグ付けLLM失敗（404等）を無記録のfail-openで握りつぶす | src/vector/tag-enricher.ts:60-63（作業ツリー適用済み・コミット待ち。モデル名404の止血としてTAG_MODELをgemini-3.1-flash-lite化済み、2026-07-05） | 保存継続はfail-open（既存タグへのフォールバック）のまま維持しつつ、失敗発生を警告計数で可視化する。throwにはしない |
 
 設計されたフォールバック（検索の段階フォールバック、新着フォールバック）との区別基準は次の3条件である。
 発火が計数されること、応答に明示されること、仕様に書かれていること。
@@ -464,7 +468,7 @@ G4 の injection-composition 検査はこの定義への適合を検査する。
 - 件数上限：較正定数とする。既定は、原則は全件、記憶索引は直近アクセス上位と直近30日の高強度エントリで上限50行
 - 分量上限：索引部の合計トークンは注入バジェット内の固定枠とする（枠の値は較正定数）
 
-### memories（v5での追加列）
+### memories（v6での追加列）
 
 ```
 state: TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','archived','deleted'))
@@ -472,7 +476,7 @@ project_confidence: TEXT NOT NULL DEFAULT 'unknown' CHECK (project_confidence IN
 （既存列は維持。deleted_at は state と同期する互換列として保持）
 ```
 
-### lineage（v6新設）
+### lineage（v7新設）
 
 ```
 id: TEXT PRIMARY KEY
@@ -482,7 +486,7 @@ relation: TEXT NOT NULL CHECK (relation IN ('merged_from','supersedes'))
 created_at: TEXT NOT NULL
 ```
 
-### principles（v6新設）
+### principles（v7新設）
 
 ```
 id: TEXT PRIMARY KEY
@@ -495,7 +499,7 @@ approved_at: TEXT            -- 承認時刻。NULLなら未承認（注入不�
 created_at: TEXT NOT NULL
 ```
 
-### guards（v7新設）
+### guards（v8新設。Phase1〔状態機械、v5→v6〕→Phase3〔lineage/principles、v6→v7〕→Phase4〔guards、v7→v8〕の順序を維持して繰り上げた版数。当初指示にあった「guardsテーブル移行はv6」は誤りとしてPdM確認済み）
 
 ```
 id: TEXT PRIMARY KEY
@@ -625,6 +629,12 @@ catch内で代替値を返して正常系へ偽装することを禁止する。
 - フックE2E：SessionStart相当のシンボリックリンク経由実行で、注入本文が出力されバジェット以下であることを確認する
 - ガードE2E：PreToolUse相当の入力で、承認済み規則のみが効き、キルスイッチとサーキットブレーカが動作することを確認する
 - 注入前後比較：固定タスクスイートで注入ありなしの挙動を比較し、削り幅の判断材料を得る
+
+### 本番経路での品質検証（ゲートスクリプトとの役割分担）
+
+ゲートスクリプト（G0〜G4）はsrcを直接実行する機構検証であり、配線・移行・不変条件の確認に限定する。TypeScriptの修正が実際にビルド成果物（dist/）へ反映され、稼働中のMCPサーバー・フックCLIプロセスへ発効しているかどうかの確認には使わない。
+
+主たる品質検証は、本番と同一の起動経路（`dist/index.js` の実起動＋stdio JSON-RPC）を新規プロセスで立ち上げ、自然文クエリと実際に使われる絞り込み条件（project指定等）を通して行う。恒久スクリプト `scripts/verify/production-path-smoke.mjs` がこれを担う（tech.md「Code Quality Tools」参照）。2026-07-05、検索ヒントとproject帰属の修正がコミット済みであるにもかかわらず、稼働中のMCPサーバープロセスが旧コードのまま動き続け未発効という事象が実際に発生した（tech.md「Build & Development Tools」の発効制約を参照）。ゲート全項目PASSやコミット完了は、本番発効の確認にはならない。
 
 ### ゲート運用（全フェーズ共通の契約）
 
