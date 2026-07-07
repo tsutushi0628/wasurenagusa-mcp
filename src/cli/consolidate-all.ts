@@ -8,32 +8,37 @@
 import { basename } from "path";
 import { homedir } from "os";
 import { join } from "path";
+import { writeFile } from "fs/promises";
 import { ActiveProjectsTracker } from "../active-projects.js";
 import { SQLiteStorage } from "../storage/sqlite.js";
-import { DontConsolidator } from "../consolidator/dont-consolidator.js";
-import { ConfigConsolidator } from "../consolidator/config-consolidator.js";
 import {
-  writeConsolidatedDont,
-  writeConsolidatedConfig,
   isConsolidationStaleSqlite,
   isConfigConsolidationStaleSqlite,
 } from "../consolidator/staleness.js";
-import {
-  persistConsolidatedDontToSqlite,
-  persistConsolidatedConfigToSqlite,
-  mergePrinciplesIntoMemories,
-} from "../consolidator/persistence-helper.js";
 import { runDreamGenerationForProject } from "./dream-worker.js";
 import { config, getMemoryPath } from "../config.js";
 import { isMainModule } from "../utils/cli-entry.js";
+import { increment } from "../observability/counters.js";
+import { generateJstTimestamp } from "../utils/operation-logger.js";
 import type { GenerateTextFn } from "../llm/provider.js";
-import type { ConsolidatedDont } from "../types.js";
+import type { MemoryEntry } from "../types.js";
 
-function jstTimestamp(): string {
-  const now = new Date();
-  const jstOffset = 9 * 60 * 60 * 1000;
-  const jst = new Date(now.getTime() + jstOffset);
-  return jst.toISOString().replace("Z", "+09:00");
+/** 夜間統合dry-runレポートのファイル名（各プロジェクトの.wasurenagusa配下） */
+export const DRY_RUN_REPORT_FILE = "consolidation-dryrun-report.json";
+
+export interface ConsolidationDryRunReport {
+  generatedAt: string;
+  project: string;
+  dont: {
+    stale: boolean;
+    aliveEntryCount: number;
+    clusterCount: number;
+    dupClusterCount: number;
+  };
+  config: {
+    stale: boolean;
+    entryCount: number;
+  };
 }
 
 function log(message: string): void {
@@ -41,17 +46,23 @@ function log(message: string): void {
 }
 
 /**
- * 1プロジェクトのメモリを再統合する。
+ * 1プロジェクトのメモリ統合をdry-runで実行する（design.md Phase 0 ⑤、タスク0.8）。
+ *
+ * 【Phase 0止血】統合（dont重複排除・config要約）の書き込み（memoriesへのマージ結果保存・
+ * 原本の論理削除・統合キャッシュ〔SQLite consolidated テーブル・consolidated-*.jsonファイル〕
+ * への永続化）は停止する。クラスタリング計算・候補件数の算出（読み取り専用）は維持し、
+ * 結果を各プロジェクトの .wasurenagusa/consolidation-dryrun-report.json へレポート出力する。
+ * 追記型マージへの再設計（Phase 3）まで、この関数は書き込みを一切行わない。
  *
  * 鮮度判定・エントリ読み出しは SQLite を真実源とする（v2 経路）。
  * memory_save は SQLite のみに書き込み、SQLiteStorage.initialize() が起動時に
  * 旧 Markdown(v1) を SQLite へ自動移行するため、Markdown 運用環境のデータも
  * SQLite 側に存在する。よって SQLite を見れば後方互換を保てる。
  * 旧ファイル版の鮮度判定は dont.md / config.md が物理的に無いと false を返すため、
- * Markdown ファイルを持たない SQLite-only 環境（Windows 等）では統合が永久に
- * スキップされてしまう。そのため CLI では使わない。
+ * Markdown ファイルを持たない SQLite-only 環境（Windows 等）でも本関数は正しく動作する。
  *
- * テスト用に generateTextFn を注入できる（省略時は実 LLM）。
+ * generateTextFn は統合（dont/config）では使用しない（dry-run中はLLM呼び出し自体をしない）。
+ * F3夢生成（統合とは別系統の書き込み。design.mdのdry-run対象外）にのみ引き続き使用する。
  */
 export async function consolidateProject(
   projectPath: string,
@@ -62,21 +73,30 @@ export async function consolidateProject(
   const memoryPath = getMemoryPath(projectPath);
   const dbPath = join(memoryPath, config.sqliteFile);
 
-  // 読み取り・鮮度判定は1接続を使い回す（try/finally で必ず閉じる）。
-  // 統合結果の書き込み（ファイル＋SQLite）は既存の fail-open ヘルパが個別に開閉する。
+  const report: ConsolidationDryRunReport = {
+    generatedAt: generateJstTimestamp(),
+    project: currentProject,
+    dont: { stale: false, aliveEntryCount: 0, clusterCount: 0, dupClusterCount: 0 },
+    config: { stale: false, entryCount: 0 },
+  };
+
   const storage = new SQLiteStorage(dbPath);
   storage.initialize(memoryPath);
   try {
-    // dont統合（embedding ベースのクラスタリングで「同一テーマ重複」だけを統合する重複排除）
-    if (isConsolidationStaleSqlite(storage)) {
-      const dontEntries = storage.readAliveDontEntries(currentProject);
+    // dont統合の分析（embeddingベースのクラスタリングで「同一テーマ重複」候補を検出する。
+    // 書き込みはしない＝クラスタ数・重複候補件数をレポートへ記録するのみ）
+    const dontStale = isConsolidationStaleSqlite(storage);
+    report.dont.stale = dontStale;
+    if (dontStale) {
+      const dontEntries: MemoryEntry[] = storage.readAliveDontEntries(currentProject);
+      report.dont.aliveEntryCount = dontEntries.length;
 
       // クラスタリング: 各 entry の embedding を取得し、greedy に類似 entry を集める
       // multilingual-e5-small の距離分布に合わせた再較正値・実運用で要チューニング。
       // 旧モデル(all-MiniLM-L6-v2)の距離分布(最近傍平均0.7)を前提にした0.6は、新モデルの
       // 距離分布(最近傍平均0.32へ収縮)ではほぼ弁別せず過統合の懸念があるため、保守的に絞った。
       const SIM_DISTANCE_THRESHOLD = 0.25;
-      const clusters: typeof dontEntries[] = [];
+      const clusters: MemoryEntry[][] = [];
       const assigned = new Set<string>();
       for (const entry of dontEntries) {
         if (assigned.has(entry.id)) continue;
@@ -97,56 +117,32 @@ export async function consolidateProject(
         clusters.push(cluster);
       }
 
-      // クラスタ size>=2 だけを LLM で重複排除統合（singleton はそのまま放置）
+      // クラスタ size>=2 が重複統合の候補（dry-run中はLLMマージ・memories書き込みを行わない）
       const dupClusters = clusters.filter(c => c.length >= 2);
-      const principles = [];
-      if (dupClusters.length > 0) {
-        const consolidator = new DontConsolidator(generateTextFn);
-        for (const cluster of dupClusters) {
-          const merged = await consolidator.mergeCluster(cluster);
-          if (merged) principles.push(merged);
-        }
-      }
-
-      // 統合 principle を memories へ反映（新規 dont 保存＋元 source の論理削除）
-      let mergeStats = { merged: 0, softDeleted: 0 };
-      if (principles.length > 0) {
-        mergeStats = mergePrinciplesIntoMemories(memoryPath, principles, currentProject, log);
-      }
-
-      // 収束: 統合後の「生存 dont 件数」を source_entry_count として記録する。これを残さないと
-      // 鮮度判定が永久に stale=true のままになり毎晩クラスタリングを無駄に再実行する。
-      // principle が無い回でも既存の principles を保持したまま件数だけ更新して鮮度を確定させる。
-      const aliveAfter = storage.readAliveDontEntries(currentProject).length;
-      const prior = storage.readConsolidated("dont") as ConsolidatedDont | null;
-      const result: ConsolidatedDont = {
-        principles: principles.length > 0 ? principles : (prior?.principles ?? []),
-        consolidatedAt: jstTimestamp(),
-        sourceEntryCount: aliveAfter,
-        version: 1,
-      };
-      await writeConsolidatedDont(memoryPath, result);
-      persistConsolidatedDontToSqlite(memoryPath, result, log);
-      log(`[consolidate-all] ${currentProject}: clusters=${clusters.length} dup=${dupClusters.length} merged=${mergeStats.merged} softDeleted=${mergeStats.softDeleted} alive=${aliveAfter}`);
+      report.dont.clusterCount = clusters.length;
+      report.dont.dupClusterCount = dupClusters.length;
+      log(`[consolidate-all] dry-run ${currentProject}: dont clusters=${clusters.length} dupCandidates=${dupClusters.length}（書き込みなし）`);
     }
 
-    // config統合
-    if (isConfigConsolidationStaleSqlite(storage)) {
+    // config統合の分析（候補件数のみレポートへ記録。書き込みはしない）
+    const configStale = isConfigConsolidationStaleSqlite(storage);
+    report.config.stale = configStale;
+    if (configStale) {
       const configEntries = storage.readConfigEntries(currentProject);
-      if (configEntries.length > 0) {
-        const consolidator = new ConfigConsolidator(generateTextFn);
-        const result = await consolidator.consolidate(configEntries);
-        if (result) {
-          await writeConsolidatedConfig(memoryPath, result);
-          persistConsolidatedConfigToSqlite(memoryPath, result, log);
-        }
-      }
+      report.config.entryCount = configEntries.length;
+      log(`[consolidate-all] dry-run ${currentProject}: config candidates=${configEntries.length}（書き込みなし）`);
     }
   } finally {
     storage.close();
   }
 
-  // F3: 夢生成（夜間バッチ後段。直近24h以内にdreamがあればスキップ、fail-open）
+  await writeFile(join(memoryPath, DRY_RUN_REPORT_FILE), JSON.stringify(report, null, 2), "utf-8");
+
+  // 可観測性カウンタ（タスク0.9、R-M1）: 統合候補件数（dont重複クラスタ＋config候補）を記録する
+  await increment(memoryPath, "consolidation_count", report.dont.dupClusterCount + report.config.entryCount);
+
+  // F3: 夢生成（夜間バッチ後段。統合とは別系統の書き込みのためdry-run対象外。
+  // 直近24h以内にdreamがあればスキップ、fail-open）
   try {
     const dreamResult = await runDreamGenerationForProject({
       memoryPath,
@@ -163,12 +159,9 @@ export async function consolidateProject(
 }
 
 async function main(): Promise<void> {
-  // APIキーが一つもなければ何もしない
-  if (!config.geminiApiKey && !config.openaiApiKey && !config.anthropicApiKey) {
-    log("[consolidate-all] No API key available. Exiting.");
-    process.exit(0);
-  }
-
+  // 統合はdry-run化されておりLLM呼び出しは行わない（consolidateProjectのJSDoc参照）ため、
+  // APIキーの有無に関わらず処理を実行する。夢生成（F3）はAPIキー無し環境ではプロバイダ側で
+  // fail-openする（consolidateProject内のcatchで捕捉・ログのみ）。
   const schedulerDir = join(homedir(), ".wasurenagusa", "scheduler");
   const tracker = new ActiveProjectsTracker(schedulerDir);
   const projects = await tracker.getActiveProjects();
