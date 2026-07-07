@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, unlinkSync } from "fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, unlinkSync, readdirSync, readFileSync } from "fs";
 import { join, resolve } from "path";
 import { tmpdir } from "os";
 import { spawnSync } from "child_process";
@@ -258,6 +258,18 @@ describe("pre-tool-use-guard CLI (integration)", () => {
     });
     expect(proc.status).toBe(2);
     expect(proc.stderr).toContain("wasurenagusa-pretool-guard");
+
+    // 可観測性カウンタ（タスク0.9、R-M1）: process.exit(2)前にguard_block_countの
+    // 書き込みが完了していること（実サブプロセスでの検証。fire-and-forgetだと
+    // プロセス終了が先行し書き込みが欠落しうるため、await済みであることをここで担保する）
+    const logsDir = join(memoryPath, "logs");
+    expect(existsSync(logsDir)).toBe(true);
+    const counterFiles = readdirSync(logsDir).filter(f => f.startsWith("counters-"));
+    expect(counterFiles.length).toBe(1);
+    const counterLines = readFileSync(join(logsDir, counterFiles[0]), "utf-8").trim().split("\n");
+    const blockEntry = counterLines.map(l => JSON.parse(l)).find(e => e.metric === "guard_block_count");
+    expect(blockEntry).toBeDefined();
+    expect(blockEntry.value).toBe(1);
   });
 
   it("ビルド成果物が存在すれば、壊れた JSON を流しても exit 0 を返す（fail-open）", () => {

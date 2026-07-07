@@ -10,6 +10,7 @@ import { buildSearchHint } from "../storage/search-hint.js";
 import { homedir } from "os";
 import { join, basename } from "path";
 import { logOperation, setLastSearch, generateSearchSessionId, generateJstTimestamp } from "../utils/operation-logger.js";
+import { increment } from "../observability/counters.js";
 
 export const memorySearchTool: Tool = {
   name: "memory_search",
@@ -332,5 +333,11 @@ export async function handleMemorySearch(
   const resultIds = result.results.map((r: MemoryIndexEntry) => r.id);
   void logOperation({ ts: generateJstTimestamp(), operation_type: "search", session_id: sessionId, query: params.query, category: params.category ?? "all", hit_count: result.results.length, project: basename(projectRoot), duration_ms: Date.now() - startTime }, memoryPath).catch(() => {});
   setLastSearch(basename(projectRoot), sessionId, resultIds);
+
+  // 可観測性カウンタ（タスク0.9、R-M1）: ゼロヒット率算出用の分母・分子を記録する
+  void increment(memoryPath, "search_total", 1);
+  if (result.results.length === 0) {
+    void increment(memoryPath, "search_zero_hit", 1);
+  }
   return resultJson;
 }

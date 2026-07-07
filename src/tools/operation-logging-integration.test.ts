@@ -92,14 +92,14 @@ describe("handleMemorySearch - operationログ統合", () => {
   it("handleMemorySearchを呼ぶとoperationログが1件追記される", async () => {
     await handleMemorySearch({ query: "test" }, projectRoot);
 
-    // fire-and-forgetなのでflushを待つ
-    await new Promise(resolve => setTimeout(resolve, 100));
-
     const logsDir = join(projectRoot, MEMORY_DIR, "logs");
-    expect(existsSync(logsDir)).toBe(true);
-
-    const files = readdirSync(logsDir).filter(f => f.startsWith("operation-"));
-    expect(files.length).toBe(1);
+    // fire-and-forgetなので書き込み完了をポーリングで待つ（固定sleepより速く・確実に検出する）
+    let files: string[] = [];
+    await vi.waitFor(() => {
+      expect(existsSync(logsDir)).toBe(true);
+      files = readdirSync(logsDir).filter(f => f.startsWith("operation-"));
+      expect(files.length).toBe(1);
+    });
 
     const content = readFileSync(join(logsDir, files[0]), "utf-8").trim();
     const lines = content.split("\n").filter(Boolean);
@@ -126,6 +126,29 @@ describe("handleMemorySearch - operationログ統合", () => {
     expect(parsed).toHaveProperty("results");
     expect(Array.isArray(parsed.results)).toBe(true);
   });
+
+  it("handleMemorySearchを呼ぶと可観測性カウンタ（search_total・search_zero_hit）が記録される（タスク0.9、R-M1）", async () => {
+    // mockStorageSearch は既定で {results: [], totalCount: 0}（ゼロヒット）を返す
+    await handleMemorySearch({ query: "test" }, projectRoot);
+
+    const logsDir = join(projectRoot, MEMORY_DIR, "logs");
+    // fire-and-forgetなので書き込み完了をポーリングで待つ
+    let totalEntry: { value: number } | undefined;
+    let zeroHitEntry: { value: number } | undefined;
+    await vi.waitFor(() => {
+      const files = readdirSync(logsDir).filter(f => f.startsWith("counters-"));
+      expect(files.length).toBe(1);
+      const content = readFileSync(join(logsDir, files[0]), "utf-8").trim();
+      const entries = content.split("\n").filter(Boolean).map(l => JSON.parse(l));
+      totalEntry = entries.find(e => e.metric === "search_total");
+      zeroHitEntry = entries.find(e => e.metric === "search_zero_hit");
+      expect(totalEntry).toBeDefined();
+      expect(zeroHitEntry).toBeDefined();
+    });
+
+    expect(totalEntry?.value).toBe(1);
+    expect(zeroHitEntry?.value).toBe(1);
+  });
 });
 
 describe("handleMemoryGetDetail - operationログ統合", () => {
@@ -144,13 +167,14 @@ describe("handleMemoryGetDetail - operationログ統合", () => {
   it("handleMemoryGetDetailを呼ぶとoperationログが1件追記される", async () => {
     await handleMemoryGetDetail({ ids: ["nonexistent-id"] }, projectRoot);
 
-    await new Promise(resolve => setTimeout(resolve, 100));
-
     const logsDir = join(projectRoot, MEMORY_DIR, "logs");
-    expect(existsSync(logsDir)).toBe(true);
-
-    const files = readdirSync(logsDir).filter(f => f.startsWith("operation-"));
-    expect(files.length).toBe(1);
+    // fire-and-forgetなので書き込み完了をポーリングで待つ
+    let files: string[] = [];
+    await vi.waitFor(() => {
+      expect(existsSync(logsDir)).toBe(true);
+      files = readdirSync(logsDir).filter(f => f.startsWith("operation-"));
+      expect(files.length).toBe(1);
+    });
 
     const content = readFileSync(join(logsDir, files[0]), "utf-8").trim();
     const lines = content.split("\n").filter(Boolean);
@@ -167,17 +191,25 @@ describe("handleMemoryGetDetail - operationログ統合", () => {
   it("search直後のgetDetailはparent_session_idがnull（hit_count=0で積集合なし）", async () => {
     // searchを実行（モックでhit_count=0、resultIdsは空）
     await handleMemorySearch({ query: "link-test" }, projectRoot);
-    await new Promise(resolve => setTimeout(resolve, 100));
+
+    const logsDir = join(projectRoot, MEMORY_DIR, "logs");
+    // fire-and-forgetなのでsearchログの書き込み完了をポーリングで待つ
+    await vi.waitFor(() => {
+      const files = readdirSync(logsDir).filter(f => f.startsWith("operation-"));
+      expect(files.length).toBe(1);
+      const lines = readFileSync(join(logsDir, files[0]), "utf-8").trim().split("\n").filter(Boolean);
+      expect(lines.length).toBe(1);
+    });
 
     // getDetailを実行（requestedIdsとresultIds[]の積集合なし → parent_session_id=null）
     await handleMemoryGetDetail({ ids: ["some-id"] }, projectRoot);
-    await new Promise(resolve => setTimeout(resolve, 100));
 
-    const logsDir = join(projectRoot, MEMORY_DIR, "logs");
-    const files = readdirSync(logsDir).filter(f => f.startsWith("operation-"));
-    const content = readFileSync(join(logsDir, files[0]), "utf-8").trim();
-    const lines = content.split("\n").filter(Boolean);
-    expect(lines.length).toBe(2);
+    let lines: string[] = [];
+    await vi.waitFor(() => {
+      const files = readdirSync(logsDir).filter(f => f.startsWith("operation-"));
+      lines = readFileSync(join(logsDir, files[0]), "utf-8").trim().split("\n").filter(Boolean);
+      expect(lines.length).toBe(2);
+    });
 
     const getDetailEntry = JSON.parse(lines[1]);
     expect(getDetailEntry.operation_type).toBe("get_detail");

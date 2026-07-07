@@ -30,19 +30,28 @@ function generateSessionId(): string {
   return `${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
 }
 
-function generateJstTimestamp(): string {
-  const now = new Date();
+/**
+ * JST（UTC+9）のISO 8601タイムスタンプを生成する。
+ * dateを省略すると現在時刻を使う（既存呼び出し元との後方互換）。
+ */
+function generateJstTimestamp(date: Date = new Date()): string {
   const jstOffset = 9 * 60 * 60 * 1000;
-  const jst = new Date(now.getTime() + jstOffset);
+  const jst = new Date(date.getTime() + jstOffset);
   return jst.toISOString().replace("Z", "+09:00");
 }
 
-function getLogFilePath(memoryPath: string): string {
-  const now = new Date();
+/**
+ * JST（UTC+9）の日付部分（YYYY-MM-DD）を生成する。
+ * 日付別ログファイル名（operation-*.jsonl・counters-*.jsonl）の共通実装。
+ */
+function generateJstDatePart(date: Date = new Date()): string {
   const jstOffset = 9 * 60 * 60 * 1000;
-  const jst = new Date(now.getTime() + jstOffset);
-  const datePart = jst.toISOString().slice(0, 10);
-  return join(memoryPath, "logs", `operation-${datePart}.jsonl`);
+  const jst = new Date(date.getTime() + jstOffset);
+  return jst.toISOString().slice(0, 10);
+}
+
+function getLogFilePath(memoryPath: string): string {
+  return join(memoryPath, "logs", `operation-${generateJstDatePart()}.jsonl`);
 }
 
 export function generateSearchSessionId(): string {
@@ -53,7 +62,7 @@ export function generateGetDetailSessionId(): string {
   return generateSessionId();
 }
 
-export { generateJstTimestamp };
+export { generateJstTimestamp, generateJstDatePart };
 
 export async function logOperation(entry: OperationLogEntry, memoryPath: string): Promise<void> {
   const logFilePath = getLogFilePath(memoryPath);

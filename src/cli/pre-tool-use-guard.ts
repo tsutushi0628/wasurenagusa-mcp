@@ -27,6 +27,7 @@ import {
   type GuardResult,
   type BlockCounts,
 } from "./guard.js";
+import { increment } from "../observability/counters.js";
 import type { ConsolidatedDont } from "../types.js";
 
 export interface PreToolUseHookInput {
@@ -144,6 +145,9 @@ async function main() {
 
   if (result.action === "block") {
     await writeBlockCounts(sessionId, blockCounts);
+    // 可観測性カウンタ（タスク0.9、R-M1）: ガードブロック件数を記録する。
+    // process.exit(2)でプロセスが即終了するため、書き込み完了を待ってから終了する。
+    await increment(memoryPath, "guard_block_count", 1);
     if (result.message) {
       process.stderr.write(formatStderr(result.message) + "\n");
     }
