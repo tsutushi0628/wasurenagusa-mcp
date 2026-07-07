@@ -29,8 +29,6 @@ import { SQLiteStorage } from "../storage/index.js";
 import { getMemoryPath, config } from "../config.js";
 
 import {
-  isConsolidationStaleSqlite,
-  isConfigConsolidationStaleSqlite,
   readConsolidatedDontSqlite,
   readConsolidatedConfigSqlite,
   readDontSummary,
@@ -41,6 +39,7 @@ import { loadOwnerProfile, getOwnerProfilePath } from "../utils/owner-profile.js
 import { EmbeddingService } from "../vector/embedding-service.js";
 import { VectorStore } from "../vector/vector-store.js";
 import { TIER_THRESHOLDS } from "../vector/memory-tier.js";
+import { increment } from "../observability/counters.js";
 import type { MemoryEntry } from "../types.js";
 
 type OutputMode = "injection" | "agent";
@@ -78,23 +77,6 @@ async function readStdin(): Promise<string> {
     chunks.push(chunk);
   }
   return Buffer.concat(chunks).toString("utf-8");
-}
-
-/**
- * consolidationをdetachedプロセスとして非同期実行する。
- * SessionStart hookの5秒タイムアウトに引っかからないよう、
- * 結果は次回セッションで利用する方式に変更。
- */
-function spawnConsolidationBackground(memoryPath: string, projectRoot: string): void {
-  if (!config.geminiApiKey && !config.openaiApiKey && !config.anthropicApiKey) return;
-
-  const scriptPath = new URL("./consolidate-worker.js", import.meta.url).pathname;
-  const child = spawn(process.execPath, [scriptPath, memoryPath, projectRoot], {
-    detached: true,
-    stdio: "ignore",
-    env: process.env,
-  });
-  child.unref();
 }
 
 /**
@@ -457,7 +439,7 @@ export function logInjectionBudgetWarning(
   );
 }
 
-async function main() {
+export async function main() {
   // stdinからHook入力JSONを読み取る
   let cwd: string;
   let hookEventName: string = "SessionStart";
@@ -490,12 +472,9 @@ async function main() {
   const storage = new SQLiteStorage(dbPath);
   storage.initialize(memoryPath);
 
-  // dont/configいずれかの統合が古ければバックグラウンドで再統合（次回セッション向け）
-  const dontStale = isConsolidationStaleSqlite(storage);
-  const configStale = isConfigConsolidationStaleSqlite(storage);
-  if (dontStale || configStale) {
-    spawnConsolidationBackground(memoryPath, projectRoot);
-  }
+  // v1書き込み経路の物理遮断（タスク0.6、R-A3）: consolidate-worker（MarkdownStorage
+  // 経由でconsolidated-dont.json等のv1資産へ書き込む）のSessionStartからのspawnは
+  // 恒久停止済み。夜間統合（v2、Phase 3で追記型に再設計予定）に一本化する。
 
   // embedding backfill: API keyがあればバックグラウンドで未生成分を埋める
   const embeddingServiceForBackfill = new EmbeddingService(config.geminiApiKey);
@@ -736,6 +715,12 @@ async function main() {
   const budgetResult = enforceInjectionTokenBudget(output.join("\n"), budgetTokens);
   logInjectionBudgetWarning(budgetTokens, budgetResult);
   console.log(budgetResult.text);
+
+  // 可観測性カウンタ（タスク0.9、R-M1）: 実際に注入した本文のトークン数を記録する。
+  // context.tsはHook呼び出しの短命プロセスのため、fire-and-forget（void）にすると
+  // プロセス終了が書き込み完了を待たずに先行しログが欠落しうる。ここはawaitする
+  // （検索側 search.ts は長命なMCPサーバプロセス内で呼ばれるためfire-and-forgetのままでよい）。
+  await increment(memoryPath, "injection_tokens", estimateTokens(budgetResult.text));
 
   storage.close();
 }

@@ -1,5 +1,3 @@
-import { spawn } from "child_process";
-import { fileURLToPath } from "url";
 import { basename, join } from "path";
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { SQLiteStorage } from "../storage/sqlite.js";
@@ -100,16 +98,6 @@ function normalizeTags(raw: unknown): string[] {
     return trimmed.split(",").map(s => s.trim()).filter(Boolean);
   }
   return [];
-}
-
-function spawnRetagWorker(newThemes: string[], projectRoot: string): void {
-  const scriptPath = fileURLToPath(new URL("../cli/retag-worker.js", import.meta.url));
-  const child = spawn(process.execPath, [scriptPath, JSON.stringify(newThemes), projectRoot], {
-    detached: true,
-    stdio: "ignore",
-    env: process.env,
-  });
-  child.unref();
 }
 
 export async function handleMemorySave(
@@ -223,7 +211,8 @@ export async function handleMemorySave(
     const enriched = enrichResult as { tags: { tag: string; weight: number }[]; newThemes: string[] };
     params.tags = formatWeightedTags(enriched.tags);
 
-    // Phase 2: 新テーマ検出 → RetagWorker spawn
+    // Phase 2: 新テーマ検出 → SQLiteのthemesテーブルへ登録（v1書き込み経路のretag-worker
+    // spawnは物理遮断済み。再タグ付け自体はPhase3以降で夜間統合に相乗りさせる想定）
     if (enriched.newThemes.length > 0) {
       try {
         const trulyNewThemes: string[] = [];
@@ -234,7 +223,6 @@ export async function handleMemorySave(
         }
         if (trulyNewThemes.length > 0) {
           storage.addThemes(trulyNewThemes);
-          spawnRetagWorker(trulyNewThemes, projectRoot);
         }
       } catch (error) {
         console.error("[save] テーマ登録失敗:", error);
