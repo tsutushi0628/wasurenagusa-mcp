@@ -639,7 +639,7 @@ catch内で代替値を返して正常系へ偽装することを禁止する。
 ### ゲート運用（全フェーズ共通の契約）
 
 - ゲートは scripts/gates/ の実行可能スクリプトであり、検証役のみが作成と変更を行う
-- 実行は `npx ts-node --esm scripts/gates/<name>.ts`（既存devDependencyの範囲）
+- 実行は `node --experimental-specifier-resolution=node --loader ts-node/esm scripts/gates/<name>.ts`（既存devDependencyの範囲）。当初記載の `npx ts-node --esm` は本実行環境（Node v22 + ts-node 10.9.2）では相対importを解決できず ERR_MODULE_NOT_FOUND で落ちることを2026-07-07に実機確認したため、実測で動く起動形へ更改した（PdM承認済み。経緯は Implementation Logs/task-0.11-g0-gate-implementation.md）
 - 全ゲートは前提アサート（最小件数、schema_version テーブルの MAX(version)、チェックサム）で始まり、不成立なら検査せずFAILする
 - 完了判定は出力本文（JSON行とサマリ）を tasks.md の指示に従って Implementation Log へ貼付し、人間とPdMが本文を読んで行う。exit code では判定しない
 - ゲート出力に記憶本文とクエリ本文を含めない（公開リポジトリへの貼付を安全にするため）

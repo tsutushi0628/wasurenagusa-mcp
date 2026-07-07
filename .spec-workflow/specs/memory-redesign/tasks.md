@@ -23,6 +23,7 @@
   - File: 判断記録は Implementation Logs
   - (a) 予測誤差ループ一式（docs/spec-prediction-error-loop.md、src/storage/prediction-error-loop.test.ts、src/vector/prediction-error.test.ts、src/vector/prediction-error.ts ほか関連差分）は退避すべき未コミットWIPではない。コミット8b915a5（オーナー裁定2026-07-03）で本体へ既に反映済みである。本タスクは「温存するか、物理削除を再計画するか」の判断のみを行う（確定はPdM承認）
   - (b) 判断が「物理削除」の場合は本タスクでは実行せず、判断結果をPhase 4の死機能削除（タスク4.8）へ引き継ぐ旨を記録する。判断が「温存」の場合は、タスク4.8の削除対象から本ループを外す旨を記録する
+  - (b-確定) 判断確定済み（2026-07-07・PdM確定）: 物理削除。実行はタスク4.8。根拠と先潰し条件は Implementation Logs/task-0.0-prediction-error-loop-decision.md が正本（実データ全ストア0件の実測、タスク4.2注入再設計との構造衝突、git履歴・退避パッチによる二重保全を根拠とする）
   - (c) 版数ベースライン=v5（src/storage/schema.ts:3 の CURRENT_SCHEMA_VERSION=5、schema_version テーブルの MAX(version)=5）を確定する。v5は予測誤差ループ由来の predicted_factors／actual_factors／prediction_error／prediction_delta カラム（migrateV4ToV5）で占有済みであり、Phase 1以降が新設する状態機械・帰属信頼度・埋め込みモデル列の移行先ではない
   - (d) 本Specの移行版数連鎖は v5（ベースライン）→v6（Phase 1 土台列。タスク1.3〜1.4）→v7（Phase 3 lineage/principles。タスク3.1〜3.2）→v8（Phase 4 guards。タスク4.1）で確定（PdM裁定2026-07-05）
   - Purpose: 全file:line引用と版数ベースラインの基準を正史（HEAD）に固定する
@@ -151,7 +152,7 @@
   - _Requirements: R-C1, R-C2_
   - _Prompt: Role: backend-engineer | Task: エントリ判定修復とバジェット強制をテスト先行で同一コミットに載せる | Restrictions: 2つを別コミットに分けない。注入内容の再設計（Phase 4）に踏み込まない | Success: 修復後も注入がバジェット以下に収まる_
 
-- [ ] 0.11 ゲートG0スクリプトの作成と合成fixture整備（検証役）
+- [x] 0.11 ゲートG0スクリプトの作成と合成fixture整備（検証役）（未コミット・2026-07-07実装完了、コミットはPdM承認後。詳細は Implementation Logs/task-0.11-g0-gate-implementation.md）
   - File: scripts/gates/g0-hemostasis.ts, scripts/make-eval-snapshot.ts, tests/fixtures/mini-store/（新規）
   - design.md Phase 0 ③の契約（入力、前提アサート、検査6項目、出力形式）どおりに実装する。backup-restore 検査はストアごとに走査する
   - スナップショット作成スクリプト（実DBコピーと秘密値redact）もここで作る
@@ -164,7 +165,7 @@
   - _Requirements: R-M1, R-M3, R-A1_
   - _Prompt: Role: qa-engineer | Task: design.mdの契約どおりG0ゲートとスナップショット作成を実装する | Restrictions: 実装者のコードを修正しない。出力に本文を載せない | Success: PASSとFAILの両方が正しく判定される_
 
-- [ ] 0.12 G0実行と出力貼付、ベースライン記録
+- [x] 0.12 G0実行と出力貼付、ベースライン記録（未コミット・2026-07-07完了、G0全6項目PASS。詳細は Implementation Logs/task-0.12-g0-execution-and-baseline.md）
   - File: Implementation Logs（追記）
   - 実ストアのスナップショットに対してG0を実行し、結果本文を貼付する
   - requirements.md のベースライン数値を同一手順で再取得し、測定手順とともにローカルデータ領域へ保存する
@@ -782,6 +783,12 @@
   - File: src/vector/prediction-error.ts ほか該当ファイル（削除）, src/cli/context.ts（変更）, src/tools/save.ts（変更）, docs/graveyard.md（新規）
   - 対象：予測誤差ループ（実データ0件）、UserPromptSubmit空回り配線（src/cli/context.ts:381-383）、Phase 0 で遮断済みのv1経路（consolidate-worker のMarkdown統合、retag-worker、staleness v1判定）、save.ts の replaceId デッドコード
   - 条件: 予測誤差ループの削除はタスク0.0の判断が「物理削除」の場合のみ実施する。「温存」判断の場合は対象から外し、残り3系のみ削除する（v5スキーマ列自体は判断によらず本タスクで削除しない。列の去就は別途オーナー判断）
+  - タスク0.0判断の反映（2026-07-07確定・物理削除）: 予測誤差ループは削除対象に含める。以下をゲート条件に追加する（判断記録 Implementation Logs/task-0.0-prediction-error-loop-decision.md が正本）:
+    - 削除直前に予測誤差4列の実データ0件を再実測する（1件でも存在したら削除を保留しオーナーへエスカレーション）
+    - 依存監査の対象一覧を固定: import参照／MCPツールスキーマ公開のoptionalフィールド4つ／型エクスポート（src/types.ts）／テスト／プロンプト・ドキュメント・過去handoffの言及
+    - 削除の完了判定は `npm run build` でのdist再生成と本番経路スモーク（scripts/verify/production-path-smoke.mjs）全PASSで行う（コミット済み＝完了としない）
+    - graveyard記録には死因1行に加え、設計意図の要約（docs/spec-prediction-error-loop.md参照）と復活条件（自動捕捉v2の需要実証時は旧実装の蘇生でなく再建後アーキテクチャ上で新規設計）を含める
+    - 残置するv5の4列には src/storage/schema.ts のコメントで「未使用・将来予約・再利用禁止・由来はgraveyard参照」を注記する
   - ①各対象の参照元を依存監査し、削除後に全テストとビルドが通ることを確認する
   - ②機能ごとに死因を1行で docs/graveyard.md に記録する（記録がないと将来再発明される）
   - stashとスケジューラは対象外（オーナー判断待ちの別タスク）
