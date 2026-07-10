@@ -1,9 +1,10 @@
 import type Database from "better-sqlite3";
-import { existsSync, readFileSync, readdirSync } from "fs";
+import { existsSync, readFileSync, readdirSync, mkdirSync, cpSync } from "fs";
 import { join } from "path";
 import { MemoryCategory, MemoryEntry } from "../types.js";
 import { parseMarkdown } from "./parser.js";
 import { getSchemaVersion } from "./schema.js";
+import { DEFAULT_MODEL } from "../vector/local-embedding.js";
 
 interface MigrationResult {
   entriesCount: number;
@@ -316,6 +317,97 @@ export function migrateV4ToV5(db: Database.Database): void {
     db.prepare(
       "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, datetime('now'))"
     ).run(5);
+  });
+
+  transaction();
+}
+
+/**
+ * 移行前バックアップ（migrateV5ToV6専用）。
+ *
+ * scripts/backup-store.ts の全量バックアップ（better-sqlite3のオンラインbackup() API）は
+ * Promise を返す非同期APIのため、同期の migrate*系関数群からは呼べない
+ * （呼び出し元 SQLiteStorage.initialize() を非同期化すると、consolidator/persistence-helper.ts
+ * 等の同期呼び出し境界まで連鎖的に壊れる。Phase 1 の non-goals「触ってはいけない領域」に
+ * 抵触するため、ここでは同期専用の軽量バックアップを別途用意する）。
+ *
+ * 手順: WALチェックポイントをTRUNCATEモードで強制実行し、mainのDBファイルにWAL内容を
+ * 反映させてから、そのファイルを同期的にコピーする。コピー失敗（ディレクトリ作成不能等）は
+ * そのままthrowし、呼び出し元は後続のALTER TABLEへ進まない（fail-loud、移行中止）。
+ */
+function backupBeforeV6Migration(db: Database.Database, memoryPath: string): void {
+  const dbFilePath = db.name;
+  if (!dbFilePath || dbFilePath === ":memory:") {
+    // インメモリDB（テストの一部）はファイルバックアップ対象外
+    return;
+  }
+
+  db.pragma("wal_checkpoint(TRUNCATE)");
+
+  const backupDir = join(memoryPath, "migration-backups");
+  mkdirSync(backupDir, { recursive: true });
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const backupPath = join(backupDir, `pre-v6-migration-${timestamp}.db`);
+  cpSync(dbFilePath, backupPath);
+}
+
+/**
+ * v5→v6 マイグレーション（memory-redesign spec Phase 1「土台」）
+ *
+ * 版数注記: v5は予測誤差ループ（コミット8b915a5）で占有済みのため、本Specの土台列移行は
+ * v6となる（design.md版数連鎖、タスク0.0のv5ベースライン参照）。
+ *
+ * 変更内容:
+ *   - memories に state TEXT NOT NULL DEFAULT 'active'（CHECK: active/archived/deleted）を追加
+ *     既存行は deleted_at IS NULL → active、それ以外 → deleted へバックフィルする
+ *   - memories に project_confidence TEXT NOT NULL DEFAULT 'unknown'（CHECK: confirmed/inferred/unknown）を追加
+ *   - vector_metadata に embedding_model TEXT NOT NULL DEFAULT <現行モデル識別子> を追加し、
+ *     既存行を現行モデル識別子でバックフィルする（タスク1.9で全件再埋め込み済みのため事実と一致）
+ *
+ * 動作:
+ *   - 移行開始前に軽量バックアップ（WALチェックポイント+ファイルコピー）を実行する。
+ *     バックアップに失敗したら移行を中止する（ALTER TABLEを一切実行しない）
+ *   - state カラムが既に存在するならスキップ（冪等）
+ *   - 全操作を db.transaction() 内で実行し、失敗時は自動ロールバック
+ */
+export function migrateV5ToV6(db: Database.Database, memoryPath: string): void {
+  const stateColumnExists = (db.prepare(
+    "SELECT COUNT(*) as cnt FROM pragma_table_info('memories') WHERE name = 'state'"
+  ).get() as { cnt: number }).cnt > 0;
+
+  if (stateColumnExists) {
+    return;
+  }
+
+  // バックアップ失敗時はここでthrowし、以降のALTER TABLEには進まない（移行中止）。
+  backupBeforeV6Migration(db, memoryPath);
+
+  const transaction = db.transaction(() => {
+    db.exec(
+      `ALTER TABLE memories ADD COLUMN state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','archived','deleted'))`
+    );
+    db.exec(`UPDATE memories SET state = 'deleted' WHERE deleted_at IS NOT NULL`);
+
+    db.exec(
+      `ALTER TABLE memories ADD COLUMN project_confidence TEXT NOT NULL DEFAULT 'unknown' CHECK(project_confidence IN ('confirmed','inferred','unknown'))`
+    );
+
+    // vector_metadataは、initializeSchema()のCREATE TABLE IF NOT EXISTSが本メソッド呼び出しより
+    // 前に走った際、テーブル自体が未存在だった場合は既にembedding_model込みで新規作成されている
+    // ことがある（memoriesは呼び出し元でmemoriesTableExists===trueの場合のみこの関数を呼ぶため
+    // 常にALTER対象になるが、vector_metadataは独立して存在有無が分かれるため個別に存在確認する）。
+    const embeddingModelColumnExists = (db.prepare(
+      "SELECT COUNT(*) as cnt FROM pragma_table_info('vector_metadata') WHERE name = 'embedding_model'"
+    ).get() as { cnt: number }).cnt > 0;
+    if (!embeddingModelColumnExists) {
+      db.exec(
+        `ALTER TABLE vector_metadata ADD COLUMN embedding_model TEXT NOT NULL DEFAULT '${DEFAULT_MODEL}'`
+      );
+    }
+
+    db.prepare(
+      "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, datetime('now'))"
+    ).run(6);
   });
 
   transaction();

@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
+import { DEFAULT_MODEL } from "../vector/local-embedding.js";
 
-export const CURRENT_SCHEMA_VERSION = 5;
+export const CURRENT_SCHEMA_VERSION = 6;
 
 export const DDL = `
 -- メモリエントリ本体
@@ -22,6 +23,9 @@ CREATE TABLE IF NOT EXISTS memories (
     actual_factors TEXT,
     prediction_error REAL,
     prediction_delta TEXT,
+    deleted_at TEXT,
+    state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','archived','deleted')),
+    project_confidence TEXT NOT NULL DEFAULT 'unknown' CHECK(project_confidence IN ('confirmed','inferred','unknown')),
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -63,6 +67,7 @@ CREATE TABLE IF NOT EXISTS vector_metadata (
     access_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     last_accessed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    embedding_model TEXT NOT NULL DEFAULT '${DEFAULT_MODEL}',
     FOREIGN KEY (id) REFERENCES memories(id) ON DELETE CASCADE
 );
 

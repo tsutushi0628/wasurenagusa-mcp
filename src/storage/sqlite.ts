@@ -22,9 +22,9 @@ import {
 } from "../types.js";
 import { config } from "../config.js";
 import { initializeSchema, initializeVectors, getSchemaVersion, CURRENT_SCHEMA_VERSION } from "./schema.js";
-import { migrateV1ToV2, migrateV1ToV2_categoryAndKnowledgeGap, migrateV2ToV3, migrateV3ToV4, migrateV4ToV5 } from "./migration.js";
+import { migrateV1ToV2, migrateV1ToV2_categoryAndKnowledgeGap, migrateV2ToV3, migrateV3ToV4, migrateV4ToV5, migrateV5ToV6 } from "./migration.js";
 import { existsSync } from "fs";
-import { join } from "path";
+import { join, dirname } from "path";
 import { formatEntry } from "./formatter.js";
 import { buildSearchHint } from "./search-hint.js";
 
@@ -134,9 +134,11 @@ export function computeRrfScores(rankedLists: string[][]): Map<string, number> {
 export class SQLiteStorage {
   private db: Database.Database;
   private vecLoaded = false;
+  private readonly dbPath: string;
 
   constructor(dbPath: string) {
     this.db = new Database(dbPath);
+    this.dbPath = dbPath;
   }
 
   initialize(memoryPath?: string): void {
@@ -170,6 +172,14 @@ export class SQLiteStorage {
 
     // 論理削除カラム migration（既存DBに対しても idempotent。consolidator が source エントリを論理削除する用途）
     try { this.db.exec("ALTER TABLE memories ADD COLUMN deleted_at TEXT"); } catch { /* duplicate column → 既に追加済み */ }
+
+    // v5→v6: 状態機械(state)・project帰属信頼度(project_confidence)・埋め込みモデル版数
+    // (embedding_model) の土台列を追加（カラム存在チェックで冪等）。
+    // memoryPath省略呼び出し（get_detail等の一部ツール）に備え、dbPathの親ディレクトリで
+    // フォールバックする（バックアップ先の解決に memoryPath が必須なため）。
+    if (memoriesTableExists) {
+      migrateV5ToV6(this.db, memoryPath ?? dirname(this.dbPath));
+    }
 
     // 自動マイグレーション: DB新規作成 AND v1ファイル存在 → マイグレーション実行
     if (memoryPath && this.shouldAutoMigrate(memoryPath)) {
