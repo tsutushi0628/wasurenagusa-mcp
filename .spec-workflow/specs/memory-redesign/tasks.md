@@ -412,7 +412,8 @@
   - _Requirements: R-B6, R-M3_
   - _Prompt: Role: qa-engineer | Task: 実ログからゴールデンセットを採取し形式どおり凍結する | Restrictions: 実装者に採取させない。クエリ本文をリポジトリに置かない | Success: 凍結済みセットの統計だけが記録に残る_
 
-- [ ] 2.2 評価コーパスの凍結スナップショット作成
+- [x] 2.2 評価コーパスの凍結スナップショット作成（2026-07-10完了）
+  - 完了注記: 既存スナップショット snapshots/2026-07-10/firebase-kit（make-eval-snapshot.ts正規経路・redact済・9,908件・G1全項目PASS通過コーパス）を凍結採用。manifest全102ファイルsha256照合一致（乖離0・欠落0）、凍結宣言と検証手順は Implementation Logs/task-2.2-frozen-eval-snapshot.md
   - File: ローカルデータ領域 ${WASURENAGUSA_EVAL_DIR}/snapshots/（Git外）
   - タスク0.11のスナップショット作成スクリプトで評価用DBを固定し、チェックサムを記録する
   - 評価期間中のコーパス変更（サルベージ流入を含む）を禁止する旨を記録する
