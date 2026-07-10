@@ -228,6 +228,9 @@ export class SQLiteStorage {
     const actualFactors = params.actualFactors !== undefined ? JSON.stringify(params.actualFactors) : null;
     const predictionError = params.predictionError ?? null;
     const predictionDelta = params.predictionDelta ?? null;
+    // project_confidence列はNOT NULL（DEFAULT 'unknown'）。呼び出し側（save.ts）が
+    // 明示指定しない場合は列の既定値と同じ'unknown'を明示的に渡す（関数引数の既定値相当）。
+    const projectConfidence = params.projectConfidence ?? "unknown";
 
     if (params.replaceId) {
       const existing = this.db.prepare("SELECT id FROM memories WHERE id = ?").get(params.replaceId) as { id: string } | undefined;
@@ -238,6 +241,7 @@ export class SQLiteStorage {
             project = ?, scope = ?, intensity = ?, knowledge_gap = ?, positive_action = ?,
             scenario = ?, why_core = ?,
             predicted_factors = ?, actual_factors = ?, prediction_error = ?, prediction_delta = ?,
+            project_confidence = ?,
             updated_at = datetime('now')
           WHERE id = ?
         `);
@@ -246,6 +250,7 @@ export class SQLiteStorage {
           params.project ?? null, params.scope ?? null, params.intensity ?? null,
           knowledgeGap, positiveAction, scenario, whyCore,
           predictedFactors, actualFactors, predictionError, predictionDelta,
+          projectConfidence,
           params.replaceId
         );
         return {
@@ -258,14 +263,15 @@ export class SQLiteStorage {
     }
 
     const insertStmt = this.db.prepare(`
-      INSERT INTO memories (id, timestamp, category, title, content, tags, project, scope, intensity, knowledge_gap, positive_action, scenario, why_core, predicted_factors, actual_factors, prediction_error, prediction_delta)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO memories (id, timestamp, category, title, content, tags, project, scope, intensity, knowledge_gap, positive_action, scenario, why_core, predicted_factors, actual_factors, prediction_error, prediction_delta, project_confidence)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     insertStmt.run(
       id, timestamp, params.category, params.title, params.content, tags,
       params.project ?? null, params.scope ?? null, params.intensity ?? null,
       knowledgeGap, positiveAction, scenario, whyCore,
-      predictedFactors, actualFactors, predictionError, predictionDelta
+      predictedFactors, actualFactors, predictionError, predictionDelta,
+      projectConfidence
     );
 
     return {
@@ -328,7 +334,7 @@ export class SQLiteStorage {
     let query = "SELECT * FROM memories WHERE category = 'dont' AND state = 'active'";
     const params: string[] = [];
     if (currentProject) {
-      query += " AND (project IS NULL OR project = ?)";
+      query += " AND (project IS NULL OR project = 'unknown' OR project = ?)"; // R-A4 AC3: unknown帰属も既定で検索対象に残す
       params.push(currentProject);
     }
     query += " ORDER BY intensity DESC, timestamp DESC";
@@ -456,7 +462,7 @@ export class SQLiteStorage {
     }
 
     if (params.project) {
-      query += ` AND (${prefix}project IS NULL OR ${prefix}project = ?)`;
+      query += ` AND (${prefix}project IS NULL OR ${prefix}project = 'unknown' OR ${prefix}project = ?)`; // R-A4 AC3: unknown帰属も既定で検索対象に残す
       queryParams.push(params.project);
     }
 
@@ -492,7 +498,7 @@ export class SQLiteStorage {
       countQuery += ` AND ${prefix}category = ?`;
     }
     if (params.project) {
-      countQuery += ` AND (${prefix}project IS NULL OR ${prefix}project = ?)`;
+      countQuery += ` AND (${prefix}project IS NULL OR ${prefix}project = 'unknown' OR ${prefix}project = ?)`;
     }
     if (params.scope) {
       countQuery += ` AND (${prefix}scope IS NULL OR ${prefix}scope = 'general' OR ${prefix}scope = ?)`;
@@ -548,7 +554,7 @@ export class SQLiteStorage {
           ftsParams.push(params.category);
         }
         if (params.project) {
-          ftsQuery += " AND (m.project IS NULL OR m.project = ?)";
+          ftsQuery += " AND (m.project IS NULL OR m.project = 'unknown' OR m.project = ?)"; // R-A4 AC3
           ftsParams.push(params.project);
         }
         if (params.scope) {
@@ -566,7 +572,7 @@ export class SQLiteStorage {
           ftsParams.push(params.category);
         }
         if (params.project) {
-          ftsQuery += " AND (project IS NULL OR project = ?)";
+          ftsQuery += " AND (project IS NULL OR project = 'unknown' OR project = ?)"; // R-A4 AC3
           ftsParams.push(params.project);
         }
         if (params.scope) {
@@ -602,7 +608,8 @@ export class SQLiteStorage {
       const row = this.db.prepare("SELECT * FROM memories WHERE id = ? AND state = 'active'").get(id) as MemoryRow | undefined;
       if (!row) continue;
 
-      if (params.project && row.project !== null && row.project !== params.project) {
+      // R-A4 AC3: project未確定(NULL)とunknown明示刻印はいずれも既定で検索対象に残す
+      if (params.project && row.project !== null && row.project !== "unknown" && row.project !== params.project) {
         continue;
       }
       if (params.scope && row.scope !== null && row.scope !== "general" && row.scope !== params.scope) {
@@ -1063,7 +1070,7 @@ export class SQLiteStorage {
     const queryParams: string[] = [category];
 
     if (currentProject) {
-      query += " AND (project IS NULL OR project = ?)";
+      query += " AND (project IS NULL OR project = 'unknown' OR project = ?)"; // R-A4 AC3: unknown帰属も既定で検索対象に残す
       queryParams.push(currentProject);
     }
 

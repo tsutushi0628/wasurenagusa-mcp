@@ -70,24 +70,61 @@ describe("memory_save: project 帰属（起動プロジェクトへの暗黙帰�
     expect(savedParams.project).toBe("politician-checker");
   });
 
-  it("project を省略すると、既存挙動どおり起動プロジェクト名（basename）にフォールバックする", async () => {
-    await handleMemorySave(
-      { category: "log", title: "本体作業ログ", content: "内容" },
-      "/tmp/firebase-kit",
-    );
+  it("project を省略すると、起動プロジェクト名へ暗黙フォールバックせずunknownが明示刻印される（禁止フォールバック#5）", async () => {
+    const stderrSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await handleMemorySave(
+        { category: "log", title: "本体作業ログ", content: "内容" },
+        "/tmp/firebase-kit",
+      );
 
-    const savedParams = mockStorageSave.mock.calls[0][0];
-    expect(savedParams.project).toBe("firebase-kit");
+      const savedParams = mockStorageSave.mock.calls[0][0];
+      expect(savedParams.project).toBe("unknown");
+      const warned = stderrSpy.mock.calls.some((call) => String(call[0]).includes("project省略"));
+      expect(warned).toBe(true);
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 
-  it("project に空文字を渡すと、空文字のまま保存されず起動プロジェクト名にフォールバックする", async () => {
+  it("project に空文字を渡すと、省略時と同様にunknownが明示刻印される", async () => {
+    const stderrSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await handleMemorySave(
+        { category: "log", title: "空文字指定ログ", content: "内容", project: "" },
+        "/tmp/firebase-kit",
+      );
+
+      const savedParams = mockStorageSave.mock.calls[0][0];
+      expect(savedParams.project).toBe("unknown");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("project を明示指定するとproject_confidenceがconfirmedになる", async () => {
     await handleMemorySave(
-      { category: "log", title: "空文字指定ログ", content: "内容", project: "" },
+      { category: "log", title: "明示指定ログ", content: "内容", project: "politician-checker" },
       "/tmp/firebase-kit",
     );
 
     const savedParams = mockStorageSave.mock.calls[0][0];
-    expect(savedParams.project).toBe("firebase-kit");
+    expect(savedParams.projectConfidence).toBe("confirmed");
+  });
+
+  it("project を省略するとproject_confidenceがunknownになる", async () => {
+    const stderrSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await handleMemorySave(
+        { category: "log", title: "省略ログ", content: "内容" },
+        "/tmp/firebase-kit",
+      );
+
+      const savedParams = mockStorageSave.mock.calls[0][0];
+      expect(savedParams.projectConfidence).toBe("unknown");
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 
   it("project の前後に空白を含む文字列を渡すと、trim済みの値で保存される（未trimのまま刻むと表記ゆれで単一プロジェクト検索が割れる）", async () => {

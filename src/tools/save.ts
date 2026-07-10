@@ -137,11 +137,18 @@ export async function handleMemorySave(
     predictionError = computePredictionError(predictedFactors, actualFactors);
   }
 
+  // project帰属（design.md禁止フォールバック#5）: 明示指定があればconfirmed、
+  // 省略・空文字時はcwd由来のbasenameへ暗黙フォールバックせず、unknownを明示刻印して
+  // 検索対象に残す（不明バケツをフィルタの裏に消さない。R-A4 AC3）。
   let project: string;
+  let projectConfidence: "confirmed" | "unknown";
   if (typeof args.project === "string" && args.project.trim() !== "") {
     project = args.project.trim();
+    projectConfidence = "confirmed";
   } else {
-    project = basename(projectRoot);
+    project = "unknown";
+    projectConfidence = "unknown";
+    console.error(`[save] project省略のためunknownを明示刻印しました（起動プロジェクト: ${basename(projectRoot)}）`);
   }
 
   const params: SaveParams = {
@@ -150,6 +157,7 @@ export async function handleMemorySave(
     content: args.content as string,
     tags: normalizeTags(args.tags),
     project,
+    projectConfidence,
     scope: args.scope as string | undefined,
     intensity,
     positiveAction,

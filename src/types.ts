@@ -6,6 +6,11 @@ export type MemoryCategory = "config" | "dont" | "decision" | "log" | "snippet" 
 // スコープ候補（推奨値。実際のscopeフィールドはstring型で自由入力も可）
 export type MemoryScope = "frontend" | "backend" | "infra" | "design" | "spec" | "ai" | "general";
 
+// project帰属の信頼度（memory-redesign spec R-A4、スキーマv6のproject_confidence列）。
+// confirmed: 保存時にproject明示指定あり。inferred: 決定論バックフィルによる後付け仕分け。
+// unknown: 明示指定なし（禁止フォールバック#5対応でcwd由来の暗黙刻印はしない）
+export type ProjectConfidence = "confirmed" | "inferred" | "unknown";
+
 // 重み付きタグ
 export interface WeightedTag {
   tag: string;       // タグ文字列
@@ -59,6 +64,7 @@ export interface SaveParams {
   title: string;         // 必須: 1行の要約タイトル
   tags?: string[];
   project?: string;      // プロジェクト名（自動付与）
+  projectConfidence?: ProjectConfidence; // project帰属の信頼度（呼び出し側=save.tsが決定）
   scope?: string;        // スコープ（Gemini自動判定 or 手動指定）
   replaceId?: string;    // 指定時: 既存エントリを置換（重複排除用）
   intensity?: number;    // 怒られ度（1〜10、手動指定 or LLM自動判定）
