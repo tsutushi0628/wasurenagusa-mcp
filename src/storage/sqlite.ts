@@ -280,8 +280,9 @@ export class SQLiteStorage {
     const entries: MemoryEntry[] = [];
     const notFound: string[] = [];
 
+    // 可視性マトリクス: get_detailはactive/archivedのみ可、deletedは不可（I1）。
     for (const id of params.ids) {
-      const row = this.db.prepare("SELECT * FROM memories WHERE id = ?").get(id) as MemoryRow | undefined;
+      const row = this.db.prepare("SELECT * FROM memories WHERE id = ? AND state != 'deleted'").get(id) as MemoryRow | undefined;
       if (row) {
         entries.push(this.rowToEntry(row));
       } else {
@@ -323,7 +324,8 @@ export class SQLiteStorage {
 
   // dont カテゴリの全 alive エントリ取得（consolidator 用、SQLite を真実源にする）
   readAliveDontEntries(currentProject?: string): MemoryEntry[] {
-    let query = "SELECT * FROM memories WHERE category = 'dont' AND deleted_at IS NULL";
+    // 可視性マトリクス: 統合（夜間）はactiveのみ可。
+    let query = "SELECT * FROM memories WHERE category = 'dont' AND state = 'active'";
     const params: string[] = [];
     if (currentProject) {
       query += " AND (project IS NULL OR project = ?)";
@@ -339,7 +341,8 @@ export class SQLiteStorage {
     const softDeleted: string[] = [];
     const notFound: string[] = [];
     const ts = this.generateTimestamp();
-    const updateStmt = this.db.prepare("UPDATE memories SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL");
+    // 不変条件I4: state='deleted' と deleted_at IS NOT NULL は常に同値。書き込み経路で同期する。
+    const updateStmt = this.db.prepare("UPDATE memories SET deleted_at = ?, state = 'deleted' WHERE id = ? AND deleted_at IS NULL");
     const checkStmt = this.db.prepare("SELECT id FROM memories WHERE id = ?");
     for (const id of ids) {
       const existing = checkStmt.get(id) as { id: string } | undefined;
@@ -430,19 +433,20 @@ export class SQLiteStorage {
     const usesFts = trimmedQuery.length >= 3;
     const usesLike = trimmedQuery.length > 0 && trimmedQuery.length < 3;
 
+    // 可視性マトリクス: 検索はactiveのみ可（I1）。
     if (usesFts) {
       query = `
         SELECT m.* FROM memories m
         INNER JOIN memories_fts fts ON m.rowid = fts.rowid
-        WHERE memories_fts MATCH ? AND m.deleted_at IS NULL
+        WHERE memories_fts MATCH ? AND m.state = 'active'
       `;
       queryParams.push(escapeFtsQuery(params.query!));
     } else if (usesLike) {
       const likePattern = `%${trimmedQuery}%`;
-      query = `SELECT * FROM memories WHERE (title LIKE ? OR content LIKE ? OR tags LIKE ?) AND deleted_at IS NULL`;
+      query = `SELECT * FROM memories WHERE (title LIKE ? OR content LIKE ? OR tags LIKE ?) AND state = 'active'`;
       queryParams.push(likePattern, likePattern, likePattern);
     } else {
-      query = "SELECT * FROM memories WHERE 1=1 AND deleted_at IS NULL";
+      query = "SELECT * FROM memories WHERE 1=1 AND state = 'active'";
     }
 
     const prefix = usesFts ? "m." : "";
@@ -477,12 +481,12 @@ export class SQLiteStorage {
       countQuery = `
         SELECT COUNT(*) as count FROM memories m
         INNER JOIN memories_fts fts ON m.rowid = fts.rowid
-        WHERE memories_fts MATCH ? AND m.deleted_at IS NULL
+        WHERE memories_fts MATCH ? AND m.state = 'active'
       `;
     } else if (usesLike) {
-      countQuery = "SELECT COUNT(*) as count FROM memories WHERE (title LIKE ? OR content LIKE ? OR tags LIKE ?) AND deleted_at IS NULL";
+      countQuery = "SELECT COUNT(*) as count FROM memories WHERE (title LIKE ? OR content LIKE ? OR tags LIKE ?) AND state = 'active'";
     } else {
-      countQuery = "SELECT COUNT(*) as count FROM memories WHERE 1=1 AND deleted_at IS NULL";
+      countQuery = "SELECT COUNT(*) as count FROM memories WHERE 1=1 AND state = 'active'";
     }
     if (params.category && params.category !== "all") {
       countQuery += ` AND ${prefix}category = ?`;
@@ -530,11 +534,12 @@ export class SQLiteStorage {
       let ftsQuery: string;
       const ftsParams: (string | number)[] = [];
 
+      // 可視性マトリクス: 検索(ハイブリッド)はactiveのみ可（I1）。
       if (trimmedQ.length >= 3) {
         ftsQuery = `
           SELECT m.id FROM memories m
           INNER JOIN memories_fts fts ON m.rowid = fts.rowid
-          WHERE memories_fts MATCH ? AND m.deleted_at IS NULL
+          WHERE memories_fts MATCH ? AND m.state = 'active'
         `;
         ftsParams.push(escapeFtsQuery(trimmedQ));
 
@@ -553,7 +558,7 @@ export class SQLiteStorage {
         ftsQuery += " ORDER BY fts.rank";
       } else {
         const likePattern = `%${trimmedQ}%`;
-        ftsQuery = `SELECT id FROM memories WHERE (title LIKE ? OR content LIKE ? OR tags LIKE ?) AND deleted_at IS NULL`;
+        ftsQuery = `SELECT id FROM memories WHERE (title LIKE ? OR content LIKE ? OR tags LIKE ?) AND state = 'active'`;
         ftsParams.push(likePattern, likePattern, likePattern);
 
         if (params.category && params.category !== "all") {
@@ -590,11 +595,11 @@ export class SQLiteStorage {
     //    合成スコアを持たせ、そのスコア降順を最終順位にする。
     const rrfScores = computeRrfScores([ftsRankedIds, vectorRankedIds]);
 
-    // 4. project/scope/categoryフィルタ + エントリ取得（deleted_atは各候補プール取得時点で
-    //    ある程度除外済みだが、ベクトル側は対象外のためここで最終確認する）
+    // 4. project/scope/categoryフィルタ + エントリ取得（可視性マトリクス: 検索はactiveのみ可。
+    //    FTS経路はプール取得時点で絞り込み済みだが、ベクトル側は対象外のためここで最終確認する）
     const scoredEntries: Array<{ entry: MemoryIndexEntry; score: number; timestamp: string }> = [];
     for (const [id, score] of rrfScores) {
-      const row = this.db.prepare("SELECT * FROM memories WHERE id = ? AND deleted_at IS NULL").get(id) as MemoryRow | undefined;
+      const row = this.db.prepare("SELECT * FROM memories WHERE id = ? AND state = 'active'").get(id) as MemoryRow | undefined;
       if (!row) continue;
 
       if (params.project && row.project !== null && row.project !== params.project) {
@@ -742,10 +747,11 @@ export class SQLiteStorage {
   }
 
   getEntriesWithoutEmbedding(): string[] {
+    // 可視性マトリクス: backfillはactiveのみ可。
     const rows = this.db.prepare(`
       SELECT m.id FROM memories m
       LEFT JOIN vector_metadata vm ON m.id = vm.id
-      WHERE vm.id IS NULL AND m.deleted_at IS NULL
+      WHERE vm.id IS NULL AND m.state = 'active'
     `).all() as { id: string }[];
 
     return rows.map((row) => row.id);
@@ -836,11 +842,12 @@ export class SQLiteStorage {
 
     if (!consolidated) return true;
 
-    // 生存エントリのみを数える。論理削除(deleted_at)済み行まで数えると、統合が source を
-    // soft delete した後に件数が永久に一致せず stale=true のままになり、毎回再統合（config 側は
-    // 毎晩 LLM 空振り）が起きる。鮮度の意味は「生存エントリが前回統合時から変わったか」。
+    // 生存(active)エントリのみを数える。可視性マトリクス: 統合(夜間)はactiveのみ可。
+    // deleted/archived行まで数えると、統合が source を soft delete した後に件数が永久に
+    // 一致せず stale=true のままになり、毎回再統合（config 側は毎晩 LLM 空振り）が起きる。
+    // 鮮度の意味は「activeエントリが前回統合時から変わったか」。
     const currentCount = this.db.prepare(
-      "SELECT COUNT(*) as count FROM memories WHERE category = ? AND deleted_at IS NULL"
+      "SELECT COUNT(*) as count FROM memories WHERE category = ? AND state = 'active'"
     ).get(type) as { count: number };
 
     return currentCount.count !== consolidated.source_entry_count;
@@ -926,9 +933,10 @@ export class SQLiteStorage {
     scenario?: string;
     whyCore?: string;
   }> {
+    // 可視性マトリクス: 注入はactiveのみ可。
     const rows = this.db
       .prepare(
-        "SELECT id, timestamp, category, title, tags, project, scope, intensity, positive_action, scenario, why_core FROM memories WHERE category = 'dont' AND intensity IS NOT NULL AND intensity >= ? AND deleted_at IS NULL ORDER BY intensity DESC, timestamp DESC LIMIT ?"
+        "SELECT id, timestamp, category, title, tags, project, scope, intensity, positive_action, scenario, why_core FROM memories WHERE category = 'dont' AND intensity IS NOT NULL AND intensity >= ? AND state = 'active' ORDER BY intensity DESC, timestamp DESC LIMIT ?"
       )
       .all(minIntensity, limit) as Array<{
         id: string;
@@ -986,9 +994,10 @@ export class SQLiteStorage {
     predictionError?: number;
     predictionDelta?: string;
   }> {
+    // 可視性マトリクス: 注入はactiveのみ可。
     const rows = this.db
       .prepare(
-        "SELECT id, timestamp, category, title, tags, project, scope, prediction_error, prediction_delta FROM memories WHERE prediction_error IS NOT NULL AND prediction_error >= ? AND deleted_at IS NULL ORDER BY prediction_error DESC, timestamp DESC LIMIT ?"
+        "SELECT id, timestamp, category, title, tags, project, scope, prediction_error, prediction_delta FROM memories WHERE prediction_error IS NOT NULL AND prediction_error >= ? AND state = 'active' ORDER BY prediction_error DESC, timestamp DESC LIMIT ?"
       )
       .all(minError, limit) as Array<{
         id: string;
@@ -1049,7 +1058,8 @@ export class SQLiteStorage {
   }
 
   private readEntriesByCategory(category: MemoryCategory, currentProject?: string): MemoryEntry[] {
-    let query = "SELECT * FROM memories WHERE category = ? AND deleted_at IS NULL";
+    // 可視性マトリクス: 注入(config/dontの読み込み)はactiveのみ可。
+    let query = "SELECT * FROM memories WHERE category = ? AND state = 'active'";
     const queryParams: string[] = [category];
 
     if (currentProject) {
