@@ -252,13 +252,14 @@
   - _Requirements: R-A2_
   - _Prompt: Role: backend-engineer | Task: backfillの状態フィルタと孤児ベクトル掃除をテスト先行で実装する | Restrictions: memories本体の行を消さない（消すのはベクトル行のみ） | Success: 掃除後の孤児ベクトル0件が出力で確認できる_
 
-- [ ] 1.7 状態機械プロパティテスト PT-01 と PT-05 の作成（検証役）
+- [x] 1.7 状態機械プロパティテスト PT-01 と PT-05 の作成（検証役）（コミット 7d41a38・2026-07-10）
   - File: tests/properties/state-machine.property.test.ts（新規）
-  - fast-check を導入し（exact pin）、design.md の不変条件I1からI4をプロパティテスト化する
-  - 生成器は状態遷移列と読み経路呼び出しの組み合わせを作る
-  - Purpose: 不変条件を「全パターンで成り立つ性質」として固定する（R-M3）
-  - 完了条件: PT-01とPT-05が存在し緑である
-  - 検証: テスト実行出力
+  - fast-check@4.9.0 をexact pin（package.jsonの@anthropic-ai/tokenizer慣行に合わせcaretなし）でdevDependency導入。導入時のnpm audit警告(93件)はfast-check/pure-randとは無関係の既存依存(651パッケージ)由来と確認済み（npm audit --json照合、新規2パッケージが脆弱性リストに0件）
+  - 生成器: 1〜6件のエントリ×{active/archived/deleted}×replaceId再試行回数(0〜2)の組み合わせで状態遷移列＋読み経路呼び出しを作成。archivedは公開API未実装（Phase 3以降）のためsrc/storage/visibility-matrix.test.tsと同じ規約で直接SQLフィクスチャを使用（遷移操作ではなく可視性検証の設営）
+  - PT-01(=I1): search/searchHybrid/get_detail/backfill/readAliveDontEntries/listHighIntensityDonts/listHighErrorEntries/readConfigEntries/readDontEntriesの全読み経路でdeleted状態のIDが一切返らないことを検証
+  - PT-05(=I4+定義済み遷移のみ): 状態変化のたびにstate='deleted'⟺deleted_at IS NOT NULLの同期を確認し、save({replaceId})をdeleted状態のIDに繰り返し呼んでもstateが'active'へ戻らない（deleted→activeという未定義遷移が起きない）ことを実証
+  - 完了条件充足: PT-01/PT-05とも緑（fc numRuns=50×2）
+  - 検証: npm run build 緑、npx vitest run 全94ファイル938件緑、production-path-smoke 4/4 PASS。実装コードは変更せず（Restrictions遵守）
   - _Leverage: vitest基盤, design.md の不変条件定義_
   - _Requirements: R-A2, R-M3_
   - _Prompt: Role: qa-engineer | Task: 状態機械の不変条件をfast-checkでプロパティテスト化する | Restrictions: 実装コードを修正しない。違反発見時は再現最小ケースを添えて差し戻す | Success: 生成ケースで不変条件が全件成立_
