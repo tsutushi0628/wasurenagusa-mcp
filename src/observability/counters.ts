@@ -28,7 +28,8 @@ export type MetricName =
   | "injection_tokens"
   | "consolidation_count"
   | "guard_block_count"
-  | "resurrection_count";
+  | "resurrection_count"
+  | "write_failure_count";
 
 export interface CounterEntry {
   ts: string;
@@ -49,6 +50,8 @@ export interface Thresholds {
   guardBlockCount: number;
   /** 蘇生件数（その日の最大ゲージ読み）。この値以上でalert（設計上ゼロが正のため既定1） */
   resurrectionCount: number;
+  /** DB書き込み失敗件数（1日の合計）。R-A5 AC3。設計上ゼロが正のため既定1（発生時点でalert） */
+  writeFailureCount: number;
 }
 
 /**
@@ -64,6 +67,7 @@ export const DEFAULT_THRESHOLDS: Thresholds = {
   consolidationCount: 50,
   guardBlockCount: 5,
   resurrectionCount: 1,
+  writeFailureCount: 1,
 };
 
 export interface ZeroHitRateSnapshot {
@@ -105,6 +109,9 @@ export interface MetricsSnapshot {
   guardBlockCount: CountMetricSnapshot;
   /** ゲージ系メトリクス（sumでは水増しされるためCountMetricSnapshotではなくGaugeMetricSnapshot） */
   resurrectionCount: GaugeMetricSnapshot;
+  /** DB書き込み失敗件数（タスク1.12、R-A5 AC3）。SQLiteStorageの書き込み系メソッドが
+   *  例外送出時に計上する。counterWriteFailureCount（カウンタ自身のJSONL書き込み失敗）とは別指標 */
+  writeFailureCount: CountMetricSnapshot;
   /** カウンタ書き込み失敗件数（プロセス内計測、G0や警報がfail-open状況を拾えるように公開） */
   counterWriteFailureCount: number;
   /** その日のJSONL読み戻しで検出した壊れ行数（無言破棄せず可視化する） */
@@ -271,6 +278,7 @@ export async function snapshot(
     consolidationCount: summarizeCountMetric(entries, "consolidation_count", thresholds.consolidationCount, "sum", "exclusive"),
     guardBlockCount: summarizeCountMetric(entries, "guard_block_count", thresholds.guardBlockCount, "sum", "exclusive"),
     resurrectionCount: summarizeGaugeMetric(entries, "resurrection_count", thresholds.resurrectionCount, "inclusive"),
+    writeFailureCount: summarizeCountMetric(entries, "write_failure_count", thresholds.writeFailureCount, "sum", "inclusive"),
     counterWriteFailureCount: getCounterWriteFailureCount(),
     corruptLineCount,
   };

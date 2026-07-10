@@ -27,6 +27,7 @@ import { existsSync } from "fs";
 import { join, dirname } from "path";
 import { formatEntry } from "./formatter.js";
 import { buildSearchHint } from "./search-hint.js";
+import { increment } from "../observability/counters.js";
 
 export interface VectorSearchResult {
   id: string;
@@ -205,6 +206,33 @@ export class SQLiteStorage {
     return `${timestamp}-${random}`;
   }
 
+  // --- 多並列アクセス耐性(R-A5)の確認固定・書き込み失敗計数(タスク1.12) ---
+
+  /** WAL設定の確認固定（R-A5 AC1）。設定自体はschema.tsのinitializeSchema()が行う。 */
+  getJournalMode(): string {
+    const row = this.db.pragma("journal_mode") as Array<{ journal_mode: string }>;
+    return row[0]?.journal_mode ?? "";
+  }
+
+  /** busyタイムアウトの確認固定（R-A5 AC2）。設定自体はschema.tsのinitializeSchema()が行う。 */
+  getBusyTimeout(): number {
+    const row = this.db.pragma("busy_timeout") as Array<{ timeout: number }>;
+    return row[0]?.timeout ?? 0;
+  }
+
+  /**
+   * 書き込み失敗の計数（R-A5 AC3）。失敗を握りつぶさず計数してから呼び出し元へ再throwする
+   * ためのヘルパー。カウンタ自体の書き込み（JSONL追記、非同期）はfire-and-forgetで行い、
+   * カウンタ書き込みの失敗が本来のエラー伝播をブロックしない（counters.ts自体がfail-open設計）。
+   */
+  private recordWriteFailure(operation: string, error: unknown): void {
+    const memoryPath = dirname(this.dbPath);
+    console.error(`[sqlite] ${operation}で書き込み失敗:`, error);
+    void increment(memoryPath, "write_failure_count").catch(() => {
+      // カウンタ自体の書き込み失敗はここで握りつぶす（元エラーの伝播をブロックしない）。
+    });
+  }
+
   private generateTimestamp(): string {
     const now = new Date();
     const jstOffset = 9 * 60 * 60 * 1000;
@@ -215,6 +243,15 @@ export class SQLiteStorage {
   // --- MemoryEntry CRUD ---
 
   save(params: SaveParams): SaveResult {
+    try {
+      return this.saveInternal(params);
+    } catch (error) {
+      this.recordWriteFailure("save", error);
+      throw error;
+    }
+  }
+
+  private saveInternal(params: SaveParams): SaveResult {
     const id = this.generateId();
     const timestamp = this.generateTimestamp();
     const tags = JSON.stringify(params.tags ?? []);
@@ -300,23 +337,28 @@ export class SQLiteStorage {
   }
 
   delete(params: DeleteParams): DeleteResult {
-    const deleted: string[] = [];
-    const notFound: string[] = [];
+    try {
+      const deleted: string[] = [];
+      const notFound: string[] = [];
 
-    const deleteMemory = this.db.prepare("DELETE FROM memories WHERE id = ?");
+      const deleteMemory = this.db.prepare("DELETE FROM memories WHERE id = ?");
 
-    for (const id of params.ids) {
-      const existing = this.db.prepare("SELECT id FROM memories WHERE id = ?").get(id) as { id: string } | undefined;
-      if (existing) {
-        deleteMemory.run(id);
-        this.db.prepare("DELETE FROM vectors WHERE id = ?").run(id);
-        deleted.push(id);
-      } else {
-        notFound.push(id);
+      for (const id of params.ids) {
+        const existing = this.db.prepare("SELECT id FROM memories WHERE id = ?").get(id) as { id: string } | undefined;
+        if (existing) {
+          deleteMemory.run(id);
+          this.db.prepare("DELETE FROM vectors WHERE id = ?").run(id);
+          deleted.push(id);
+        } else {
+          notFound.push(id);
+        }
       }
-    }
 
-    return { deleted, notFound };
+      return { deleted, notFound };
+    } catch (error) {
+      this.recordWriteFailure("delete", error);
+      throw error;
+    }
   }
 
   // 指定 ID の embedding を取得（クラスタリング用）
@@ -344,22 +386,27 @@ export class SQLiteStorage {
 
   // 論理削除: deleted_at にタイムスタンプを書き込む。memory_search の結果から外れるが、memory_get_detail では引ける（復元用に物理データは残す）。
   softDelete(ids: string[]): { softDeleted: string[]; notFound: string[] } {
-    const softDeleted: string[] = [];
-    const notFound: string[] = [];
-    const ts = this.generateTimestamp();
-    // 不変条件I4: state='deleted' と deleted_at IS NOT NULL は常に同値。書き込み経路で同期する。
-    const updateStmt = this.db.prepare("UPDATE memories SET deleted_at = ?, state = 'deleted' WHERE id = ? AND deleted_at IS NULL");
-    const checkStmt = this.db.prepare("SELECT id FROM memories WHERE id = ?");
-    for (const id of ids) {
-      const existing = checkStmt.get(id) as { id: string } | undefined;
-      if (existing) {
-        updateStmt.run(ts, id);
-        softDeleted.push(id);
-      } else {
-        notFound.push(id);
+    try {
+      const softDeleted: string[] = [];
+      const notFound: string[] = [];
+      const ts = this.generateTimestamp();
+      // 不変条件I4: state='deleted' と deleted_at IS NOT NULL は常に同値。書き込み経路で同期する。
+      const updateStmt = this.db.prepare("UPDATE memories SET deleted_at = ?, state = 'deleted' WHERE id = ? AND deleted_at IS NULL");
+      const checkStmt = this.db.prepare("SELECT id FROM memories WHERE id = ?");
+      for (const id of ids) {
+        const existing = checkStmt.get(id) as { id: string } | undefined;
+        if (existing) {
+          updateStmt.run(ts, id);
+          softDeleted.push(id);
+        } else {
+          notFound.push(id);
+        }
       }
+      return { softDeleted, notFound };
+    } catch (error) {
+      this.recordWriteFailure("softDelete", error);
+      throw error;
     }
-    return { softDeleted, notFound };
   }
 
   // tombstone（論理削除済み=deleted_at IS NOT NULL）の件数を数える（dry-run用・DBは書き換えない）。

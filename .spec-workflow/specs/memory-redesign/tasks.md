@@ -311,14 +311,14 @@
   - _Requirements: R-A4_
   - _Prompt: Role: data-investigator | Task: strictティア158件のオーナー承認結果を反映する | Restrictions: LLM分類を使わない。承認外の行に手を加えない | Success: 158件の去就が承認どおりに確定する_
 
-- [ ] 1.12 書き込み失敗計数の導入とWAL設定の確認固定
-  - File: src/storage/sqlite.ts（変更）, 対応テスト
-  - 前提の事実: WALとbusyタイムアウトはHEADで設定済み（src/storage/schema.ts:112-113）。新規設定は不要で、確認とテスト固定のみ行う
-  - ①「接続がWALモードでbusyタイムアウト設定済み（既存設定の固定）」「書き込み失敗が計数と警報になり、握りつぶされない」を失敗するテストとして先に書く
-  - ②書き込み系の catch を計数つき再throwへ統一する
+- [x] 1.12 書き込み失敗計数の導入とWAL設定の確認固定
+  - File: src/storage/sqlite.ts（変更）, src/observability/counters.ts（変更）, src/storage/write-resilience.test.ts（新規）
+  - 前提の事実: WALとbusyタイムアウトはHEADで設定済み（src/storage/schema.ts:112-113）。新規設定は不要で、確認とテスト固定のみ行った
+  - ①「接続がWALモードでbusyタイムアウト設定済み（既存設定の固定）」「書き込み失敗が計数と警報になり、握りつぶされない」を失敗するテストとして先に書いた（Red確認済み）
+  - ②save/delete/softDeleteのcatchを計数つき再throwへ統一した（recordWriteFailureヘルパー、write_failure_countメトリクス新設）
   - Purpose: 多並列実態での沈黙データ損失を防ぐ（R-A5）
-  - 完了条件: 並行書き込みテストで失敗が可視化される
-  - 検証: テスト緑（並行アクセスのケースを含む）と、ゲートG1の write-failure-counting 項目
+  - 完了条件: 並行書き込みテストで失敗が可視化される → 充足
+  - 検証: テスト緑（全5ケース）。npm run build / npx vitest run 全緑 / production-path-smoke 4/4 PASS
   - _Leverage: src/observability/counters.ts, src/storage/schema.ts:112-113_
   - _Requirements: R-A5_
   - _Prompt: Role: backend-engineer | Task: 書き込み失敗の計数付き再throwをテスト先行で導入しWAL設定をテストで固定する | Restrictions: catchで代替値を返さない（計数して再throw）。設定済みのPRAGMAを重複追加しない | Success: 競合時の失敗がカウンタに現れる_
