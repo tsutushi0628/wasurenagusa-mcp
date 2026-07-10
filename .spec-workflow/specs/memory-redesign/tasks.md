@@ -325,14 +325,14 @@
   - _Requirements: R-A5_
   - _Prompt: Role: backend-engineer | Task: 書き込み失敗の計数付き再throwをテスト先行で導入しWAL設定をテストで固定する | Restrictions: catchで代替値を返さない（計数して再throw）。設定済みのPRAGMAを重複追加しない | Success: 競合時の失敗がカウンタに現れる_
 
-- [ ] 1.13 埋め込みモデルの共有キャッシュ化と旧世代 vectors.json の廃棄
-  - File: src/config.ts（変更）, src/vector/local-embedding.ts（変更）, scripts/retire-legacy-vectors.ts（新規）, 対応テスト
-  - ①「モデルキャッシュ先が環境変数 WASURENAGUSA_MODEL_CACHE_DIR で共有先へ向く（未設定時は従来動作）」を失敗するテストとして先に書く
-  - ②キャッシュ先解決（src/config.ts:78）を変更し、既存7ストアの重複を共有1箇所へ集約する手順スクリプトを添える
-  - ③vectors.json はバックアップ取得を確認してから退避リネームする（削除はしない）
+- [x] 1.13 埋め込みモデルの共有キャッシュ化と旧世代 vectors.json の廃棄（コミット f3c637f・2026-07-10）
+  - File: src/config.ts（変更、getModelsDir()新設）, src/tools/search.ts・src/tools/save.ts・src/cli/backfill-worker.ts（変更、同型3箇所をgetModelsDir()呼び出しへ統一。原文のsrc/vector/local-embedding.ts変更は行わず、呼び出し側の解決関数を1箇所に集約する設計とした）, scripts/retire-legacy-vectors.ts（新規）, 対応テスト
+  - ①環境変数WASURENAGUSA_MODEL_CACHE_DIR未実装状態での失敗テスト（config-models-dir.test.ts）→ getModelsDir()実装で解消（Red→Green）。未設定・空文字時は従来動作へフォールバック
+  - ②scripts/retire-legacy-vectors.tsにconsolidateModelCache()を実装（冪等・上書きなし）。ただしグローバル環境変数の実設定と7ストア全体の実データ集約は、他の稼働中プロジェクトのMCPセッションへ実行時に影響するためオーナー調整を要する別ステップとして意図的に未実施（詳細はImplementation Log）
+  - ③retireLegacyVectors()実装。backup-store.tsのmanifest.jsonとのsha256一致確認後のみ同一ディレクトリ内でリネーム（削除なし）。本リポジトリ自身の実ストアに対して実行済み（バックアップ: ~/.wasurenagusa/eval/backups/20260710/wasurenagusa-mcp/、退避後もproduction-path-smoke 4/4 PASSを再確認）
   - Purpose: 522MBの重複回収と95MBの遺物整理（R-B8）
-  - 完了条件: モデル実体が1箇所になり、旧世代ファイルが読み経路から外れている
-  - 検証: テスト緑と、ゲートG1の shared-cache 項目
+  - 完了条件: モデル実体が1箇所になり、旧世代ファイルが読み経路から外れている → 機構は充足・自ストアのvectors.json退避は完了・7ストア全体の共有化実運用は次工程へ持ち越し
+  - 検証: テスト緑（新規10件+既存波及6ファイル修正）、build緑、production-path-smoke 4/4 PASS。ゲートG1のshared-cache項目は1.14で検証
   - _Leverage: scripts/backup-store.ts_
   - _Requirements: R-B8_
   - _Prompt: Role: backend-engineer | Task: モデル共有キャッシュ化と遺物退避をテスト先行で実装する | Restrictions: バックアップ未確認での退避をしない。v1ファイルを削除しない | Success: 重複が解消され従来環境でも動く_
