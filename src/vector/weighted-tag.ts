@@ -46,3 +46,26 @@ export function parseWeightedTags(tags: string[]): WeightedTag[] {
 export function formatWeightedTags(wts: WeightedTag[]): string[] {
   return wts.map(formatWeightedTag);
 }
+
+/**
+ * クエリ文字列とタグ配列を照合し、一致したタグの重みを返す（検索スコアリングの加点用）。
+ * 元々 src/tools/search.ts の非公開関数だったが、最終順位の決定権を src/storage/sqlite.ts
+ * 側の searchHybrid/search に一本化する再設計（design.md Phase 2）に伴い、ここへ移設した。
+ */
+export function matchQueryToTags(query: string, tags: string[]): number[] {
+  const queryTerms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const weightedTags = parseWeightedTags(tags);
+  const matchedWeights: number[] = [];
+
+  for (const wt of weightedTags) {
+    const tagLower = wt.tag.toLowerCase();
+    for (const term of queryTerms) {
+      if (tagLower.includes(term) || term.includes(tagLower)) {
+        matchedWeights.push(wt.weight);
+        break;
+      }
+    }
+  }
+
+  return matchedWeights;
+}
