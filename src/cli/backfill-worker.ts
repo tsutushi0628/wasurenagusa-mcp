@@ -11,7 +11,7 @@
 
 import { join } from "path";
 import { SQLiteStorage } from "../storage/index.js";
-import { config } from "../config.js";
+import { config, getModelsDir } from "../config.js";
 import { LocalEmbedding } from "../vector/local-embedding.js";
 import { increment } from "../observability/counters.js";
 import { isMainModule } from "../utils/cli-entry.js";
@@ -75,7 +75,8 @@ async function main() {
 
   await detectAndRecordResurrection(storage, memoryPath);
 
-  const localEmbedding = new LocalEmbedding(join(memoryPath, config.modelsDir));
+  // WASURENAGUSA_MODEL_CACHE_DIR設定時は共有キャッシュ先へ向く（タスク1.13）
+  const localEmbedding = new LocalEmbedding(getModelsDir(memoryPath));
   await localEmbedding.initialize();
   if (!localEmbedding.isAvailable()) {
     storage.close();

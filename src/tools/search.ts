@@ -5,7 +5,7 @@ import { LocalEmbedding } from "../vector/local-embedding.js";
 import { TIER_THRESHOLDS, shouldPromoteToCritical } from "../vector/memory-tier.js";
 import { SearchScorer } from "../vector/search-scorer.js";
 import { parseWeightedTags } from "../vector/weighted-tag.js";
-import { config, getMemoryPath } from "../config.js";
+import { config, getMemoryPath, getModelsDir } from "../config.js";
 import { buildSearchHint } from "../storage/search-hint.js";
 import { homedir } from "os";
 import { join, basename } from "path";
@@ -90,8 +90,8 @@ export async function handleMemorySearch(
 
   const limit = params.limit || 5;
 
-  // LocalEmbedding初期化
-  const modelsDir = join(memoryPath, config.modelsDir);
+  // LocalEmbedding初期化（WASURENAGUSA_MODEL_CACHE_DIR設定時は共有キャッシュ先へ、タスク1.13）
+  const modelsDir = getModelsDir(memoryPath);
   const localEmbedding = new LocalEmbedding(modelsDir);
   let embeddingAvailable = false;
   try {

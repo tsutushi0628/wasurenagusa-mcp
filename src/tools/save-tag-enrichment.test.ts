@@ -47,6 +47,7 @@ vi.mock("../vector/tag-enricher.js", () => {
 vi.mock("../config.js", () => ({
   config: { geminiApiKey: "test-key", sqliteFile: "memory.db", modelsDir: "models" },
   getMemoryPath: vi.fn().mockReturnValue("/tmp/test-memory"),
+  getModelsDir: vi.fn().mockReturnValue("/tmp/test-memory/models"),
 }));
 
 import { handleMemorySave } from "./save.js";

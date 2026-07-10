@@ -52,6 +52,7 @@ vi.mock("../vector/memory-tier.js", () => ({
 vi.mock("../config.js", () => ({
   config: { geminiApiKey: "", sqliteFile: "memory.db", modelsDir: "models" },
   getMemoryPath: vi.fn().mockReturnValue("/tmp/test-memory-hint-consistency"),
+  getModelsDir: vi.fn().mockReturnValue("/tmp/test-memory-hint-consistency/models"),
 }));
 
 const mockGetActiveProjects = vi.fn();

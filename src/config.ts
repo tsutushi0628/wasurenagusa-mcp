@@ -84,3 +84,19 @@ export const config = {
 export function getMemoryPath(projectRoot: string): string {
   return resolve(projectRoot, config.memoryDir);
 }
+
+/**
+ * 埋め込みモデルのキャッシュ先を解決する（タスク1.13、R-B8）。
+ *
+ * 環境変数 WASURENAGUSA_MODEL_CACHE_DIR が設定されていれば、複数ストア（プロジェクト）間で
+ * 共有する1箇所のディレクトリを返す（7ストアぶんの重複ダウンロード=522MB相当を1箇所へ集約）。
+ * 未設定（または空文字）のときは従来どおりプロジェクトごとの memoryPath 配下
+ * （config.modelsDir）を返し、既存の動作を変えない。
+ */
+export function getModelsDir(memoryPath: string): string {
+  const sharedDir = process.env.WASURENAGUSA_MODEL_CACHE_DIR;
+  if (sharedDir && sharedDir.length > 0) {
+    return sharedDir;
+  }
+  return join(memoryPath, config.modelsDir);
+}
