@@ -337,13 +337,37 @@
   - _Requirements: R-B8_
   - _Prompt: Role: backend-engineer | Task: モデル共有キャッシュ化と遺物退避をテスト先行で実装する | Restrictions: バックアップ未確認での退避をしない。v1ファイルを削除しない | Success: 重複が解消され従来環境でも動く_
 
-- [ ] 1.14 ゲートG1スクリプトの作成（検証役）
-  - File: scripts/gates/g1-foundation.ts（新規）
-  - design.md Phase 1 ③の契約どおりに実装する（前提アサートと検査8項目）
+- [x] 1.14 ゲートG1スクリプトの作成（検証役）（コミット <PENDING>・2026-07-10）
+  - File: scripts/gates/g1-foundation.ts（新規）, scripts/gates/g1-foundation.test.ts（新規）
+  - design.md Phase 1 ③の契約どおりに実装した（前提アサート3点＋検査9項目。本文の「検査8項目」は
+    design.md本文の実際の箇条書き数と食い違う誤記だったため、本行で9項目へ訂正する）
+  - 前提アサート: schema_versionのMAXが6、バックアップ存在、memories総件数1,000件以上。1つでも
+    不成立なら9検査を一切実行せずFAILで終了する契約をテストで固定した
+  - 検査9項目: state-consistency（state/deleted_at同期）、pt-invariants（PT-01/PT-05を
+    tests/properties/state-machine.property.test.tsのvitestサブプロセス実行で転記）、
+    resurrection-zero（tombstone化済みmemoriesのvectors/vector_metadata残存が0件。
+    countTombstones()と同じ判定を独立再導出し、実装側の変更が検査に波及しない設計にした）、
+    embedding-single-model（生存ベクトルのembedding_modelが単一。複数時はImplementation Logs内の
+    据え置き判断記録があればエスケープハッチでPASS）、project-confidence（confirmed/inferred/
+    unknownの分布を実測で正直に報告。R-A4 AC3のunknown素通し節を独立再導出し番兵プロジェクト名で
+    回帰検査することで、projectフィルタの素通し機構＝バックフィル完了状態に依らず不明バケツを
+    取りこぼさない整合を検証する設計とした）、wal（実ストアのjournal_mode直読み+AC1/AC2を
+    src/storage/write-resilience.test.tsのvitestサブプロセス実行で転記）、write-failure-counting
+    （AC3の3テストをサブプロセス実行で転記）、shared-cache（WASURENAGUSA_MODEL_CACHE_DIRの実効を
+    getModelsDir()で実測。現状は1.13でグローバル適用を意図的に未実施のためFAILが正しい実測結果）、
+    spike-report（task-1.2のImplementation Logにbefore/after実測値が残っていることを確認）
+  - G0との設計上の違い: G1の9検査は全て「実ストアへの読み取り専用SQL」または「--storeに一切
+    触れない既存テストファイルのサブプロセス再実行」のみで完結するため、G0のscratch-copy機構
+    （createScratchProject等）は不要と判断し実装しなかった
   - Purpose: 土台フェーズの完了を実行可能な検査にする
-  - 完了条件: 契約どおりのG1が動き、違反状態でFAILする
-  - 検証: 意図的な違反状態（例: 混在ベクトル）でのFAIL確認出力
-  - _Leverage: scripts/gates/g0-hemostasis.ts の共通形式_
+  - 完了条件: 契約どおりのG1が動き、違反状態でFAILする → 充足
+  - 検証: 合成fixture（tests/fixtures/mini-store/のbuildMiniStore）に対する統合テストで、
+    正常系（全9項目PASS）と意図的な違反系（蘇生状態でresurrection-zeroのみFAIL、他は実行され
+    PASSする／共有キャッシュ未設定でshared-cacheのみFAILする）の両方を確認した。加えて実ストア
+    （このリポジトリ自身の288件ストア）に対して実行し、memories件数不足（実測288件<1,000件）で
+    前提アサートが正しくFAILし9検査が実行されないことを確認した。npm run build緑・
+    npx vitest run全緑（97ファイル986件、新規38件含む）・production-path-smoke 4/4 PASS
+  - _Leverage: scripts/gates/g0-hemostasis.ts の共通形式, tests/fixtures/mini-store/build-mini-store.ts, scripts/backup-store.ts_
   - _Requirements: R-M3_
   - _Prompt: Role: qa-engineer | Task: design.mdの契約どおりG1を実装する | Restrictions: 実装者のコードを修正しない。出力に本文を載せない | Success: PASSとFAILの両方が正しく判定される_
 
