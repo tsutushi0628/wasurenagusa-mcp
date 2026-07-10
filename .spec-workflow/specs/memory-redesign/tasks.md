@@ -337,7 +337,7 @@
   - _Requirements: R-B8_
   - _Prompt: Role: backend-engineer | Task: モデル共有キャッシュ化と遺物退避をテスト先行で実装する | Restrictions: バックアップ未確認での退避をしない。v1ファイルを削除しない | Success: 重複が解消され従来環境でも動く_
 
-- [x] 1.14 ゲートG1スクリプトの作成（検証役）（コミット <PENDING>・2026-07-10）
+- [x] 1.14 ゲートG1スクリプトの作成（検証役）（コミット baddeb8・2026-07-10）
   - File: scripts/gates/g1-foundation.ts（新規）, scripts/gates/g1-foundation.test.ts（新規）
   - design.md Phase 1 ③の契約どおりに実装した（前提アサート3点＋検査9項目。本文の「検査8項目」は
     design.md本文の実際の箇条書き数と食い違う誤記だったため、本行で9項目へ訂正する）
@@ -371,7 +371,7 @@
   - _Requirements: R-M3_
   - _Prompt: Role: qa-engineer | Task: design.mdの契約どおりG1を実装する | Restrictions: 実装者のコードを修正しない。出力に本文を載せない | Success: PASSとFAILの両方が正しく判定される_
 
-- [x] 1.15 G1実行と出力貼付（コミット <PENDING>・2026-07-10）
+- [x] 1.15 G1実行と出力貼付（コミット 666118a・2026-07-10）
   - File: Implementation Logs/task-1.15-g1-foundation-execution.md（新規）
   - schema v6化済みの実ストア（firebase-kit、G1前提の1,000件以上を満たす唯一のストア）から
     task 0.12と同一手順（make-eval-snapshot.ts）で新規スナップショットを作成し、それに対して
