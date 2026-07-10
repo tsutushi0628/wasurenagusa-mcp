@@ -436,6 +436,7 @@
 
 - [x] 2.4 段階フォールバッククエリビルダ（コミット 89e5813・2026-07-04）
   - 実装注記: 実体は独立モジュールではなく src/storage/sqlite.ts への直接実装（2.5・2.6と同一コミット）
+  - 再オープン注記（2026-07-10実査・PdM裁定）: 設計契約（design.md「フレーズ→AND→OR の段階試行と各段の発火計数」）との乖離を確認。根治は2.6-R
   - File: src/search/query-builder.ts, src/search/query-builder.test.ts（新規）
   - ①「フレーズ→AND→OR の順で試行し、最初にヒットした段を採用する」「各段の発火が計数される」「2文字以下の語の扱いがスパイク確認どおり」を失敗するテストとして先に書く
   - ②タスク0.2で確認済みの構文のみでビルダを実装する
@@ -460,6 +461,7 @@
 
 - [x] 2.6 時間減衰ランキング（コミット 89e5813・2026-07-04）
   - 実装注記: 実体は独立モジュールではなく src/storage/sqlite.ts への直接実装（2.4・2.5と同一コミット）。タスク2.7〜2.9が前提とする新旧並走モジュール構成（src/search/配下の別実装とshadow.ts）は存在せず、本番コードを直接置換した
+  - 再オープン注記（2026-07-10実査・PdM裁定）: 時間減衰が実装に不在であることを確認（RRFスコア降順＋同点timestampタイブレークのみ）。根治は2.6-R
   - File: src/search/time-decay.ts, src/search/time-decay.test.ts（新規）
   - ①「最終順位が rrfScore × 半減期減衰 で決まる」「時系列単独の並びが存在しない」を失敗するテストとして先に書く
   - ②半減期は設定値（既定90日）とし、timestamp DESC の最終並び（src/storage/sqlite.ts:452-453）を置き換える
@@ -469,6 +471,21 @@
   - _Leverage: src/search/rrf.ts_
   - _Requirements: R-B2_
   - _Prompt: Role: backend-engineer | Task: 時間減衰ランキングをテスト先行で実装する | Restrictions: 純関連度への一本化をしない（減衰素性を残す） | Success: 減衰の有無で順位が意図どおり変わる_
+
+- [ ] 2.6-R 検索順位の設計契約適合（2.4/2.6の再オープン。PdM裁定2026-07-10）
+  - File: src/storage/sqlite.ts（変更）, src/tools/search.ts（変更）, src/vector/search-scorer.ts（変更）, 対応テスト
+  - 再オープン根拠（2026-07-10実査で確定した設計契約との乖離3点）:
+    - ① 段階フォールバック＋段発火計数の不在: 実装実体は文字種境界トークン分割＋OR結合一発（3文字未満はLIKEフォールバック。src/storage/sqlite.ts:41-65）。design.md「フレーズ→AND→OR の順で試行し、最初にヒットした段を採用。各段の発火を計数」は存在しない
+    - ② 時間減衰の不在: 最終並びは「RRFスコア降順＋同点のみtimestamp DESCタイブレーク」（src/storage/sqlite.ts:685）。design.md「finalScore = rrfScore × 0.5^(ageDays/H)（半減期H既定90日）」は存在しない
+    - ③ 旧スコアラーのfreshness項（半減期14日）が本番読み経路で現役: src/tools/search.ts:164-196 がRRF順位をSearchScorer再ソートで上書きしており、最終順位の決定権が旧スコアラー側にある。design.md「recencyの反映元はtime-decayただ一つ（二重減衰の禁止）・freshness項は除去」に反する
+  - 裁定: 承認済み設計契約が正。契約側を現実装へ改訂する選択は承認済みspecの無言の縮小になるため不採用（PdM裁定2026-07-10）
+  - 実装内容: design.md Phase 2「検索パイプラインの定義」1〜4に実装を適合させる（段階フォールバック＋各段発火計数、時間減衰、freshness項除去。アクセス実績ブースト等の非recency素性は存置）
+  - Purpose: G2検査（fallback-counters・recall）の前提成立と設計契約の回復
+  - 完了条件: 段階フォールバックが各段計数つきで動き、最終順位が rrfScore×時間減衰で決まり、freshness項が読み経路から除去されている
+  - 検証: テスト緑（2.4/2.6の元の検証観点を含む）と、2.3評価スクリプトでの再測定
+  - _Leverage: scripts/spikes/spike-fts5-trigram.ts の確認結果, src/observability/counters.ts, scripts/gates/eval-golden.ts_
+  - _Requirements: R-B1, R-B2_
+  - _Prompt: Role: backend-engineer（Batch 1担当と別の実装者に割当。役割独立の維持） | Task: 検索順位を設計契約（design.md Phase 2）へ適合させる | Restrictions: 凍結済み評価資産（ゴールデンセット・スナップショット）に触れない。非recency素性は存置 | Success: 設計契約1〜4と実装が一致し各段発火が観測できる_
 
 - [ ] 2.7 読み経路の書き込み副作用の廃止
   - File: src/tools/search.ts（変更）, 対応テスト
