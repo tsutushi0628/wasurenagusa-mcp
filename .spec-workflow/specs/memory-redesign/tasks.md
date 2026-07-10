@@ -311,7 +311,7 @@
   - _Requirements: R-A4_
   - _Prompt: Role: data-investigator | Task: strictティア158件のオーナー承認結果を反映する | Restrictions: LLM分類を使わない。承認外の行に手を加えない | Success: 158件の去就が承認どおりに確定する_
 
-- [x] 1.12 書き込み失敗計数の導入とWAL設定の確認固定
+- [x] 1.12 書き込み失敗計数の導入とWAL設定の確認固定（コミット 8dd5912・2026-07-10）
   - File: src/storage/sqlite.ts（変更）, src/observability/counters.ts（変更）, src/storage/write-resilience.test.ts（新規）
   - 前提の事実: WALとbusyタイムアウトはHEADで設定済み（src/storage/schema.ts:112-113）。新規設定は不要で、確認とテスト固定のみ行った
   - ①「接続がWALモードでbusyタイムアウト設定済み（既存設定の固定）」「書き込み失敗が計数と警報になり、握りつぶされない」を失敗するテストとして先に書いた（Red確認済み）
