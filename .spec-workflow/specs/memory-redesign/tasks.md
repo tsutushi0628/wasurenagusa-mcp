@@ -183,13 +183,14 @@
 完了条件：ゲートG1の全項目PASSと出力貼付。
 注記：本フェーズ内の完了マーク済みタスクは、フェーズゲート運用開始前の先行実施であり、ゲート証跡（G1）は本タスクでは未整備。
 
-- [ ] 1.1 多言語埋め込みモデル候補の実在確認スパイク
+- [x] 1.1 多言語埋め込みモデル候補の実在確認スパイク（コミット後日注記予定・2026-07-10）
   - File: scripts/spikes/spike-multilingual-embedding.ts（新規）
+  - タスク1.8（2026-07-04適用済み）に対して本タスクを遡って実行し前提事実を固定した。候補3件（旧デフォルトXenova/all-MiniLM-L6-v2、現行デフォルトXenova/multilingual-e5-small、未採用の多言語代替Xenova/paraphrase-multilingual-MiniLM-L12-v2）とも実在・ロード可能・次元数384を確認
   - 差替え候補モデルを @huggingface/transformers で実際にロードし、次元数と日本語文ペアの類似度サンプルを確認する
-  - 候補の実在（ONNX提供の有無）を確認できないモデルは候補から外す
+  - 候補の実在（ONNX提供の有無）を確認できないモデルは候補から外す（今回は除外0件）
   - Purpose: モデル差替え判断（タスク1.8）の前提事実を固定する
-  - 完了条件: 各候補のロード可否と次元数が実行出力で記録されている
-  - 検証: スパイク実行出力の貼付
+  - 完了条件: 各候補のロード可否と次元数が実行出力で記録されている → 充足
+  - 検証: スパイク実行出力の貼付。Implementation Logs/task-1.1-multilingual-embedding-spike.md 参照
   - _Leverage: src/vector/local-embedding.ts_
   - _Requirements: R-B5, R-M3_
   - _Prompt: Role: backend-engineer | Task: 差替え候補モデルの実在と次元を実行確認する | Restrictions: 本番ストアに書き込まない。想像上のモデル名を使わない | Success: 候補ごとの事実が出力付きで残る_
