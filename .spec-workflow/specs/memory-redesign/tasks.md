@@ -371,13 +371,25 @@
   - _Requirements: R-M3_
   - _Prompt: Role: qa-engineer | Task: design.mdの契約どおりG1を実装する | Restrictions: 実装者のコードを修正しない。出力に本文を載せない | Success: PASSとFAILの両方が正しく判定される_
 
-- [ ] 1.15 G1実行と出力貼付
-  - File: Implementation Logs（追記）
-  - スナップショットに対してG1を実行し、結果本文を貼付する
-  - Purpose: Phase 2 の着手条件を成立させる
-  - 完了条件: G1全項目PASSの出力本文が貼付されている
-  - 検証: 貼付された出力本文のレビュー
-  - _Leverage: scripts/gates/g1-foundation.ts_
+- [x] 1.15 G1実行と出力貼付（コミット <PENDING>・2026-07-10）
+  - File: Implementation Logs/task-1.15-g1-foundation-execution.md（新規）
+  - schema v6化済みの実ストア（firebase-kit、G1前提の1,000件以上を満たす唯一のストア）から
+    task 0.12と同一手順（make-eval-snapshot.ts）で新規スナップショットを作成し、それに対して
+    G1を実行して結果本文を全文貼付した（詳細・全出力は上記Implementation Logs参照）
+  - 実行結果: **8/9 PASS**（shared-cacheのみFAIL）。完了条件「G1全項目PASSの出力本文」は文字
+    どおりには未充足。FAILは隠さずそのまま貼付済み
+  - shared-cache FAILの由来: 新規の不具合ではなく、task 1.13で既に記録済みの意図的な未実施
+    （グローバル環境変数WASURENAGUSA_MODEL_CACHE_DIRの実設定は他6プロジェクトの稼働中セッションへ
+    即座に影響するため、オーナー調整を要する別ステップとして確定済み）がそのままG1に反映された
+    もの。仕組み自体は1.14の合成fixtureテストで環境変数設定時のPASSを実証済み
+  - Purpose: Phase 2 の着手条件を成立させる → **未充足のまま持ち越し**（下記「オーナー判断待ち」参照）
+  - 完了条件: G1全項目PASSの出力本文が貼付されている → **未充足**（8/9。残り1件は上記の理由）
+  - 検証: 貼付された出力本文のレビュー（qa-engineer自己レビュー済み。数値は実測そのまま、
+    個人ホーム絶対パスは1箇所のみ`<snapshot>/models`へ抽象化して掲載）
+  - オーナー判断待ち: shared-cache未充足のままPhase 2へ進むか、グローバル環境変数の実設定
+    （他プロジェクトへの実行時影響を伴う）を先に実施して9/9化するかの判断をPdM/オーナーへ持ち越す。
+    本タスク自体では選択していない
+  - _Leverage: scripts/gates/g1-foundation.ts, scripts/make-eval-snapshot.ts_
   - _Requirements: R-M3_
   - _Prompt: Role: qa-engineer | Task: G1を実行し出力本文を貼付する | Restrictions: FAILを隠さない | Success: 全項目PASSの本文が残る_
 
