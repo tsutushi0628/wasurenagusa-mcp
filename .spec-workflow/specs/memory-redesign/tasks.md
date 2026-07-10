@@ -195,13 +195,13 @@
   - _Requirements: R-B5, R-M3_
   - _Prompt: Role: backend-engineer | Task: 差替え候補モデルの実在と次元を実行確認する | Restrictions: 本番ストアに書き込まない。想像上のモデル名を使わない | Success: 候補ごとの事実が出力付きで残る_
 
-- [ ] 1.2 日本語トークナイザ先行スパイク（クエリ側整合の再計測）
-  - File: scripts/spikes/spike-query-tokenize.ts（新規）
-  - クエリ側のフレーズ固定（src/storage/sqlite.ts:814-816 の escapeFtsQuery）をtrigram整合（引用符除去とトークン分割）へ変えた場合のゼロヒット率を、凍結スナップショットと実ログのクエリ集合で再計測する
-  - before/after のゼロヒット率を記録し、検索再設計（Phase 2）の要否と規模の判断を1行で書く
+- [x] 1.2 日本語トークナイザ先行スパイク（クエリ側整合の再計測）（コミット後日注記予定・2026-07-10）
+  - File: scripts/spikes/spike-query-tokenize.mjs（新規。実装注記: 現行実装への忠実性のため`.ts`から`.mjs`へ変更してdist/を直接import。タスク1.6/1.9と同じ判断根拠）
+  - クエリ側のフレーズ固定（旧escapeFtsQuery、コミット89e5813~1で確認済み）をtrigram整合（引用符除去とトークン分割）へ変えた場合のゼロヒット率を、凍結スナップショット（~/.wasurenagusa/eval/snapshots/2026-07-07/firebase-kit）と実ログのクエリ集合（12,018件）で再計測した
+  - 結果: ゼロヒット率 99.8%→2.5%（97.3pt改善、クエリ側トークナイズ単独の寄与）。判断: 支配的寄与でありPhase 2は残り2.5%相当の微調整＋順位統合の質に絞ってよい
   - Purpose: 安価で情報量の多い実験を再設計の前に置く（設計判断D-3-1）
-  - 完了条件: before/afterの数値と規模判断が記録されている
-  - 検証: 再計測出力の貼付（クエリ本文は出さず件数と率のみ）
+  - 完了条件: before/afterの数値と規模判断が記録されている → 充足
+  - 検証: 再計測出力の貼付（クエリ本文は出さず件数と率のみ）。Implementation Logs/task-1.2-query-tokenize-remeasurement.md 参照
   - _Leverage: scripts/spikes/spike-fts5-trigram.ts, スナップショット_
   - _Requirements: R-B1, R-M3_
   - _Prompt: Role: backend-engineer | Task: クエリ側トークナイズ変更だけの効果をスナップショットで再計測する | Restrictions: 本実装に進まない。出力にクエリ本文を載せない | Success: 主因寄与が数値で確定する_
