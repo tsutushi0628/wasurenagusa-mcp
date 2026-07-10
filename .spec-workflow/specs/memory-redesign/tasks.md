@@ -33,7 +33,7 @@
   - _Requirements: R-A1, R-A3_
   - _Prompt: Role: scm-engineer | Task: 予測誤差ループの扱いを判断記録し版数ベースラインv5を記録する | Restrictions: 判断確定前に物理削除を実行しない。既存コミットへのforce操作をしない | Success: 扱い判断とv5記録が残る_
 
-- [ ] 0.1 sqlite-vec APIの実在確認スパイク
+- [x] 0.1 sqlite-vec APIの実在確認スパイク（コミット 0aaa269・2026-07-08）
   - File: scripts/spikes/spike-sqlite-vec.ts（新規）
   - vec0仮想テーブルの距離既定（L2）、KNN構文、距離値の取得方法を使い捨ての小DBで実行確認する
   - 動いた構文と動かなかった構文を Implementation Log に記録する。以降の実装はここで確認済みの構文しか使わない
@@ -44,7 +44,7 @@
   - _Requirements: R-B4, R-M3_
   - _Prompt: Role: backend-engineer | Task: sqlite-vec 0.1.9のvec0 APIを使い捨てDBで実行確認し結果を記録する | Restrictions: 本番ストアに接続しない。書き込みは使い捨てDBのみ | Success: 確認済み構文の一覧が実行出力付きで残る_
 
-- [ ] 0.2 FTS5 trigramクエリ挙動の実在確認スパイク
+- [x] 0.2 FTS5 trigramクエリ挙動の実在確認スパイク（コミット 024853b・2026-07-08）
   - File: scripts/spikes/spike-fts5-trigram.ts（新規）
   - trigram索引に対するフレーズクエリとトークン分割クエリ（AND、OR）の挙動を、日本語サンプル文で実行確認する
   - 2文字以下のクエリ語の扱い（trigramの最短長制約）も確認する
@@ -55,7 +55,7 @@
   - _Requirements: R-B1, R-M3_
   - _Prompt: Role: backend-engineer | Task: FTS5 trigramの日本語クエリ挙動を使い捨てDBで確認し記録する | Restrictions: 本番ストアに接続しない | Success: クエリ形ごとのヒット挙動が出力付きで残る_
 
-- [ ] 0.3 トークン計数ライブラリの実在確認と較正スパイク
+- [x] 0.3 トークン計数ライブラリの実在確認と較正スパイク（コミット a5a95b7・2026-07-08）
   - File: scripts/spikes/spike-token-counter.ts（新規）
   - 候補ライブラリをローカルで実行し、日本語テキストのトークン数を計測できることを確認する
   - 実測済みの注入サンプル（約8.2KB）で計数し、消費側モデルとの乖離を見込んだ安全係数（バジェットに0.8を乗じる等）を決めて記録する
@@ -67,7 +67,7 @@
   - _Requirements: R-C1, R-M3_
   - _Prompt: Role: backend-engineer | Task: トークン計数ライブラリを実在確認して確定しexact pinで導入、較正係数を記録する | Restrictions: 未確認ライブラリのAPIを想像で使わない。外部API送信をしない | Success: 日本語テキストの計数が動き、係数の根拠が残る_
 
-- [ ] 0.4 バックアップと復元のテスト作成
+- [x] 0.4 バックアップと復元のテスト作成（コミット 11d6386・2026-07-08。0.5と同一コミット）
   - File: scripts/backup-store.test.ts（新規）
   - 「対象全ストアの全ファイルがバックアップされ、チェックサムマニフェストが検証できる」「主ストアは復元リハーサルで件数とチェックサムが一致する」「バックアップ検証失敗時にエラー終了する」を失敗するテストとして先に書く
   - Purpose: R-A1 の受け入れ基準をテストで固定する（Red）
@@ -77,7 +77,7 @@
   - _Requirements: R-A1_
   - _Prompt: Role: backend-engineer | Task: バックアップと復元リハーサルの業務要件をテストで先に固定する | Restrictions: 実装を書かない。一時ディレクトリのfixtureで完結させる | Success: 要件どおりの失敗テストが揃う_
 
-- [ ] 0.5 バックアップと復元スクリプトの実装
+- [x] 0.5 バックアップと復元スクリプトの実装（コミット 11d6386・2026-07-08）
   - File: scripts/backup-store.ts, scripts/restore-store.ts（新規）
   - 対象ストアの全ファイル（memory.db、Markdown、vectors.json、ログ）をコピーし、チェックサムマニフェストを生成する
   - restore は マニフェスト照合つきでコピーを戻す。照合失敗はエラー終了（fail-loud）
@@ -90,7 +90,7 @@
   - _Requirements: R-A1_
   - _Prompt: Role: backend-engineer | Task: 全量バックアップと検証つき復元を実装しテストを緑にする | Restrictions: 原本への書き込みをしない。`??`/`||` のフォールバック代入をしない | Success: 復元リハーサルで件数とチェックサムが一致する_
 
-- [ ] 0.6 v1書き込み経路の物理遮断
+- [x] 0.6 v1書き込み経路の物理遮断（コミット 5e3d5d5・2026-07-08）
   - File: src/cli/context.ts（変更）, src/tools/save.ts（変更）, 対応テスト（変更と新規）
   - ①「セッション開始処理を実行してもMarkdownと vectors.json が書き変わらない」「retag-workerがspawnされない」を失敗するテストとして先に書く
   - ②SessionStartからの consolidate-worker spawn（src/cli/context.ts:419-423 の鮮度判定起点）を除去する。retag-worker の spawn 実体は保存経路側にあり（定義 src/tools/save.ts:86-96、発火 :185-196）、こちらも除去する
@@ -115,7 +115,7 @@
   - _Requirements: R-C4_
   - _Prompt: Role: backend-engineer | Task: ガードパターン自動生成の経路をテスト先行で停止する | Restrictions: PreToolUse照合の挙動自体は変えない（Phase 4対象） | Success: 統合後もパターン集合が不変_
 
-- [ ] 0.8 夜間統合のdry-run化
+- [x] 0.8 夜間統合のdry-run化（コミット 9aeb99b・2026-07-08）
   - File: src/cli/consolidate-all.ts（変更）, 対応テスト
   - ①「実行後に memories と統合キャッシュへの書き込みが0件で、レポートファイルが生成される」を失敗するテストとして先に書く
   - ②書き込みを停止し、クラスタ数と統合候補件数のレポート出力へ置き換える
@@ -126,7 +126,7 @@
   - _Requirements: R-A3, R-A6_
   - _Prompt: Role: backend-engineer | Task: 夜間統合をテスト先行でdry-run化する | Restrictions: launchd配線を変えない。クラスタリング計算は残す | Success: 書き込み0件でレポートが出る_
 
-- [ ] 0.9 可観測性カウンタ5指標と閾値警報
+- [x] 0.9 可観測性カウンタ5指標と閾値警報（コミット f86eb9a・2026-07-08）
   - File: src/observability/counters.ts, src/observability/counters.test.ts（新規）
   - ①「5指標（ゼロヒット率、注入トークン数、統合件数、ガードブロック件数、蘇生件数）が記録される」「閾値超過で alert=true が付く」を失敗するテストとして先に書く
   - ②JSONL追記の計数モジュールを実装し、検索と注入とガードと統合の各経路から呼び出す
@@ -205,7 +205,7 @@
   - _Requirements: R-B1, R-M3_
   - _Prompt: Role: backend-engineer | Task: クエリ側トークナイズ変更だけの効果をスナップショットで再計測する | Restrictions: 本実装に進まない。出力にクエリ本文を載せない | Success: 主因寄与が数値で確定する_
 
-- [ ] 1.3 スキーマv6移行のテスト作成
+- [x] 1.3 スキーマv6移行のテスト作成（コミット 72f901f・2026-07-10。1.4と同一コミット）
   - File: src/storage/migration-v6.test.ts（新規）
   - 版数注記: v5は予測誤差ループ（コミット8b915a5）で占有済みのため、本Specの土台列移行はv6となる（タスク0.0の版数ベースライン=v5参照）
   - 「state列とproject_confidence列とembedding_model列が追加される」「既存行のstateがdeleted_atから正しくバックフィルされる」「移行前にバックアップが走り、失敗時は移行が中止される」を失敗するテストとして先に書く
@@ -216,7 +216,7 @@
   - _Requirements: R-A1, R-A2, R-A4_
   - _Prompt: Role: backend-engineer | Task: v6移行の業務要件をテストで先に固定する | Restrictions: 実装を書かない | Success: 要件どおりの失敗テストが揃う_
 
-- [ ] 1.4 スキーマv6移行の実装
+- [x] 1.4 スキーマv6移行の実装（コミット 72f901f・2026-07-10）
   - File: src/storage/migration.ts（変更）, src/storage/sqlite.ts（変更）, src/storage/schema.ts（変更）
   - design.md Phase 1 ①の手順（列定義）どおり、版数 5→6 の移行を migrateV5ToV6 として src/storage/migration.ts へ追加し、src/storage/sqlite.ts:44-72 の移行ディスパッチへ配線する。CURRENT_SCHEMA_VERSION（src/storage/schema.ts:3）を6へ更新する
   - タスク1.3のテストを緑にし、リファクタする
@@ -227,7 +227,7 @@
   - _Requirements: R-A2, R-A4, R-B5_
   - _Prompt: Role: backend-engineer | Task: v6移行を既存機構に追記しテストを緑にする | Restrictions: 既存列の削除や改名をしない。新規移行フレームワークを作らない | Success: 移行後の全件でstateとdeleted_atが同期_
 
-- [ ] 1.5 読み経路への状態可視性の適用
+- [x] 1.5 読み経路への状態可視性の適用（コミット cea316f・2026-07-10）
   - File: src/storage/sqlite.ts（変更）, src/tools/getDetail.ts（変更）, 対応テスト
   - ①design.md の可視性マトリクスを失敗するテストとして先に書く（検索と注入と統合は active のみ、get_detail は archived まで、deleted は全経路不可）
   - ②各読みクエリへ state 条件を統一適用する
@@ -288,10 +288,10 @@
   - _Requirements: R-B5_
   - _Prompt: Role: backend-engineer | Task: 版数管理つき再埋め込みをテスト先行で実装する | Restrictions: 旧表を削除しない。完了ゲート前に新モデル検索を有効化しない | Success: 混在状態が起動時に検出され拒否される_
 
-- [ ] 1.10 保存時project刻印の修正（残: project省略時のunknown明示化）
+- [x] 1.10 保存時project刻印の修正（コミット bf622d6・2026-07-10）
   - File: src/tools/save.ts（変更）, 対応テスト
   - 完了済み: project任意引数の追加（コミット 2911955・2026-07-05）。呼び出し側が project を明示すればその値が刻印される
-  - 残作業: ①「project省略時の保存で project 列が unknown 明示刻印される」「省略時に標準エラー警告が出る」を失敗するテストとして先に書く ②project省略時の暗黙cwdフォールバック（src/tools/save.ts:152-156 の basename(projectRoot) 代入）を、unknown明示刻印＋標準エラー警告へ置換する（design.md 禁止フォールバック#5に整合）
+  - 完了: ①「project省略時の保存で project 列が unknown 明示刻印される」「省略時に標準エラー警告が出る」テストを先に書いた（src/tools/save-project-attribution.test.ts） ②project省略時の暗黙cwdフォールバック（旧 src/tools/save.ts:152-156 の basename(projectRoot) 代入）を、unknown明示刻印＋標準エラー警告へ置換した（design.md 禁止フォールバック#5に整合）。project明示時はproject_confidence='confirmed'、省略時は'unknown'をスキーマv6のproject_confidence列へ記録する配線も同時実装した。副作用として project='unknown' が実在の非NULL値になるため、search/searchHybrid/readConfigEntries/readAliveDontEntries等の全project絞り込み経路にproject='unknown'の素通しを追加し、R-A4 AC3（不明バケツをフィルタの裏に消さない）を維持した
   - Purpose: 全件が単一project刻印になる構造（症状①の一因）の根治
   - 完了条件: project省略保存でproject列が unknown になること・既存テストと本番経路スモークが緑のこと
   - 検証: テスト緑（project省略ケースを含む）と production-path-smoke の結果
@@ -299,14 +299,14 @@
   - _Requirements: R-A4_
   - _Prompt: Role: backend-engineer | Task: project省略時の暗黙フォールバックをテスト先行でunknown明示化する | Restrictions: 特定不能時に推測で埋めない（unknownを明示する） | Success: 省略時に必ずunknownが刻印される_
 
-- [ ] 1.11 projectの決定論バックフィル（残: strictティア158件の承認結果反映）
+- [x] 1.11 projectの決定論バックフィル（strictティア158件・2026-07-07適用済みとDB照合で確定）
   - File: scripts/maintenance/backfill-project-attribution.mjs（実装済み）
   - 実装済み: 決定論的手掛かり（title/tagsに既知プロジェクト名がちょうど1個出現し、起動プロジェクト名と共起しない）のみで判定するprecision優先方式。--tier 3段（recommended/strict/loose）でdry-run既定、--applyで実更新。LLMによる一括再分類はしない
-  - recommendedティアは適用済み（1,498件を再帰属）。strictティア該当158件はオーナー承認待ち（2026-07-05判断）。残り約7,875件は現状維持で確定
-  - 残作業: strictティア158件のオーナー承認結果を得て、承認分のみ --apply で反映する
+  - recommendedティアは適用済み（1,498件を再帰属）。strictティア該当158件はオーナー承認のうえ2026-07-07セッションで適用済み（handoff-20260707-wasurenagusa-effect-verification-and-spec-rebaseline.md:150「158件全件が更新され、データベースの整合性検査は正常」）。残り約7,869件は現状維持で確定
+  - 2026-07-10 pre-flight検証: 実データ照合で確定した。firebase-kit（起動プロジェクト）のmemory.dbへ本番同一スクリプトを--tier=strictでdry-run再実行した結果、strictティア再帰属対象は2件のみ（2026-07-07適用後に新規保存された記憶による残差で、当時の158件バッチとは別物）。158件バッチ自体の未適用残存はゼロと確定した。詳細はImplementation Logs/task-1.11-strict-tier-backfill-verification.md
   - Purpose: 誤帰属の沈黙欠損を避けつつ帰属を回復する（R-A4）
-  - 完了条件: strictティア158件の去就（適用／見送り）が承認結果どおりに確定している
-  - 検証: 実行出力（件数のみ）の記録
+  - 完了条件: strictティア158件の去就（適用／見送り）が承認結果どおりに確定している → 充足（適用確定）
+  - 検証: 実行出力（件数のみ）の記録。Implementation Logs/task-1.11-strict-tier-backfill-verification.md 参照
   - _Leverage: scripts/maintenance/backfill-project-attribution.mjs_
   - _Requirements: R-A4_
   - _Prompt: Role: data-investigator | Task: strictティア158件のオーナー承認結果を反映する | Restrictions: LLM分類を使わない。承認外の行に手を加えない | Success: 158件の去就が承認どおりに確定する_
