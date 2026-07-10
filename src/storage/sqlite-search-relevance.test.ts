@@ -1,14 +1,35 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import {
   SQLiteStorage,
   tokenizeForFts,
-  escapeFtsQuery,
   computeRrfScores,
   SEARCH_CANDIDATE_POOL,
+  buildFtsFallbackStages,
+  computeAgeDays,
+  computeTimeDecay,
 } from "./sqlite.js";
+
+// 可観測性カウンタ（counters.ts）のJSONL追記はfire-and-forget（非同期I/O）のため、
+// search()/searchHybrid()の同期呼び出し直後には書き込みが完了していないことがある。
+// ディスク上に反映されるまで短時間ポーリングする（G2検証ゲート項目5「fallback-counters」用）。
+async function readCountersLogWithRetry(memoryPath: string, timeoutMs = 500): Promise<string> {
+  const now = new Date();
+  const jst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+  const datePart = jst.toISOString().slice(0, 10);
+  const logPath = join(memoryPath, "logs", `counters-${datePart}.jsonl`);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(logPath)) {
+      const content = readFileSync(logPath, "utf-8");
+      if (content.trim().length > 0) return content;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return existsSync(logPath) ? readFileSync(logPath, "utf-8") : "";
+}
 
 function makeVector(values: Record<number, number>): number[] {
   const vec = new Array(384).fill(0);
@@ -62,32 +83,10 @@ describe("tokenizeForFts", () => {
   });
 });
 
-describe("escapeFtsQuery", () => {
-  it("トークンが複数ある場合、二重引用したフレーズをORで結合したMATCH式を作る", () => {
-    const result = escapeFtsQuery("wasurenagusaの記憶ストアの検索がうまくいかない問題");
-    expect(result).toContain(" OR ");
-    expect(result).toContain('"wasurenagusa"');
-    expect(result).toContain('"ストア"');
-    // クエリ全体を1フレーズにするフレーズ化（旧実装）にはなっていない
-    expect(result).not.toBe(`"wasurenagusaの記憶ストアの検索がうまくいかない問題"`);
-  });
-
-  it("トークンが1個だけの場合はORを使わずそのフレーズのみを返す", () => {
-    const result = escapeFtsQuery("データベース");
-    expect(result).toBe('"データベース"');
-  });
-
-  it("トークンが0個（フォールバック条件）の場合は従来通りクエリ全体を1フレーズにする", () => {
-    const result = escapeFtsQuery("a-b-c");
-    expect(result).toBe('"a-b-c"');
-  });
-
-  it("ダブルクォートを含む語はエスケープされる", () => {
-    const result = escapeFtsQuery('データベース"注入');
-    // 各トークン内の " は "" にエスケープされる
-    expect(result).not.toContain('データベース"注入');
-  });
-});
+// escapeFtsQuery（単一フレーズをORで結合するだけの旧実装）はbuildFtsFallbackStages
+// （フレーズ→AND→OR段、OR段は等価な式を生成する）に統合され、design.md Phase2定義1の
+// 段階フォールバックへ一本化した（旧実装は削除・呼び出し元なし）。テストはbuildFtsFallbackStages
+// のdescribeブロックへ移設済み（OR段の式構築ロジックはそちらで検証する）。
 
 describe("computeRrfScores", () => {
   it("両方のリストに出現するIDは両方の順位分のスコアが加算される（単一リストのみのIDより高スコアになる）", () => {
@@ -253,5 +252,238 @@ describe("SQLiteStorage - 検索の関連度優先化（自然文recall・RRF統
     // （totalCountはlimitでは切り捨てられない母集団件数を表す）
     expect(SEARCH_CANDIDATE_POOL).toBeGreaterThanOrEqual(saved.length);
     expect(result.totalCount).toBeGreaterThanOrEqual(saved.length);
+  });
+});
+
+// ============================================================
+// 段階フォールバック（design.md Phase2定義1: フレーズ→AND→OR）
+// ============================================================
+
+describe("buildFtsFallbackStages（純粋関数）", () => {
+  it("トークンが複数ある場合、フレーズ→AND→ORの3段を順に返す", () => {
+    const stages = buildFtsFallbackStages("決め手キーワード 検索性能");
+    expect(stages.map((s) => s.stage)).toEqual(["phrase", "and", "or"]);
+    // フレーズ段はクエリ全体の連続一致を要求する（トークン結合ではなく原文そのもの）
+    expect(stages[0].matchExpr).toBe('"決め手キーワード 検索性能"');
+    expect(stages[1].matchExpr).toContain(" AND ");
+    expect(stages[2].matchExpr).toContain(" OR ");
+  });
+
+  it("トークンが1個だけの場合はAND段を省く（OR段と同一結果になり無意味なため）フレーズ→ORの2段", () => {
+    const stages = buildFtsFallbackStages("データベース");
+    expect(stages.map((s) => s.stage)).toEqual(["phrase", "or"]);
+  });
+
+  it("有効な語が0個の場合はフレーズ段（クエリ全体の1フレーズ化）のみを返す", () => {
+    const stages = buildFtsFallbackStages("a-b-c");
+    expect(stages.map((s) => s.stage)).toEqual(["phrase"]);
+    expect(stages[0].matchExpr).toBe('"a-b-c"');
+  });
+
+  it("ダブルクォートを含むクエリはフレーズ段・AND/OR段のいずれもエスケープされる", () => {
+    const stages = buildFtsFallbackStages('データベース"注入 検索性能"攻撃');
+    for (const { matchExpr } of stages) {
+      expect(matchExpr).not.toContain('データベース"注入');
+    }
+  });
+});
+
+describe("SQLiteStorage - 段階フォールバック（業務意図: 厳しい段を優先し、無ければ緩い段へ落ちる）", () => {
+  let storage: SQLiteStorage;
+  let tmpDir: string;
+  let memoryPath: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "wasurenagusa-fallback-test-"));
+    // recordWriteFailure等と同じ規約でmemoryPath=dirname(dbPath)になるよう、
+    // dbPathをtmpDir直下に置く（tmpDirはmkdtempSyncが既に作成済みのディレクトリ）。
+    memoryPath = tmpDir;
+    storage = new SQLiteStorage(join(memoryPath, "test.db"));
+    storage.initialize();
+  });
+
+  afterEach(() => {
+    storage.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("業務意図: クエリ全体が連続する部分文字列として存在すれば、フレーズ段の結果が採用される（AND/OR段の誤ヒットを混ぜない）", async () => {
+    // クエリ全体「導入手順の詳細」がそのまま連続して現れるエントリ（フレーズ段でヒット）
+    const exact = storage.save({
+      category: "config",
+      title: "導入手順の詳細ガイド",
+      content: "導入手順の詳細を丁寧に説明する資料",
+    });
+    // 個々の語は含むが、クエリ全体の連続一致はしない decoy（AND/OR段でしかヒットしない）
+    const decoy = storage.save({
+      category: "config",
+      title: "別件メモ",
+      content: "導入は完了した。手順書は別途、詳細は次回共有する。",
+    });
+
+    const result = storage.search({ query: "導入手順の詳細" });
+    const ids = result.results.map((r) => r.id);
+
+    expect(ids).toContain(exact.id);
+    // フレーズ段で採用されるため、decoy（フレーズ段では0件）は候補に含まれない
+    expect(ids).not.toContain(decoy.id);
+
+    const counters = await readCountersLogWithRetry(memoryPath);
+    expect(counters).toContain('"metric":"search_fallback_phrase"');
+  });
+
+  it("業務意図: フレーズ段が0件でも、トークンが全て個別に存在すればAND段で拾える（OR段の雑音混入より精度が高い）", async () => {
+    // クエリ全体の連続一致（フレーズ段）はしないが、2語("keywordAlpha"と"keywordBeta")が
+    // どちらも別々の位置に存在する（AND段でヒットする）
+    const bothTokens = storage.save({
+      category: "config",
+      title: "検索候補メモ",
+      content: "この記憶にはkeywordAlphaという識別子が含まれ、別の話題としてkeywordBetaにも触れる",
+    });
+    // 片方の語（keywordBeta）しか含まないdecoy（AND段では0件、OR段でのみヒットする）。
+    // 「keywordAlphaには触れない」等の否定文でも書かない＝decoyの本文にkeywordAlphaという
+    // 部分文字列を一切含めない（含めるとtrigram一致してしまいAND段でも拾われてしまうため）。
+    const onlyOneToken = storage.save({
+      category: "config",
+      title: "無関係メモ",
+      content: "この記憶はkeywordBetaについてだけ書いてあり、他の識別子には触れていない",
+    });
+
+    const result = storage.search({ query: "keywordAlpha keywordBeta" });
+    const ids = result.results.map((r) => r.id);
+
+    expect(ids).toContain(bothTokens.id);
+    // AND段が採用されるため、片方の語しか無いdecoyは候補に含まれない
+    expect(ids).not.toContain(onlyOneToken.id);
+
+    const counters = await readCountersLogWithRetry(memoryPath);
+    expect(counters).toContain('"metric":"search_fallback_and"');
+  });
+
+  it("業務意図: フレーズ・AND段がどちらも0件のときだけOR段（現行既定＝いずれかの語が一致）まで落ちる", async () => {
+    // "termGamma"のみを含み"termDelta"は一切含まない＝フレーズ段・AND段はどちらも0件になり、
+    // OR段（いずれかの語が一致）まで落ちて初めて拾われる
+    const partialMatch = storage.save({
+      category: "config",
+      title: "検索候補メモ",
+      content: "このメモにはtermGammaという語だけが登場し、別語には触れない",
+    });
+
+    const result = storage.search({ query: "termGamma termDelta" });
+    const ids = result.results.map((r) => r.id);
+    expect(ids).toContain(partialMatch.id);
+
+    const counters = await readCountersLogWithRetry(memoryPath);
+    expect(counters).toContain('"metric":"search_fallback_or"');
+  });
+
+  it("業務意図: searchHybridでもFTS候補プールの段階フォールバックが働く（フレーズ段優先）", () => {
+    const exact = storage.save({
+      category: "config",
+      title: "決め手キーワード連呼テスト",
+      content: "決め手キーワード 決め手キーワード 決め手キーワード",
+    });
+    storage.upsertVector(exact.id, makeVector({ 200: 1.0 }));
+
+    const decoy = storage.save({
+      category: "config",
+      title: "無関係メモ",
+      content: "決め手は特に無いが、キーワードという言葉だけは登場する雑談",
+    });
+    storage.upsertVector(decoy.id, makeVector({ 201: 1.0 }));
+
+    const result = storage.searchHybrid(
+      { query: "決め手キーワード" },
+      makeVector({ 300: 1.0 })
+    );
+    const ids = result.results.map((r) => r.id);
+    expect(ids).toContain(exact.id);
+  });
+});
+
+// ============================================================
+// 時間減衰（design.md Phase2定義4: finalScore = rrfScore × 0.5^(ageDays/H)）
+// ============================================================
+
+describe("computeAgeDays / computeTimeDecay（純粋関数）", () => {
+  it("computeAgeDaysはtimestampからnowまでの経過日数を返す", () => {
+    const now = new Date("2026-07-11T00:00:00+09:00").getTime();
+    const timestamp = new Date("2026-07-01T00:00:00+09:00").toISOString();
+    expect(computeAgeDays(timestamp, now)).toBeCloseTo(10, 1);
+  });
+
+  it("computeAgeDaysは未来timestampでも負値を返さない（0床）", () => {
+    const now = new Date("2026-07-01T00:00:00+09:00").getTime();
+    const timestamp = new Date("2026-07-11T00:00:00+09:00").toISOString();
+    expect(computeAgeDays(timestamp, now)).toBe(0);
+  });
+
+  it("computeTimeDecayはageDays=0で1.0を返す", () => {
+    expect(computeTimeDecay(0)).toBeCloseTo(1.0, 10);
+  });
+
+  it("computeTimeDecayは半減期(既定90日)経過でちょうど0.5になる", () => {
+    expect(computeTimeDecay(90)).toBeCloseTo(0.5, 10);
+  });
+
+  it("computeTimeDecayは半減期の2倍経過で0.25になる（指数減衰）", () => {
+    expect(computeTimeDecay(180)).toBeCloseTo(0.25, 10);
+  });
+
+  it("computeTimeDecayはhalfLifeDaysを明示指定できる", () => {
+    expect(computeTimeDecay(7, 7)).toBeCloseTo(0.5, 10);
+  });
+});
+
+describe("SQLiteStorage - searchHybridの時間減衰（業務意図: 同程度の一致度なら新しいエントリが優先される）", () => {
+  let storage: SQLiteStorage;
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "wasurenagusa-decay-test-"));
+    storage = new SQLiteStorage(join(tmpDir, "test.db"));
+    storage.initialize();
+  });
+
+  afterEach(() => {
+    storage.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("業務意図: ベクトル一致順位がわずかに劣っていても、大幅に新しいエントリはRRF単独順位を時間減衰で逆転できる", () => {
+    // FTSは一切ヒットしない語（検索クエリと無関係な保存内容にする）でベクトルのみの純粋な
+    // RRF順位差を作る。oldEntryをベクトル距離最小（KNN 1位）、newEntryを僅差の2位にする。
+    const oldEntry = storage.save({
+      category: "config",
+      title: "古いエントリ",
+      content: "検索クエリの語とは無関係な保存内容その1",
+    });
+    storage.upsertVector(oldEntry.id, makeVector({ 0: 1.0 }));
+
+    const newEntry = storage.save({
+      category: "config",
+      title: "新しいエントリ",
+      content: "検索クエリの語とは無関係な保存内容その2",
+    });
+    storage.upsertVector(newEntry.id, makeVector({ 0: 0.99, 1: 0.01 }));
+
+    // 保存直後はtimestampがほぼ同時刻のため、DB上のtimestampを直接書き換えて
+    // 「oldEntryは365日前、newEntryは1日前」という経過日数差を作る（timeDecayの効果を検証するため）。
+    const db = (storage as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } } }).db;
+    const oldTs = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString();
+    const newTs = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare("UPDATE memories SET timestamp = ? WHERE id = ?").run(oldTs, oldEntry.id);
+    db.prepare("UPDATE memories SET timestamp = ? WHERE id = ?").run(newTs, newEntry.id);
+
+    // クエリはFTSに一切ヒットしない語にし、RRFへの寄与をベクトル順位のみにする
+    const result = storage.searchHybrid(
+      { query: "xyz非該当クエリ" },
+      makeVector({ 0: 1.0 })
+    );
+    const ids = result.results.map((r) => r.id);
+
+    // oldEntryはベクトルKNNで1位（newEntryよりRRFスコアがわずかに高い）だが、
+    // 365日 vs 1日という大幅な経過日数差により時間減衰後は逆転し、newEntryが上位に来る。
+    expect(ids.indexOf(newEntry.id)).toBeLessThan(ids.indexOf(oldEntry.id));
   });
 });

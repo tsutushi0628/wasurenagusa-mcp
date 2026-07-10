@@ -28,6 +28,7 @@ import { join, dirname } from "path";
 import { formatEntry } from "./formatter.js";
 import { buildSearchHint } from "./search-hint.js";
 import { increment } from "../observability/counters.js";
+import { SearchScorer } from "../vector/search-scorer.js";
 
 export interface VectorSearchResult {
   id: string;
@@ -103,21 +104,6 @@ export function tokenizeForFts(query: string): string[] {
   return tokens.filter((t) => t.length >= MIN_FTS_TOKEN_LENGTH);
 }
 
-// FTS5 MATCH式を構築する。トークン分割してOR結合することで、自然文クエリでも
-// 「クエリ全体と完全一致する部分文字列が保存内容に無い限り0件」だった問題を解消する
-// （recall優先）。トークンが0個（記号のみ・短い語のみ等）の場合は従来通りクエリ
-// 全体を1フレーズとして扱う（空クエリ呼び出しはしない前提＝呼び出し元でガード済み）。
-export function escapeFtsQuery(query: string): string {
-  const escapeToken = (t: string): string => `"${t.replace(/"/g, '""')}"`;
-  const tokens = tokenizeForFts(query);
-
-  if (tokens.length === 0) {
-    return escapeToken(query);
-  }
-
-  return tokens.map(escapeToken).join(" OR ");
-}
-
 // 複数の順位付きIDリスト（各リストは関連度が高い順に並んでいる前提、0始まりindex）を
 // RRF (Reciprocal Rank Fusion) で統合する。片方のリストにしか出現しないIDは、出現した
 // リストの項のみ加算する（もう片方を満点扱いしたり0点扱いしたりしない）。
@@ -130,6 +116,60 @@ export function computeRrfScores(rankedLists: string[][]): Map<string, number> {
     });
   }
   return scores;
+}
+
+// --- FTS段階フォールバック（design.md Phase2定義1: フレーズ→AND→OR） ---
+//
+// memories_fts は tokenize='trigram' のため、二重引用したフレーズは「その文字列が内容側に
+// 連続した部分文字列として存在するか」を厳密に問う。段が進むほど条件を緩める：
+//   phrase: クエリ全体を1つの連続文字列として要求する（最も厳しい）
+//   and:    各トークンを独立フレーズにし、全トークンが（順不同・非連続でも）存在することを要求する
+//   or:     各トークンを独立フレーズにし、いずれか1つが存在すれば良い（従来のescapeFtsQuery既定動作）
+// 最初にヒットした段の結果を採用し、各段の発火を計数する（G2検証ゲート項目5 fallback-counters）。
+export type FtsFallbackStage = "phrase" | "and" | "or";
+
+export interface FtsFallbackStageQuery {
+  stage: FtsFallbackStage;
+  matchExpr: string;
+}
+
+export function buildFtsFallbackStages(query: string): FtsFallbackStageQuery[] {
+  const escapeToken = (t: string): string => `"${t.replace(/"/g, '""')}"`;
+  const tokens = tokenizeForFts(query);
+
+  const phraseStage: FtsFallbackStageQuery = { stage: "phrase", matchExpr: escapeToken(query) };
+
+  if (tokens.length === 0) {
+    // 有効な語が無い場合はフレーズ段（クエリ全体の1フレーズ化）のみを返す。
+    return [phraseStage];
+  }
+  if (tokens.length === 1) {
+    // トークンが1個だけならAND段はOR段と完全に同一の式になり冗長なため省く。
+    return [phraseStage, { stage: "or", matchExpr: tokens.map(escapeToken).join(" OR ") }];
+  }
+  return [
+    phraseStage,
+    { stage: "and", matchExpr: tokens.map(escapeToken).join(" AND ") },
+    { stage: "or", matchExpr: tokens.map(escapeToken).join(" OR ") },
+  ];
+}
+
+// --- 時間減衰（design.md Phase2定義4: finalScore = rrfScore × 0.5^(ageDays/H)） ---
+//
+// recencyの反映元はこのtime-decayただ一つに一本化する（既存のSearchScorer freshness項は除去済み。
+// search-scorer.ts参照・二重減衰の禁止）。半減期Hは既定90日とし、ゴールデンセットで較正する。
+const TIME_DECAY_HALF_LIFE_DAYS = 90;
+
+// timestampからnow(既定=呼び出し時点の現在時刻)までの経過日数を返す。未来timestamp（時計ずれ等の
+// 防御）はマイナスにせず0に床める。
+export function computeAgeDays(timestamp: string, now: number = Date.now()): number {
+  const ageMs = now - new Date(timestamp).getTime();
+  const ageDays = ageMs / (24 * 60 * 60 * 1000);
+  return Math.max(0, ageDays);
+}
+
+export function computeTimeDecay(ageDays: number, halfLifeDays: number = TIME_DECAY_HALF_LIFE_DAYS): number {
+  return Math.pow(0.5, ageDays / halfLifeDays);
 }
 
 export class SQLiteStorage {
@@ -231,6 +271,119 @@ export class SQLiteStorage {
     void increment(memoryPath, "write_failure_count").catch(() => {
       // カウンタ自体の書き込み失敗はここで握りつぶす（元エラーの伝播をブロックしない）。
     });
+  }
+
+  /**
+   * FTS段階フォールバック（フレーズ→AND→OR）を順に試し、最初にヒットした段を採用する。
+   * 各段の実際のSQL実行はrunStageに委譲する（search()/searchHybrid()で戻り値の形が異なるため）。
+   * 全段0件のときは最後の段（OR）の結果を返し、stageはnull（発火計数は行わない）。
+   */
+  private tryFtsFallbackStages<T>(
+    query: string,
+    runStage: (matchExpr: string) => T,
+    hasHit: (result: T) => boolean
+  ): { result: T; stage: FtsFallbackStage | null } {
+    const stages = buildFtsFallbackStages(query);
+    let last: T | undefined;
+    for (const { stage, matchExpr } of stages) {
+      const result = runStage(matchExpr);
+      if (hasHit(result)) {
+        return { result, stage };
+      }
+      last = result;
+    }
+    return { result: last as T, stage: null };
+  }
+
+  private recordFtsFallbackStage(stage: FtsFallbackStage | null): void {
+    if (stage === null) return;
+    const metric =
+      stage === "phrase" ? "search_fallback_phrase" : stage === "and" ? "search_fallback_and" : "search_fallback_or";
+    const memoryPath = dirname(this.dbPath);
+    void increment(memoryPath, metric).catch(() => {
+      // カウンタ自体の書き込み失敗はここで握りつぶす（検索本体の結果に影響させない）。
+    });
+  }
+
+  /**
+   * FTS段階フォールバック（search()用）。同一のcategory/project/scopeフィルタを各段に適用したうえで
+   * 実行し、最初にヒットした段のSELECT結果とCOUNT結果を返す。
+   */
+  private searchFtsStaged(
+    trimmedQuery: string,
+    params: SearchParams,
+    limit: number
+  ): { rows: MemoryRow[]; countRow: { count: number } } {
+    let filterClause = "";
+    const filterParams: (string | number)[] = [];
+    if (params.category && params.category !== "all") {
+      filterClause += " AND m.category = ?";
+      filterParams.push(params.category);
+    }
+    if (params.project) {
+      filterClause += " AND (m.project IS NULL OR m.project = 'unknown' OR m.project = ?)"; // R-A4 AC3
+      filterParams.push(params.project);
+    }
+    if (params.scope) {
+      filterClause += " AND (m.scope IS NULL OR m.scope = 'general' OR m.scope = ?)";
+      filterParams.push(params.scope);
+    }
+
+    const { result, stage } = this.tryFtsFallbackStages(
+      trimmedQuery,
+      (matchExpr) => {
+        const selectSql =
+          `SELECT m.* FROM memories m INNER JOIN memories_fts fts ON m.rowid = fts.rowid ` +
+          `WHERE memories_fts MATCH ? AND m.state = 'active'${filterClause} ORDER BY fts.rank LIMIT ?`;
+        const rows = this.db.prepare(selectSql).all(matchExpr, ...filterParams, limit) as MemoryRow[];
+
+        const countSql =
+          `SELECT COUNT(*) as count FROM memories m INNER JOIN memories_fts fts ON m.rowid = fts.rowid ` +
+          `WHERE memories_fts MATCH ? AND m.state = 'active'${filterClause}`;
+        const countRow = this.db.prepare(countSql).get(matchExpr, ...filterParams) as { count: number };
+
+        return { rows, countRow };
+      },
+      (r) => r.rows.length > 0
+    );
+
+    this.recordFtsFallbackStage(stage);
+    return result;
+  }
+
+  /**
+   * FTS段階フォールバック（searchHybrid()の候補プール用）。IDのみを関連度順（fts.rank昇順）で返す。
+   */
+  private searchHybridFtsCandidates(trimmedQuery: string, params: SearchParams): string[] {
+    let filterClause = "";
+    const filterParams: (string | number)[] = [];
+    if (params.category && params.category !== "all") {
+      filterClause += " AND m.category = ?";
+      filterParams.push(params.category);
+    }
+    if (params.project) {
+      filterClause += " AND (m.project IS NULL OR m.project = 'unknown' OR m.project = ?)"; // R-A4 AC3
+      filterParams.push(params.project);
+    }
+    if (params.scope) {
+      filterClause += " AND (m.scope IS NULL OR m.scope = 'general' OR m.scope = ?)";
+      filterParams.push(params.scope);
+    }
+
+    const { result, stage } = this.tryFtsFallbackStages(
+      trimmedQuery,
+      (matchExpr) => {
+        const sql =
+          `SELECT m.id FROM memories m INNER JOIN memories_fts fts ON m.rowid = fts.rowid ` +
+          `WHERE memories_fts MATCH ? AND m.state = 'active'${filterClause} ORDER BY fts.rank LIMIT ?`;
+        const rows = this.db.prepare(sql).all(matchExpr, ...filterParams, SEARCH_CANDIDATE_POOL) as { id: string }[];
+        return rows.map((r) => r.id);
+      },
+      (ids) => ids.length > 0
+    );
+
+    this.recordFtsFallbackStage(stage);
+    return result;
   }
 
   private generateTimestamp(): string {
@@ -479,79 +632,67 @@ export class SQLiteStorage {
 
   search(params: SearchParams): SearchResult {
     const limit = params.limit ?? config.defaultSearchLimit;
-    let query: string;
-    const queryParams: (string | number)[] = [];
-
     const trimmedQuery = params.query ? params.query.trim() : "";
     const usesFts = trimmedQuery.length >= 3;
     const usesLike = trimmedQuery.length > 0 && trimmedQuery.length < 3;
 
+    let rows: MemoryRow[];
+    let countRow: { count: number };
+
     // 可視性マトリクス: 検索はactiveのみ可（I1）。
     if (usesFts) {
-      query = `
-        SELECT m.* FROM memories m
-        INNER JOIN memories_fts fts ON m.rowid = fts.rowid
-        WHERE memories_fts MATCH ? AND m.state = 'active'
-      `;
-      queryParams.push(escapeFtsQuery(params.query!));
-    } else if (usesLike) {
-      const likePattern = `%${trimmedQuery}%`;
-      query = `SELECT * FROM memories WHERE (title LIKE ? OR content LIKE ? OR tags LIKE ?) AND state = 'active'`;
-      queryParams.push(likePattern, likePattern, likePattern);
+      // FTS経路は段階フォールバック（フレーズ→AND→OR）で候補を取得する（design.md Phase2定義1）。
+      const staged = this.searchFtsStaged(trimmedQuery, params, limit);
+      rows = staged.rows;
+      countRow = staged.countRow;
     } else {
-      query = "SELECT * FROM memories WHERE 1=1 AND state = 'active'";
-    }
+      let query: string;
+      const queryParams: (string | number)[] = [];
+      if (usesLike) {
+        const likePattern = `%${trimmedQuery}%`;
+        query = `SELECT * FROM memories WHERE (title LIKE ? OR content LIKE ? OR tags LIKE ?) AND state = 'active'`;
+        queryParams.push(likePattern, likePattern, likePattern);
+      } else {
+        query = "SELECT * FROM memories WHERE 1=1 AND state = 'active'";
+      }
 
-    const prefix = usesFts ? "m." : "";
-    if (params.category && params.category !== "all") {
-      query += ` AND ${prefix}category = ?`;
-      queryParams.push(params.category);
-    }
+      if (params.category && params.category !== "all") {
+        query += ` AND category = ?`;
+        queryParams.push(params.category);
+      }
+      if (params.project) {
+        query += ` AND (project IS NULL OR project = 'unknown' OR project = ?)`; // R-A4 AC3: unknown帰属も既定で検索対象に残す
+        queryParams.push(params.project);
+      }
+      if (params.scope) {
+        query += ` AND (scope IS NULL OR scope = 'general' OR scope = ?)`;
+        queryParams.push(params.scope);
+      }
 
-    if (params.project) {
-      query += ` AND (${prefix}project IS NULL OR ${prefix}project = 'unknown' OR ${prefix}project = ?)`; // R-A4 AC3: unknown帰属も既定で検索対象に残す
-      queryParams.push(params.project);
-    }
+      // LIKE/空クエリ経路には関連度シグナルが無いため、従来通りtimestamp DESCを維持する。
+      query += ` ORDER BY timestamp DESC LIMIT ?`;
+      queryParams.push(limit);
+      rows = this.db.prepare(query).all(...queryParams) as MemoryRow[];
 
-    if (params.scope) {
-      query += ` AND (${prefix}scope IS NULL OR ${prefix}scope = 'general' OR ${prefix}scope = ?)`;
-      queryParams.push(params.scope);
-    }
+      let countQuery: string;
+      const countParams = queryParams.slice(0, -1);
+      if (usesLike) {
+        countQuery = "SELECT COUNT(*) as count FROM memories WHERE (title LIKE ? OR content LIKE ? OR tags LIKE ?) AND state = 'active'";
+      } else {
+        countQuery = "SELECT COUNT(*) as count FROM memories WHERE 1=1 AND state = 'active'";
+      }
+      if (params.category && params.category !== "all") {
+        countQuery += ` AND category = ?`;
+      }
+      if (params.project) {
+        countQuery += ` AND (project IS NULL OR project = 'unknown' OR project = ?)`;
+      }
+      if (params.scope) {
+        countQuery += ` AND (scope IS NULL OR scope = 'general' OR scope = ?)`;
+      }
 
-    // FTS5経路は関連度（fts.rank昇順=最も一致する順）で並べる。timestamp単独順だと
-    // 「一致度に関わらず新しい順」になり、本当に関連性の高い結果が古いという理由だけで
-    // 候補から漏れる（LIMITで切り捨てられる）。LIKE/空クエリ経路には関連度シグナルが
-    // 無いため、従来通りtimestamp DESCを維持する。
-    const orderClause = usesFts ? "fts.rank" : "timestamp DESC";
-    query += ` ORDER BY ${orderClause} LIMIT ?`;
-    queryParams.push(limit);
-
-    const rows = this.db.prepare(query).all(...queryParams) as MemoryRow[];
-
-    let countQuery: string;
-    const countParams = queryParams.slice(0, -1);
-    if (usesFts) {
-      countQuery = `
-        SELECT COUNT(*) as count FROM memories m
-        INNER JOIN memories_fts fts ON m.rowid = fts.rowid
-        WHERE memories_fts MATCH ? AND m.state = 'active'
-      `;
-    } else if (usesLike) {
-      countQuery = "SELECT COUNT(*) as count FROM memories WHERE (title LIKE ? OR content LIKE ? OR tags LIKE ?) AND state = 'active'";
-    } else {
-      countQuery = "SELECT COUNT(*) as count FROM memories WHERE 1=1 AND state = 'active'";
+      countRow = this.db.prepare(countQuery).get(...countParams) as { count: number };
     }
-    if (params.category && params.category !== "all") {
-      countQuery += ` AND ${prefix}category = ?`;
-    }
-    if (params.project) {
-      countQuery += ` AND (${prefix}project IS NULL OR ${prefix}project = 'unknown' OR ${prefix}project = ?)`;
-    }
-    if (params.scope) {
-      countQuery += ` AND (${prefix}scope IS NULL OR ${prefix}scope = 'general' OR ${prefix}scope = ?)`;
-    }
-
-    const countRow = this.db.prepare(countQuery).get(...countParams) as { count: number };
 
     const indexEntries: MemoryIndexEntry[] = rows.map((row) => ({
       id: row.id,
@@ -584,35 +725,15 @@ export class SQLiteStorage {
     const ftsRankedIds: string[] = [];
     if (params.query && params.query.trim()) {
       const trimmedQ = params.query.trim();
-      let ftsQuery: string;
-      const ftsParams: (string | number)[] = [];
 
       // 可視性マトリクス: 検索(ハイブリッド)はactiveのみ可（I1）。
       if (trimmedQ.length >= 3) {
-        ftsQuery = `
-          SELECT m.id FROM memories m
-          INNER JOIN memories_fts fts ON m.rowid = fts.rowid
-          WHERE memories_fts MATCH ? AND m.state = 'active'
-        `;
-        ftsParams.push(escapeFtsQuery(trimmedQ));
-
-        if (params.category && params.category !== "all") {
-          ftsQuery += " AND m.category = ?";
-          ftsParams.push(params.category);
-        }
-        if (params.project) {
-          ftsQuery += " AND (m.project IS NULL OR m.project = 'unknown' OR m.project = ?)"; // R-A4 AC3
-          ftsParams.push(params.project);
-        }
-        if (params.scope) {
-          ftsQuery += " AND (m.scope IS NULL OR m.scope = 'general' OR m.scope = ?)";
-          ftsParams.push(params.scope);
-        }
-        ftsQuery += " ORDER BY fts.rank";
+        // FTS経路は段階フォールバック（フレーズ→AND→OR）で候補を取得する（design.md Phase2定義1）。
+        ftsRankedIds.push(...this.searchHybridFtsCandidates(trimmedQ, params));
       } else {
         const likePattern = `%${trimmedQ}%`;
-        ftsQuery = `SELECT id FROM memories WHERE (title LIKE ? OR content LIKE ? OR tags LIKE ?) AND state = 'active'`;
-        ftsParams.push(likePattern, likePattern, likePattern);
+        let ftsQuery = `SELECT id FROM memories WHERE (title LIKE ? OR content LIKE ? OR tags LIKE ?) AND state = 'active'`;
+        const ftsParams: (string | number)[] = [likePattern, likePattern, likePattern];
 
         if (params.category && params.category !== "all") {
           ftsQuery += " AND category = ?";
@@ -626,15 +747,13 @@ export class SQLiteStorage {
           ftsQuery += " AND (scope IS NULL OR scope = 'general' OR scope = ?)";
           ftsParams.push(params.scope);
         }
-        ftsQuery += " ORDER BY timestamp DESC";
-      }
+        ftsQuery += " ORDER BY timestamp DESC LIMIT ?";
+        ftsParams.push(SEARCH_CANDIDATE_POOL);
 
-      ftsQuery += ` LIMIT ?`;
-      ftsParams.push(SEARCH_CANDIDATE_POOL);
-
-      const ftsRows = this.db.prepare(ftsQuery).all(...ftsParams) as { id: string }[];
-      for (const row of ftsRows) {
-        ftsRankedIds.push(row.id);
+        const ftsRows = this.db.prepare(ftsQuery).all(...ftsParams) as { id: string }[];
+        for (const row of ftsRows) {
+          ftsRankedIds.push(row.id);
+        }
       }
     }
 
@@ -650,8 +769,23 @@ export class SQLiteStorage {
 
     // 4. project/scope/categoryフィルタ + エントリ取得（可視性マトリクス: 検索はactiveのみ可。
     //    FTS経路はプール取得時点で絞り込み済みだが、ベクトル側は対象外のためここで最終確認する）
+    //    + 最終スコアリング（design.md Phase2定義4: finalScore = rrfScore × 0.5^(ageDays/H)）。
+    //    「関連度の芯」としてrrfScore×timeDecayをSearchScorerへ渡すことで、design.mdのReuces注記
+    //    （line 422: search-scorer.ts「利用実績加点」）が名指しする利用実績ブーストのみを、
+    //    既存の計算式（search-scorer.ts）を重複実装せずに再利用する。
+    //    タグ一致ブースト（matchedTagWeights）はdesign.md Phase2のReuses注記に記載がなく、
+    //    ゴールデンセット較正の結果（recall@5 0.622→0.486への悪化を実測）から意図的に不採用とし、
+    //    常に空配列を渡してtagWeightScore=1.0（中立）に固定する。クエリ×タグ照合関数
+    //    （matchQueryToTags）自体もPdM裁定によりコードベースから削除済み（weighted-tag.ts参照）。
+    //    predictionErrorも実データ0件（タスク0.0で物理削除決定済みの旧ループ）のため常にundefined＝中立。
+    //    recencyの反映元はこのtime-decayのみに一本化済み（SearchScorerのfreshness項は除去済み・
+    //    二重減衰の禁止）。
+    const candidateIds = Array.from(rrfScores.keys());
+    const vectorMetadataMap = this.getVectorMetadata(candidateIds);
+    const predictionErrorMap = this.getPredictionErrors(candidateIds);
+
     const scoredEntries: Array<{ entry: MemoryIndexEntry; score: number; timestamp: string }> = [];
-    for (const [id, score] of rrfScores) {
+    for (const [id, rrfScore] of rrfScores) {
       const row = this.db.prepare("SELECT * FROM memories WHERE id = ? AND state = 'active'").get(id) as MemoryRow | undefined;
       if (!row) continue;
 
@@ -666,23 +800,34 @@ export class SQLiteStorage {
         continue;
       }
 
+      const tags = JSON.parse(row.tags) as string[];
+      const ageDays = computeAgeDays(row.timestamp);
+      const timeDecay = computeTimeDecay(ageDays);
+      const meta = vectorMetadataMap.get(id);
+      const finalScore = SearchScorer.score({
+        vectorSimilarity: rrfScore * timeDecay,
+        matchedTagWeights: [],
+        accessCount: meta ? meta.accessCount : 0,
+        predictionError: predictionErrorMap.get(id),
+      });
+
       scoredEntries.push({
         entry: {
           id: row.id,
           timestamp: row.timestamp,
           category: row.category as MemoryCategory,
           title: row.title,
-          tags: JSON.parse(row.tags),
+          tags,
           project: row.project ?? undefined,
           scope: row.scope ?? undefined,
           intensity: row.intensity ?? undefined,
         },
-        score,
+        score: finalScore,
         timestamp: row.timestamp,
       });
     }
 
-    // 5. 関連度（RRFスコア）降順。同点の場合のみtimestamp DESCでタイブレークする。
+    // 5. 最終スコア（時間減衰込みRRF×ブースト）降順。同点の場合のみtimestamp DESCでタイブレークする。
     scoredEntries.sort((a, b) => {
       if (b.score !== a.score) return b.score - a.score;
       return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();

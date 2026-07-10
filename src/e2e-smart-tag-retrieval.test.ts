@@ -46,8 +46,12 @@ describe("E2E: Smart Tag Retrieval", () => {
     storage = new MarkdownStorage(tempDir);
   });
 
-  it("freshness causes recent entries to rank above old ones", () => {
-    // Simulate scoring for old vs recent entry
+  // design.md Phase2定義4（二重減衰の禁止）により、recencyの反映元は
+  // sqlite.ts側のtime-decay（finalScore = rrfScore × 0.5^(ageDays/H)）ただ一つに
+  // 一本化された。SearchScorer.score()自体はdaysSinceLastAccessで差を付けない
+  // （search-scorer.test.tsの「freshness項は除去済み」で単体保証済み、
+  // sqlite-search-relevance.test.tsの時間減衰統合テストで実経路の再順位付けを保証済み）。
+  it("SearchScorer単体はdaysSinceLastAccessで差を付けない（recencyはsqlite.ts側time-decayに一本化済み）", () => {
     const oldScore = SearchScorer.score({
       vectorSimilarity: 0.9,
       matchedTagWeights: [0.8],
@@ -62,7 +66,7 @@ describe("E2E: Smart Tag Retrieval", () => {
       accessCount: 0,
     });
 
-    expect(recentScore).toBeGreaterThan(oldScore);
+    expect(recentScore).toBe(oldScore);
   });
 
   it("access frequency causes re-surfacing", () => {

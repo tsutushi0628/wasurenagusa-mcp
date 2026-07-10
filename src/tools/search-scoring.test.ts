@@ -62,8 +62,11 @@ describe("search.ts scoring integration", () => {
     mockStorageGetDetail.mockReturnValue({ entries: [], notFound: [] });
   });
 
-  it("sorts results by composite score (not just timestamp)", async () => {
-    // searchHybrid returns merged FTS5 + vector results
+  // design.md Phase2定義4により、順位決定の権限はsqlite.ts側（RRF×時間減衰×利用実績加点）に
+  // 一本化された。search.tsはstorage.searchHybrid()が返した順序をそのまま素通しするだけで、
+  // 自前の再ランキングは行わない（旧SearchScorer再ランキングブロックは削除済み）。
+  it("storage.searchHybridが返した順序をそのまま維持する（search.ts側での再ランキングは行わない）", async () => {
+    // searchHybrid returns merged FTS5 + vector results, already ranked by sqlite.ts
     mockStorageSearchHybrid.mockReturnValue({
       results: [
         { id: "old-high-relevance", timestamp: "2024-01-01T00:00:00+09:00", category: "config", title: "rate-limit設定", tags: ["rate-limit:0.9", "API:0.3"], project: "test" },
@@ -73,13 +76,13 @@ describe("search.ts scoring integration", () => {
       hint: "",
     });
 
-    // Vector search returns same IDs with different distances
+    // Vector search results feed access-count increment / critical-promotion only
+    // (not ranking — ranking is decided entirely inside storage.searchHybrid)
     mockStorageSearchVectors.mockReturnValue([
-      { id: "old-high-relevance", distance: 0.1, accessCount: 5 },   // very similar
-      { id: "recent-low-relevance", distance: 0.5, accessCount: 0 }, // less similar
+      { id: "old-high-relevance", distance: 0.1, accessCount: 5 },
+      { id: "recent-low-relevance", distance: 0.5, accessCount: 0 },
     ]);
 
-    // Metadata for freshness calculation
     mockStorageGetVectorMetadata.mockReturnValue(new Map([
       ["old-high-relevance", { lastAccessedAt: "2024-01-01T00:00:00+09:00", accessCount: 5 }],
       ["recent-low-relevance", { lastAccessedAt: "2024-06-01T00:00:00+09:00", accessCount: 0 }],
@@ -88,8 +91,7 @@ describe("search.ts scoring integration", () => {
     const resultJson = await handleMemorySearch({ query: "rate-limit" }, "/tmp/project");
     const result = JSON.parse(resultJson);
 
-    // Old but highly relevant entry should rank above recent low-relevance entry
-    // due to vector similarity and tag weight boost
+    // storageが返した並び順（1番目=old-high-relevance）がそのまま維持されること
     expect(result.results[0].id).toBe("old-high-relevance");
   });
 

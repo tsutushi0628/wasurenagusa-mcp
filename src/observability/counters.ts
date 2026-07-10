@@ -29,7 +29,10 @@ export type MetricName =
   | "consolidation_count"
   | "guard_block_count"
   | "resurrection_count"
-  | "write_failure_count";
+  | "write_failure_count"
+  | "search_fallback_phrase"
+  | "search_fallback_and"
+  | "search_fallback_or";
 
 export interface CounterEntry {
   ts: string;

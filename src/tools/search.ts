@@ -3,8 +3,6 @@ import { SQLiteStorage } from "../storage/sqlite.js";
 import { SearchParams, MemoryCategory, MemoryIndexEntry } from "../types.js";
 import { LocalEmbedding } from "../vector/local-embedding.js";
 import { TIER_THRESHOLDS, shouldPromoteToCritical } from "../vector/memory-tier.js";
-import { SearchScorer } from "../vector/search-scorer.js";
-import { parseWeightedTags } from "../vector/weighted-tag.js";
 import { config, getMemoryPath, getModelsDir } from "../config.js";
 import { buildSearchHint } from "../storage/search-hint.js";
 import { homedir } from "os";
@@ -46,30 +44,6 @@ export const memorySearchTool: Tool = {
   }
 };
 
-function computeDaysSinceAccess(lastAccessedAt: string): number {
-  const lastAccess = new Date(lastAccessedAt).getTime();
-  const now = Date.now();
-  return Math.max(0, (now - lastAccess) / (1000 * 60 * 60 * 24));
-}
-
-function matchQueryToTags(query: string, tags: string[]): number[] {
-  const queryTerms = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const weightedTags = parseWeightedTags(tags);
-  const matchedWeights: number[] = [];
-
-  for (const wt of weightedTags) {
-    const tagLower = wt.tag.toLowerCase();
-    for (const term of queryTerms) {
-      if (tagLower.includes(term) || term.includes(tagLower)) {
-        matchedWeights.push(wt.weight);
-        break;
-      }
-    }
-  }
-
-  return matchedWeights;
-}
-
 export async function handleMemorySearch(
   args: Record<string, unknown>,
   projectRoot: string
@@ -101,8 +75,6 @@ export async function handleMemorySearch(
     console.error("[search] LocalEmbedding初期化失敗:", error);
   }
 
-  // ベクトル検索のdistanceマップ
-  const vectorDistanceMap = new Map<string, number>();
   let result;
 
   if (embeddingAvailable) {
@@ -112,11 +84,8 @@ export async function handleMemorySearch(
       // ハイブリッド検索（FTS5 + ベクトル）
       result = storage.searchHybrid(params, queryEmbedding);
 
-      // ベクトル検索結果のdistanceマップ構築
+      // ベクトル検索結果（アクセスカウント更新・critical昇格チェック用）
       const vectorResults = storage.searchVectors(queryEmbedding, TIER_THRESHOLDS.medium, limit);
-      for (const vr of vectorResults) {
-        vectorDistanceMap.set(vr.id, vr.distance);
-      }
 
       // アクセスカウント更新
       const allVectorIds = vectorResults.map(vr => vr.id);
@@ -159,42 +128,6 @@ export async function handleMemorySearch(
   } else {
     // embedding不可 → FTS5のみ
     result = storage.search(params);
-  }
-
-  // SearchScorerによるランキング
-  if (result.results.length > 0) {
-    try {
-      const allIds = result.results.map(r => r.id);
-      const metadata = storage.getVectorMetadata(allIds);
-      // 予測誤差: 差分が大きいエントリほど surface 加点する（無いエントリは恒等で素通り）
-      const predictionErrors = storage.getPredictionErrors(allIds);
-
-      const scored = result.results.map(entry => {
-        const meta = metadata.get(entry.id);
-        const distance = vectorDistanceMap.get(entry.id);
-        const vectorSimilarity = distance !== undefined ? 1 - distance : 1.0;
-        const daysSinceLastAccess = meta
-          ? computeDaysSinceAccess(meta.lastAccessedAt)
-          : 0;
-        const accessCount = meta ? meta.accessCount : 0;
-        const matchedTagWeights = matchQueryToTags(params.query, entry.tags);
-
-        const score = SearchScorer.score({
-          vectorSimilarity,
-          matchedTagWeights,
-          daysSinceLastAccess,
-          accessCount,
-          predictionError: predictionErrors.get(entry.id),
-        });
-
-        return { entry, score };
-      });
-
-      scored.sort((a, b) => b.score - a.score);
-      result.results = scored.map(s => s.entry);
-    } catch (error) {
-      console.error("[search] スコアリング失敗:", error);
-    }
   }
 
   // アクティブプロジェクト横断検索

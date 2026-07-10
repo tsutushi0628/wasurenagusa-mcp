@@ -47,25 +47,7 @@ export function formatWeightedTags(wts: WeightedTag[]): string[] {
   return wts.map(formatWeightedTag);
 }
 
-/**
- * クエリ文字列とタグ配列を照合し、一致したタグの重みを返す（検索スコアリングの加点用）。
- * 元々 src/tools/search.ts の非公開関数だったが、最終順位の決定権を src/storage/sqlite.ts
- * 側の searchHybrid/search に一本化する再設計（design.md Phase 2）に伴い、ここへ移設した。
- */
-export function matchQueryToTags(query: string, tags: string[]): number[] {
-  const queryTerms = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const weightedTags = parseWeightedTags(tags);
-  const matchedWeights: number[] = [];
-
-  for (const wt of weightedTags) {
-    const tagLower = wt.tag.toLowerCase();
-    for (const term of queryTerms) {
-      if (tagLower.includes(term) || term.includes(tagLower)) {
-        matchedWeights.push(wt.weight);
-        break;
-      }
-    }
-  }
-
-  return matchedWeights;
-}
+// 注: クエリ×タグ照合関数（matchQueryToTags）はここに置かない。
+// WIPコミット32f8c0aで一時新設されたが、設計契約(design.md Phase2)に消費者が存在せず、
+// ゴールデンセット較正でも順位品質を悪化させることが実測されたため、
+// PdM裁定（2026-07-11・QA報告書§5-bis）により配線せず削除した。
