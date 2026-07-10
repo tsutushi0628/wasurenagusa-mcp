@@ -425,7 +425,8 @@
   - _Requirements: R-B6, R-B7_
   - _Prompt: Role: qa-engineer | Task: 評価コーパスを凍結しチェックサムを記録する | Restrictions: 原本に書き込まない | Success: 評価が同一コーパスで再現できる_
 
-- [ ] 2.3 評価スクリプト（recall@k と正しくゼロ件）の作成（検証役）
+- [x] 2.3 評価スクリプト（recall@k と正しくゼロ件）の作成（検証役・2026-07-11完了）
+  - 完了注記: scripts/gates/eval-golden.ts＋業務意図テスト16件を新規作成。現行検索ベースライン確定＝recall@1 0.243／@5 0.568／@10 0.838・正ゼロ0/15（52問全処理・失敗0）。本番読み取り経路を書き込みなしで忠実合成（アクセス計数・critical昇格保存は凍結保護のため省略）。実行後にmanifest全102ファイルsha256再照合一致（コーパス不変を実証）。比較原点の全出力は Implementation Logs/task-2.3-eval-golden-baseline.md
   - File: scripts/gates/eval-golden.ts（新規）
   - ゴールデンセットを読み、recall@1 / @5 / @10 と「正しくゼロ件」クラスの成績を出力する
   - 出力はゴールデンID（GQ-xxx）と数値のみ。クエリ本文を出さない
