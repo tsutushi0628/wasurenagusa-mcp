@@ -235,7 +235,7 @@ export function evaluateResurrectionZero(t: TombstoneCounts): CheckResult {
   return {
     check: "resurrection-zero",
     result,
-    measured: t,
+    measured: { ...t },
     threshold: { vectorsMax: 0, vectorMetadataMax: 0 },
   };
 }
@@ -439,7 +439,7 @@ export function evaluateSpikeReport(d: SpikeReportData): CheckResult {
   return {
     check: "spike-report",
     result,
-    measured: d,
+    measured: { ...d },
     threshold: {
       requiredFile: SPIKE_REPORT_RELATIVE_PATH.join("/"),
       requiredPatterns: ["ゼロヒット率(エラー含む)=99.8%", "ゼロヒット率(エラー含む)=2.5%"],
