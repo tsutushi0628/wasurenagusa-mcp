@@ -553,16 +553,31 @@
   - File: Implementation Logs（追記）
   - 凍結スナップショットとゴールデンセットでG2を実行し、結果本文を貼付する
   - Purpose: Phase 3 の着手条件を成立させる
-  - 完了条件: G2全項目PASS（recall@5がベースライン0.500超を含む）の出力本文が貼付されている
+  - 完了条件: G2総合が緑（recall@5がベースライン0.568超を含む。PdM裁定2026-07-10でタスク2.3記録の比較原点実測値0.568に確定。従前の暫定記載0.500は母集団の異なる16問ベンチ値のためR-B6 AC3が流用を禁ずる）の出力本文が貼付されている。**「緑」の定義（オーナー裁定2026-07-11）**: correct-zero は仕様見直し保留として明示隔離（QUARANTINED）されるため、G2緑＝「実効6項目（eval-run-integrity / recall / self-search / read-no-side-effect / fallback-counters / shadow-report）がPASS ＋ correct-zero が QUARANTINED を大書」で成立する（exit 0）。correct-zeroの実測値0/15はsilent skipせずJSON行に残す。是正はタスク2.13。
   - 検証: 貼付された出力本文のレビュー
   - _Leverage: scripts/gates/g2-search.ts_
   - _Requirements: R-B6, R-M3_
-  - _Prompt: Role: qa-engineer | Task: G2を実行し出力本文を貼付する | Restrictions: FAILを隠さない | Success: 全項目PASSの本文が残る_
+  - _Prompt: Role: qa-engineer | Task: G2を実行し出力本文を貼付する | Restrictions: FAILを隠さない。隔離を隠蔽に使わない | Success: 実効6項目PASS＋correct-zero QUARANTINED大書＋総合緑の本文が残る_
+
+- [ ] 2.13 correct-zero の再設計（仕様見直し保留の解消）
+  - File: .spec-workflow/specs/memory-redesign/（requirements/design 改定）＋ scripts/gates/g2-search.ts（隔離解除）
+  - 背景: R-B6 AC4「無関連は0件」は現機構（埋め込み距離フロア／FTS有無／RRF）では原理的に達成不能。独立監査で「正しくゼロ件」15問中12問がライブ状態照会（state-probe＝本番は検索に流さない設計・本番非流入）、ラベル誤りゼロ、correct-zero距離帯[0.4355,0.5388]がhit正解帯[0.37,0.5577]に完全内包し分離帯なし（0件化するとrecall@5が0.216へ崩落）。→ G2上で QUARANTINED として明示隔離中（`QUARANTINED_CHECKS`）。
+  - 隔離の性質（xfail-strict・恒久マスク化の防止）: 隔離は既知baseline照合式。実測が既知の未達値（0/15）と完全一致するときだけ QUARANTINED（緑）とし、悪化・改善（想定外PASS＝XPASS）・エラーのいずれでもbaselineからズレたらゲートが赤（exit 非0）になり必ず気づける。改善方向にズレたら本タスクで隔離解除を検討する合図となる（自動監視がサイレントに緑を維持することはない）。
+  - 手順:
+    1. correct-zero クラスを「本番が実際に検索へ流す無関連クエリ」で組み直す（現状は非検索経路のライブ状態照会が過半）。凍結手続き（採取根拠・sha256）はタスク2.1に準拠。
+    2. 組み直したクラスで距離フロア分離性を再評価する（分離帯が生じるか実測）。
+    3. 分離不能なら、距離フロアではなく「回答可能性ゲート」（候補がクエリに実際に答えるかの判定機構）を機構決定する。LLM設計原則に従い、意味判断のみをモデルに委ね閾値・整形・分岐はコード側に置く。過剰機構化しない（オーナー裁定2026-07-11で「LLM関連度ゲート・埋め込み更新は作らない」は本タスクの機構決定まで留保）。
+    4. 機構確定後、`QUARANTINED_CHECKS` から "correct-zero" を削除し、correct-zero をハードゲートへ復帰させて G2 全項目PASSを実測する。
+  - Purpose: R-B6 AC4 を well-posed な機構で満たし、隔離を解消する
+  - 完了条件: 再構成した correct-zero クラスで G2 の correct-zero が隔離なしでPASS、かつ recall@5 > 0.568 を維持
+  - 検証: G2出力本文（correct-zeroがQUARANTINEDでなくPASS）と、再構成クラスの凍結証跡
+  - _Requirements: R-B6 AC4_
+  - _Prompt: Role: qa-engineer + backend | Task: correct-zeroを本番流入クエリで再構成し回答可能性ゲートの機構を決定してG2隔離を解消する | Restrictions: 凍結資産の改変禁止。過剰機構化禁止。分離不能なら手を止めスコア分布を添えて報告 | Success: correct-zeroが隔離なしでPASSしrecall@5>0.568を維持_
 
 ## Phase 3：代謝（統合と昇格）
 
 目的：追記型統合の再稼働、昇格の人間ゲート、在庫の回収。
-着手条件：G2全項目PASSの出力本文が Implementation Logs に貼付済みであること。
+着手条件：G2総合が緑の出力本文が Implementation Logs に貼付済みであること（G2緑の定義はタスク2.12完了条件を参照：実効6項目PASS＋correct-zero QUARANTINED。correct-zeroの隔離解消はタスク2.13で別途行い、Phase 3着手の前提にはしない）。
 完了条件：ゲートG3の全項目PASSと出力貼付。
 
 - [ ] 3.1 スキーマv7移行のテスト作成
