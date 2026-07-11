@@ -2,7 +2,6 @@ import { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { SQLiteStorage } from "../storage/sqlite.js";
 import { SearchParams, MemoryCategory, MemoryIndexEntry } from "../types.js";
 import { LocalEmbedding } from "../vector/local-embedding.js";
-import { TIER_THRESHOLDS, shouldPromoteToCritical } from "../vector/memory-tier.js";
 import { config, getMemoryPath, getModelsDir } from "../config.js";
 import { buildSearchHint } from "../storage/search-hint.js";
 import { homedir } from "os";
@@ -54,147 +53,49 @@ export async function handleMemorySearch(
   const storage = new SQLiteStorage(dbPath);
   storage.initialize(memoryPath);
 
-  const params: SearchParams = {
-    query: args.query as string,
-    category: (args.category as MemoryCategory | "all") || "all",
-    limit: (args.limit as number) || 5,
-    project: args.project as string | undefined,
-    scope: args.scope as string | undefined,
-  };
-
-  const limit = params.limit || 5;
-
-  // LocalEmbedding初期化（WASURENAGUSA_MODEL_CACHE_DIR設定時は共有キャッシュ先へ、タスク1.13）
-  const modelsDir = getModelsDir(memoryPath);
-  const localEmbedding = new LocalEmbedding(modelsDir);
-  let embeddingAvailable = false;
+  // 読み経路のDBハンドルは try/finally で必ず閉じ、例外時のリークを封じる（タスク2.7 ③・同一関数の根治範囲）。
   try {
-    await localEmbedding.initialize();
-    embeddingAvailable = localEmbedding.isAvailable();
-  } catch (error) {
-    console.error("[search] LocalEmbedding初期化失敗:", error);
-  }
+    const params: SearchParams = {
+      query: args.query as string,
+      category: (args.category as MemoryCategory | "all") || "all",
+      limit: (args.limit as number) || 5,
+      project: args.project as string | undefined,
+      scope: args.scope as string | undefined,
+    };
 
-  let result;
-
-  if (embeddingAvailable) {
+    // LocalEmbedding初期化（WASURENAGUSA_MODEL_CACHE_DIR設定時は共有キャッシュ先へ、タスク1.13）
+    const modelsDir = getModelsDir(memoryPath);
+    const localEmbedding = new LocalEmbedding(modelsDir);
+    let embeddingAvailable = false;
     try {
-      const queryEmbedding = await localEmbedding.embed(params.query, "query");
-
-      // ハイブリッド検索（FTS5 + ベクトル）
-      result = storage.searchHybrid(params, queryEmbedding);
-
-      // ベクトル検索結果（アクセスカウント更新・critical昇格チェック用）
-      const vectorResults = storage.searchVectors(queryEmbedding, TIER_THRESHOLDS.medium, limit);
-
-      // アクセスカウント更新
-      const allVectorIds = vectorResults.map(vr => vr.id);
-      if (allVectorIds.length > 0) {
-        storage.incrementAccessCount(allVectorIds);
-      }
-
-      // critical昇格チェック
-      for (const vr of vectorResults) {
-        const meta = storage.getVectorMetadata([vr.id]);
-        const entryMeta = meta.get(vr.id);
-        const accessCount = entryMeta ? entryMeta.accessCount : 0;
-        if (shouldPromoteToCritical(accessCount)) {
-          try {
-            const detail = storage.getDetail({ ids: [vr.id] });
-            if (detail.entries.length > 0) {
-              const entry = detail.entries[0];
-              if (entry.intensity === undefined || entry.intensity < 5) {
-                storage.save({
-                  category: entry.category,
-                  content: entry.content,
-                  title: entry.title,
-                  tags: entry.tags,
-                  project: entry.project,
-                  scope: entry.scope,
-                  intensity: 5,
-                  replaceId: entry.id,
-                });
-              }
-            }
-          } catch {
-            // 昇格失敗は無視
-          }
-        }
-      }
+      await localEmbedding.initialize();
+      embeddingAvailable = localEmbedding.isAvailable();
     } catch (error) {
-      console.error("[search] ハイブリッド検索失敗、FTS5にフォールバック:", error);
+      console.error("[search] LocalEmbedding初期化失敗:", error);
+    }
+
+    let result;
+
+    if (embeddingAvailable) {
+      try {
+        const queryEmbedding = await localEmbedding.embed(params.query, "query");
+
+        // ハイブリッド検索（FTS5 + ベクトル）。読み経路は副作用ゼロ（R-B2 AC3・タスク2.7）:
+        // 旧実装にあったアクセス計数の書き込み（incrementAccessCount）と破壊的critical自動昇格
+        // （intensity/timestampを書き換える storage.save）はこの経路から廃止した。読み取りで
+        // 可変状態（intensity/timestamp/access_count）を書き換えると時間減衰順位を汚染するため。
+        // 利用実績の反映は searchHybrid 内の既存スコア加点（accessCount加点）に一本化されている。
+        result = storage.searchHybrid(params, queryEmbedding);
+      } catch (error) {
+        console.error("[search] ハイブリッド検索失敗、FTS5にフォールバック:", error);
+        result = storage.search(params);
+      }
+    } else {
+      // embedding不可 → FTS5のみ
       result = storage.search(params);
     }
-  } else {
-    // embedding不可 → FTS5のみ
-    result = storage.search(params);
-  }
 
-  // アクティブプロジェクト横断検索
-  if (params.project === "active") {
-    const { ActiveProjectsTracker } = await import("../active-projects.js");
-    const schedulerDir = join(homedir(), ".wasurenagusa", "scheduler");
-    const activeTracker = new ActiveProjectsTracker(schedulerDir);
-    const activeProjects = await activeTracker.getActiveProjects();
-
-    for (const proj of activeProjects) {
-      try {
-        const projMemoryPath = getMemoryPath(proj.path);
-        const projDbPath = join(projMemoryPath, config.sqliteFile);
-        const projStorage = new SQLiteStorage(projDbPath);
-        projStorage.initialize(projMemoryPath);
-
-        let projResults;
-        if (embeddingAvailable) {
-          try {
-            const projQueryEmbedding = await localEmbedding.embed(params.query, "query");
-            projResults = projStorage.searchHybrid(
-              { query: params.query, category: params.category, limit: params.limit },
-              projQueryEmbedding
-            );
-          } catch {
-            projResults = projStorage.search({
-              query: params.query,
-              category: params.category,
-              limit: params.limit,
-            });
-          }
-        } else {
-          projResults = projStorage.search({
-            query: params.query,
-            category: params.category,
-            limit: params.limit,
-          });
-        }
-
-        // プロジェクト名プレフィックスを付与してマージ
-        const prefixedResults = projResults.results.map(r => ({
-          ...r,
-          title: `[${proj.name}] ${r.title}`,
-        }));
-
-        // ID重複排除
-        for (const entry of prefixedResults) {
-          const exists = result.results.some(existing => existing.id === entry.id);
-          if (!exists) {
-            result.results.push(entry);
-            result.totalCount += 1;
-          }
-        }
-
-        projStorage.close();
-      } catch {
-        continue;
-      }
-    }
-  }
-
-  // 再発防止リスト（高強度dont）を毎回付与
-  // クエリ無関係に直近で怒られた事項を surface する
-  try {
-    const angerEntries = storage.listHighIntensityDonts(4, 5);
-
-    // active プロジェクト指定時は他プロジェクトの高強度dontも合流
+    // アクティブプロジェクト横断検索
     if (params.project === "active") {
       const { ActiveProjectsTracker } = await import("../active-projects.js");
       const schedulerDir = join(homedir(), ".wasurenagusa", "scheduler");
@@ -207,16 +108,45 @@ export async function handleMemorySearch(
           const projDbPath = join(projMemoryPath, config.sqliteFile);
           const projStorage = new SQLiteStorage(projDbPath);
           projStorage.initialize(projMemoryPath);
-          const projAnger = projStorage.listHighIntensityDonts(4, 5).map(e => ({
-            ...e,
-            title: `[${proj.name}] ${e.title}`,
+
+          let projResults;
+          if (embeddingAvailable) {
+            try {
+              const projQueryEmbedding = await localEmbedding.embed(params.query, "query");
+              projResults = projStorage.searchHybrid(
+                { query: params.query, category: params.category, limit: params.limit },
+                projQueryEmbedding
+              );
+            } catch {
+              projResults = projStorage.search({
+                query: params.query,
+                category: params.category,
+                limit: params.limit,
+              });
+            }
+          } else {
+            projResults = projStorage.search({
+              query: params.query,
+              category: params.category,
+              limit: params.limit,
+            });
+          }
+
+          // プロジェクト名プレフィックスを付与してマージ
+          const prefixedResults = projResults.results.map(r => ({
+            ...r,
+            title: `[${proj.name}] ${r.title}`,
           }));
-          for (const entry of projAnger) {
-            const exists = angerEntries.some(existing => existing.id === entry.id);
+
+          // ID重複排除
+          for (const entry of prefixedResults) {
+            const exists = result.results.some(existing => existing.id === entry.id);
             if (!exists) {
-              angerEntries.push(entry);
+              result.results.push(entry);
+              result.totalCount += 1;
             }
           }
+
           projStorage.close();
         } catch {
           continue;
@@ -224,53 +154,89 @@ export async function handleMemorySearch(
       }
     }
 
-    // intensity降順でソート、上位5件のみ
-    angerEntries.sort((a, b) => (b.intensity ?? 0) - (a.intensity ?? 0));
-    if (angerEntries.length > 0) {
-      result.angerHistory = angerEntries.slice(0, 5);
+    // 再発防止リスト（高強度dont）を毎回付与
+    // クエリ無関係に直近で怒られた事項を surface する
+    try {
+      const angerEntries = storage.listHighIntensityDonts(4, 5);
+
+      // active プロジェクト指定時は他プロジェクトの高強度dontも合流
+      if (params.project === "active") {
+        const { ActiveProjectsTracker } = await import("../active-projects.js");
+        const schedulerDir = join(homedir(), ".wasurenagusa", "scheduler");
+        const activeTracker = new ActiveProjectsTracker(schedulerDir);
+        const activeProjects = await activeTracker.getActiveProjects();
+
+        for (const proj of activeProjects) {
+          try {
+            const projMemoryPath = getMemoryPath(proj.path);
+            const projDbPath = join(projMemoryPath, config.sqliteFile);
+            const projStorage = new SQLiteStorage(projDbPath);
+            projStorage.initialize(projMemoryPath);
+            const projAnger = projStorage.listHighIntensityDonts(4, 5).map(e => ({
+              ...e,
+              title: `[${proj.name}] ${e.title}`,
+            }));
+            for (const entry of projAnger) {
+              const exists = angerEntries.some(existing => existing.id === entry.id);
+              if (!exists) {
+                angerEntries.push(entry);
+              }
+            }
+            projStorage.close();
+          } catch {
+            continue;
+          }
+        }
+      }
+
+      // intensity降順でソート、上位5件のみ
+      angerEntries.sort((a, b) => (b.intensity ?? 0) - (a.intensity ?? 0));
+      if (angerEntries.length > 0) {
+        result.angerHistory = angerEntries.slice(0, 5);
+      }
+    } catch (error) {
+      console.error("[search] angerHistory取得失敗:", error);
     }
-  } catch (error) {
-    console.error("[search] angerHistory取得失敗:", error);
-  }
 
-  storage.close();
-
-  // 軽量化: AI向けに id, title, positiveAction（angerHistory用）のみに絞る
-  // 詳細（category/intensity/tags/project等）は memory_get_detail で取得
-  const slimEntry = (e: { id: string; title: string }) => ({ id: e.id, title: e.title });
-  const slimAngerEntry = (e: { id: string; title: string; positiveAction?: string; scenario?: string; whyCore?: string }) => {
-    const result: { id: string; title: string; positiveAction: string; scenario?: string; whyCore?: string } = {
-      id: e.id,
-      title: e.title,
-      positiveAction: e.positiveAction ?? e.title,
+    // 軽量化: AI向けに id, title, positiveAction（angerHistory用）のみに絞る
+    // 詳細（category/intensity/tags/project等）は memory_get_detail で取得
+    const slimEntry = (e: { id: string; title: string }) => ({ id: e.id, title: e.title });
+    const slimAngerEntry = (e: { id: string; title: string; positiveAction?: string; scenario?: string; whyCore?: string }) => {
+      const result: { id: string; title: string; positiveAction: string; scenario?: string; whyCore?: string } = {
+        id: e.id,
+        title: e.title,
+        positiveAction: e.positiveAction ?? e.title,
+      };
+      if (e.scenario) { result.scenario = e.scenario; }
+      if (e.whyCore) { result.whyCore = e.whyCore; }
+      return result;
     };
-    if (e.scenario) { result.scenario = e.scenario; }
-    if (e.whyCore) { result.whyCore = e.whyCore; }
-    return result;
-  };
-  const slimResult: {
-    results: ReturnType<typeof slimEntry>[];
-    totalCount: number;
-    hint: string;
-    angerHistory?: ReturnType<typeof slimAngerEntry>[];
-  } = {
-    results: result.results.map(slimEntry),
-    totalCount: result.totalCount,
-    hint: buildSearchHint(result.results.length),
-  };
-  if (result.angerHistory && result.angerHistory.length > 0) {
-    slimResult.angerHistory = result.angerHistory.map(slimAngerEntry);
-  }
-  const resultJson = JSON.stringify(slimResult, null, 2);
-  const sessionId = generateSearchSessionId();
-  const resultIds = result.results.map((r: MemoryIndexEntry) => r.id);
-  void logOperation({ ts: generateJstTimestamp(), operation_type: "search", session_id: sessionId, query: params.query, category: params.category ?? "all", hit_count: result.results.length, project: basename(projectRoot), duration_ms: Date.now() - startTime }, memoryPath).catch(() => {});
-  setLastSearch(basename(projectRoot), sessionId, resultIds);
+    const slimResult: {
+      results: ReturnType<typeof slimEntry>[];
+      totalCount: number;
+      hint: string;
+      angerHistory?: ReturnType<typeof slimAngerEntry>[];
+    } = {
+      results: result.results.map(slimEntry),
+      totalCount: result.totalCount,
+      hint: buildSearchHint(result.results.length),
+    };
+    if (result.angerHistory && result.angerHistory.length > 0) {
+      slimResult.angerHistory = result.angerHistory.map(slimAngerEntry);
+    }
+    const resultJson = JSON.stringify(slimResult, null, 2);
+    const sessionId = generateSearchSessionId();
+    const resultIds = result.results.map((r: MemoryIndexEntry) => r.id);
+    void logOperation({ ts: generateJstTimestamp(), operation_type: "search", session_id: sessionId, query: params.query, category: params.category ?? "all", hit_count: result.results.length, project: basename(projectRoot), duration_ms: Date.now() - startTime }, memoryPath).catch(() => {});
+    setLastSearch(basename(projectRoot), sessionId, resultIds);
 
-  // 可観測性カウンタ（タスク0.9、R-M1）: ゼロヒット率算出用の分母・分子を記録する
-  void increment(memoryPath, "search_total", 1);
-  if (result.results.length === 0) {
-    void increment(memoryPath, "search_zero_hit", 1);
+    // 可観測性カウンタ（タスク0.9、R-M1）: ゼロヒット率算出用の分母・分子を記録する
+    void increment(memoryPath, "search_total", 1);
+    if (result.results.length === 0) {
+      void increment(memoryPath, "search_zero_hit", 1);
+    }
+    return resultJson;
+  } finally {
+    storage.close();
   }
-  return resultJson;
 }
