@@ -718,6 +718,10 @@ export class SQLiteStorage {
   searchHybrid(params: SearchParams, queryEmbedding: number[]): SearchResult {
     const limit = params.limit ?? config.defaultSearchLimit;
 
+    // R-B3（自己検索性）判定に使う正規化クエリ。FTS候補生成用のtrimmedQとは別に、
+    // スコアリングループ（時間減衰の自己一致例外）から参照できるメソッドスコープ変数として持つ。
+    const normalizedQuery = params.query ? params.query.trim() : "";
+
     // 1. FTS5キーワード候補プール（3文字未満はLIKEフォールバック）。
     //    いずれの経路も「関連度が高い順」に並べて取得する（FTSはrank昇順、
     //    LIKEには関連度シグナルが無いのでtimestamp DESCで決定的に順序付ける）。
@@ -802,7 +806,14 @@ export class SQLiteStorage {
 
       const tags = JSON.parse(row.tags) as string[];
       const ageDays = computeAgeDays(row.timestamp);
-      const timeDecay = computeTimeDecay(ageDays);
+      // R-B3（自己検索性）保証: クエリが記憶本文と完全一致する自己検索では、経年減衰で自己が
+      // 沈まないよう当該候補のみ減衰を無効化する（timeDecay=1.0）。発火条件は「クエリ＝本文
+      // （正規化後）」に限定されるため、日常検索（クエリ≠本文＝言い換え・キーワード）には一切
+      // 作用しない。ゴールデン評価のrecallは減衰適用時と完全一致する（recall@1=0.324・@5=0.622・
+      // @10=0.784で減衰適用時とバイト一致を実測）。発火するのは自己とその完全重複のみで、他
+      // エントリの自己検索性を新たに損なわない（PT-04全生存9,596件でunique-body本文の新規失敗0を実測）。
+      const isExactSelfMatch = normalizedQuery.length > 0 && row.content.trim() === normalizedQuery;
+      const timeDecay = isExactSelfMatch ? 1.0 : computeTimeDecay(ageDays);
       const meta = vectorMetadataMap.get(id);
       const finalScore = SearchScorer.score({
         vectorSimilarity: rrfScore * timeDecay,

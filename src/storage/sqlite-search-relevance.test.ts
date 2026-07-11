@@ -486,4 +486,41 @@ describe("SQLiteStorage - searchHybridの時間減衰（業務意図: 同程度�
     // 365日 vs 1日という大幅な経過日数差により時間減衰後は逆転し、newEntryが上位に来る。
     expect(ids.indexOf(newEntry.id)).toBeLessThan(ids.indexOf(oldEntry.id));
   });
+
+  it("業務意図(R-B3): 経年で沈むはずの古いエントリでも、自身の本文で検索(自己検索)すれば時間減衰の例外により新しい競合より上位に来る", () => {
+    // 自己検索性R-B3「保存した記憶はその内容自身で必ず見つかる」の外科的保証を検証する。
+    // 直前の減衰テストの鏡像: 同じ「古=ベクトル1位・古い / 新=僅差2位・新しい」構図だが、
+    // クエリを古エントリの本文と完全一致させる。完全一致(自己検索)のときだけ古の減衰を無効化
+    // する例外が働くため、通常なら減衰で新に負ける古が上位に来る。例外を外すと（減衰が古に
+    // 効くと）古は新の下に沈み、このアサーションは落ちる（＝R-B3回帰の検知器）。
+    const selfContent = "自己検索の完全一致で時間減衰を無効化する契約の検証用本文";
+    const oldEntry = storage.save({
+      category: "config",
+      title: "古い自己検索対象",
+      content: selfContent,
+    });
+    storage.upsertVector(oldEntry.id, makeVector({ 0: 1.0 }));
+
+    const decoy = storage.save({
+      category: "config",
+      title: "新しい別内容の競合",
+      content: "全く別種の新しい保存データ（自己検索クエリとは非一致）",
+    });
+    storage.upsertVector(decoy.id, makeVector({ 0: 0.99, 1: 0.01 }));
+
+    // 古=400日前 / 新=1日前 の経過日数差を作る（減衰があれば古が大幅に沈む条件）。
+    const db = (storage as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } } }).db;
+    const oldTs = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000).toISOString();
+    const newTs = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare("UPDATE memories SET timestamp = ? WHERE id = ?").run(oldTs, oldEntry.id);
+    db.prepare("UPDATE memories SET timestamp = ? WHERE id = ?").run(newTs, decoy.id);
+
+    // クエリ = 古エントリの本文そのもの（自己検索）。完全一致例外で古の減衰だけが無効化される。
+    const result = storage.searchHybrid({ query: selfContent }, makeVector({ 0: 1.0 }));
+    const ids = result.results.map((r) => r.id);
+
+    // 例外が効くので、400日前の古エントリが1日前のdecoyより上位（自己検索性が保たれる）。
+    // 例外を外すと減衰0.5^(400/90)≈0.046で古が沈み、decoyが上位に来てこのアサーションは落ちる。
+    expect(ids.indexOf(oldEntry.id)).toBeLessThan(ids.indexOf(decoy.id));
+  });
 });
