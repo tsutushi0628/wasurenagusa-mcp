@@ -221,7 +221,10 @@ export async function handleMemorySearch(
     } = {
       results: result.results.map(slimEntry),
       totalCount: result.totalCount,
-      hint: buildSearchHint(result.results.length),
+      // hintはマージ後の最終件数から再導出する（既存規約）。フォールバック段ラベルは起点プロジェクト
+      // （projectRoot）検索で発火した段を用いる（タスク2.10: ヒットの経路可視化。アクティブプロジェクト
+      // 横断マージは起点のfallbackStageを変更しない）。
+      hint: buildSearchHint(result.results.length, result.fallbackStage),
     };
     if (result.angerHistory && result.angerHistory.length > 0) {
       slimResult.angerHistory = result.angerHistory.map(slimAngerEntry);

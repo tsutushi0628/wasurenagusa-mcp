@@ -161,3 +161,80 @@ describe("memory_search: hint は最終返却件数から再導出される（�
     expect(result.hint).toBe(expectedHint);
   });
 });
+
+describe("memory_search: フォールバック段ラベルが最終hintまで通る（タスク2.10: ヒットの経路可視化）", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEmbedInitialize.mockResolvedValue(undefined);
+    mockEmbedIsAvailable.mockReturnValue(true);
+    mockEmbed.mockResolvedValue([0.1, 0.2, 0.3]);
+    mockStorageGetVectorMetadata.mockReturnValue(new Map());
+    mockStorageGetPredictionErrors.mockReturnValue(new Map());
+    mockStorageSearchVectors.mockReturnValue([]);
+    mockListHighIntensityDonts.mockReturnValue([]);
+    mockGetActiveProjects.mockResolvedValue([]);
+  });
+
+  it("検索がAND段まで落ちてヒットしたとき、最終hintに段ラベルが含まれる（件数再導出後もラベルが失われない）", async () => {
+    mockStorageSearchHybrid.mockReturnValue({
+      results: [
+        { id: "a1", timestamp: "2026-01-01T00:00:00+09:00", category: "log", title: "AND段ヒット", tags: [], project: "p" },
+      ],
+      totalCount: 1,
+      hint: "詳細が必要なエントリのIDを memory_get_detail に渡してください。（フォールバック段: AND）",
+      fallbackStage: "and",
+    });
+
+    const resultJson = await handleMemorySearch({ query: "test" }, "/tmp/project");
+    const result = JSON.parse(resultJson);
+
+    expect(result.results).toHaveLength(1);
+    expect(result.hint).toBe("詳細が必要なエントリのIDを memory_get_detail に渡してください。（フォールバック段: AND）");
+  });
+
+  it("project='active'の横断マージ後も、起点プロジェクト検索で発火した段のラベルが保持される", async () => {
+    // 1回目=起点プロジェクト自身の検索（OR段でヒット）、2回目=横断ループ内の検索（段情報なし）
+    mockStorageSearchHybrid
+      .mockReturnValueOnce({
+        results: [
+          { id: "base1", timestamp: "2026-01-01T00:00:00+09:00", category: "log", title: "起点ヒット", tags: [], project: "p" },
+        ],
+        totalCount: 1,
+        hint: "詳細が必要なエントリのIDを memory_get_detail に渡してください。（フォールバック段: OR）",
+        fallbackStage: "or",
+      })
+      .mockReturnValueOnce({
+        results: [
+          { id: "other1", timestamp: "2026-01-01T00:00:00+09:00", category: "log", title: "他プロジェクトのメモリ", tags: [], project: "other-project" },
+        ],
+        totalCount: 1,
+        hint: "詳細が必要なエントリのIDを memory_get_detail に渡してください。",
+      });
+    mockGetActiveProjects.mockResolvedValue([
+      { name: "other-project", path: "/tmp/other-project", lastSessionAt: "2026-01-01T00:00:00+09:00", sessionTopic: "x" },
+    ]);
+
+    const resultJson = await handleMemorySearch({ query: "test", project: "active" }, "/tmp/project");
+    const result = JSON.parse(resultJson);
+
+    // マージで件数は増えるが、hintは最終件数から再導出されつつ起点の段ラベルを保持する
+    expect(result.results).toHaveLength(2);
+    expect(result.hint).toBe("詳細が必要なエントリのIDを memory_get_detail に渡してください。（フォールバック段: OR）");
+  });
+
+  it("段が発火していない検索（fallbackStage無し）のhintはラベル無しの従来文言のまま", async () => {
+    mockStorageSearchHybrid.mockReturnValue({
+      results: [
+        { id: "v1", timestamp: "2026-01-01T00:00:00+09:00", category: "log", title: "ベクトルのみヒット", tags: [], project: "p" },
+      ],
+      totalCount: 1,
+      hint: "詳細が必要なエントリのIDを memory_get_detail に渡してください。",
+    });
+
+    const resultJson = await handleMemorySearch({ query: "test" }, "/tmp/project");
+    const result = JSON.parse(resultJson);
+
+    expect(result.results).toHaveLength(1);
+    expect(result.hint).toBe("詳細が必要なエントリのIDを memory_get_detail に渡してください。");
+  });
+});

@@ -98,11 +98,17 @@ export interface SearchParams {
   scope?: string;        // スコープフィルタ
 }
 
+// FTS段階フォールバックの段（design.md Phase2定義1: フレーズ→AND→OR）。
+// 段名の正本定義はここ。sqlite.tsの段実装・search-hint.tsのラベル・可観測性カウンタ
+// search_fallback_{phrase|and|or}（observability/counters.ts）はいずれもこの3値と1対1対応する。
+export type FtsFallbackStage = "phrase" | "and" | "or";
+
 // 検索結果（軽量インデックス）
 export interface SearchResult {
   results: MemoryIndexEntry[];   // タイトル+タグのみ
   totalCount: number;
   hint: string;                  // 「memory_get_detail で詳細を取得できます」のガイド
+  fallbackStage?: FtsFallbackStage; // 発火したFTSフォールバック段（タスク2.10: ヒットの経路可視化）。FTS経路で段がヒットしたときのみ設定
   angerHistory?: MemoryIndexEntry[]; // 高強度dont（intensity≥4）一覧。クエリ無関係に毎回付与される再発防止リスト
 }
 

@@ -14,6 +14,7 @@ import {
   DeleteParams,
   DeleteResult,
   ContextResult,
+  FtsFallbackStage,
   StashParams,
   StashResult,
   RestoreResult,
@@ -126,7 +127,9 @@ export function computeRrfScores(rankedLists: string[][]): Map<string, number> {
 //   and:    各トークンを独立フレーズにし、全トークンが（順不同・非連続でも）存在することを要求する
 //   or:     各トークンを独立フレーズにし、いずれか1つが存在すれば良い（従来のescapeFtsQuery既定動作）
 // 最初にヒットした段の結果を採用し、各段の発火を計数する（G2検証ゲート項目5 fallback-counters）。
-export type FtsFallbackStage = "phrase" | "and" | "or";
+// 段名の正本定義は types.ts の FtsFallbackStage（SearchResult.fallbackStage・search-hint.tsのラベルと
+// 単一定義を共有する。タスク2.10）。既存importer互換のためここから再exportする。
+export type { FtsFallbackStage };
 
 export interface FtsFallbackStageQuery {
   stage: FtsFallbackStage;
@@ -310,13 +313,14 @@ export class SQLiteStorage {
 
   /**
    * FTS段階フォールバック（search()用）。同一のcategory/project/scopeフィルタを各段に適用したうえで
-   * 実行し、最初にヒットした段のSELECT結果とCOUNT結果を返す。
+   * 実行し、最初にヒットした段のSELECT結果とCOUNT結果を、発火した段（全段0件ならnull）とともに返す。
+   * 段の判定・計数は従来のまま（stageを戻り値に乗せる配線のみ。タスク2.10: ヒットの経路可視化）。
    */
   private searchFtsStaged(
     trimmedQuery: string,
     params: SearchParams,
     limit: number
-  ): { rows: MemoryRow[]; countRow: { count: number } } {
+  ): { rows: MemoryRow[]; countRow: { count: number }; stage: FtsFallbackStage | null } {
     let filterClause = "";
     const filterParams: (string | number)[] = [];
     if (params.category && params.category !== "all") {
@@ -351,13 +355,17 @@ export class SQLiteStorage {
     );
 
     this.recordFtsFallbackStage(stage);
-    return result;
+    return { ...result, stage };
   }
 
   /**
-   * FTS段階フォールバック（searchHybrid()の候補プール用）。IDのみを関連度順（fts.rank昇順）で返す。
+   * FTS段階フォールバック（searchHybrid()の候補プール用）。IDのみを関連度順（fts.rank昇順）で、
+   * 発火した段（全段0件ならnull）とともに返す。段の判定・計数は従来のまま（タスク2.10）。
    */
-  private searchHybridFtsCandidates(trimmedQuery: string, params: SearchParams): string[] {
+  private searchHybridFtsCandidates(
+    trimmedQuery: string,
+    params: SearchParams
+  ): { ids: string[]; stage: FtsFallbackStage | null } {
     let filterClause = "";
     const filterParams: (string | number)[] = [];
     if (params.category && params.category !== "all") {
@@ -386,7 +394,7 @@ export class SQLiteStorage {
     );
 
     this.recordFtsFallbackStage(stage);
-    return result;
+    return { ids: result, stage };
   }
 
   private generateTimestamp(): string {
@@ -641,6 +649,9 @@ export class SQLiteStorage {
 
     let rows: MemoryRow[];
     let countRow: { count: number };
+    // 発火したフォールバック段（タスク2.10: ヒットの経路可視化）。FTS経路で段がヒットしたときのみ非null。
+    // LIKE/空クエリ経路には段の概念が無いためnullのまま（hintにもラベルは付かない）。
+    let fallbackStage: FtsFallbackStage | null = null;
 
     // 可視性マトリクス: 検索はactiveのみ可（I1）。
     if (usesFts) {
@@ -648,6 +659,7 @@ export class SQLiteStorage {
       const staged = this.searchFtsStaged(trimmedQuery, params, limit);
       rows = staged.rows;
       countRow = staged.countRow;
+      fallbackStage = staged.stage;
     } else {
       let query: string;
       const queryParams: (string | number)[] = [];
@@ -711,7 +723,8 @@ export class SQLiteStorage {
     return {
       results: indexEntries,
       totalCount: countRow.count,
-      hint: buildSearchHint(indexEntries.length),
+      hint: buildSearchHint(indexEntries.length, fallbackStage),
+      fallbackStage: fallbackStage ?? undefined,
     };
   }
 
@@ -730,13 +743,18 @@ export class SQLiteStorage {
     //    LIKEには関連度シグナルが無いのでtimestamp DESCで決定的に順序付ける）。
     //    順位（0始まりindex）がそのままRRF統合時のpositionになる。
     const ftsRankedIds: string[] = [];
+    // 発火したフォールバック段（タスク2.10: ヒットの経路可視化）。FTS候補プールで段がヒットしたときのみ
+    // 非null。LIKE経路・空クエリ・ベクトルのみのヒットには段の概念が無いためnullのまま。
+    let fallbackStage: FtsFallbackStage | null = null;
     if (params.query && params.query.trim()) {
       const trimmedQ = params.query.trim();
 
       // 可視性マトリクス: 検索(ハイブリッド)はactiveのみ可（I1）。
       if (trimmedQ.length >= 3) {
         // FTS経路は段階フォールバック（フレーズ→AND→OR）で候補を取得する（design.md Phase2定義1）。
-        ftsRankedIds.push(...this.searchHybridFtsCandidates(trimmedQ, params));
+        const staged = this.searchHybridFtsCandidates(trimmedQ, params);
+        ftsRankedIds.push(...staged.ids);
+        fallbackStage = staged.stage;
       } else {
         const likePattern = `%${trimmedQ}%`;
         let ftsQuery = `SELECT id FROM memories WHERE (title LIKE ? OR content LIKE ? OR tags LIKE ?) AND state = 'active'`;
@@ -852,7 +870,8 @@ export class SQLiteStorage {
     return {
       results: limited,
       totalCount: scoredEntries.length,
-      hint: buildSearchHint(limited.length),
+      hint: buildSearchHint(limited.length, fallbackStage),
+      fallbackStage: fallbackStage ?? undefined,
     };
   }
 

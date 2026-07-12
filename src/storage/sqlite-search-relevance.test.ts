@@ -328,6 +328,10 @@ describe("SQLiteStorage - 段階フォールバック（業務意図: 厳しい�
     // フレーズ段で採用されるため、decoy（フレーズ段では0件）は候補に含まれない
     expect(ids).not.toContain(decoy.id);
 
+    // タスク2.10: 発火した段が結果とhintの両方から読める（呼び手がヒットの経路を判別できる）
+    expect(result.fallbackStage).toBe("phrase");
+    expect(result.hint).toContain("（フォールバック段: フレーズ）");
+
     const counters = await readCountersLogWithRetry(memoryPath);
     expect(counters).toContain('"metric":"search_fallback_phrase"');
   });
@@ -356,6 +360,10 @@ describe("SQLiteStorage - 段階フォールバック（業務意図: 厳しい�
     // AND段が採用されるため、片方の語しか無いdecoyは候補に含まれない
     expect(ids).not.toContain(onlyOneToken.id);
 
+    // タスク2.10: フレーズ段より緩いAND段まで落ちたことがhintから読める
+    expect(result.fallbackStage).toBe("and");
+    expect(result.hint).toContain("（フォールバック段: AND）");
+
     const counters = await readCountersLogWithRetry(memoryPath);
     expect(counters).toContain('"metric":"search_fallback_and"');
   });
@@ -372,6 +380,10 @@ describe("SQLiteStorage - 段階フォールバック（業務意図: 厳しい�
     const result = storage.search({ query: "termGamma termDelta" });
     const ids = result.results.map((r) => r.id);
     expect(ids).toContain(partialMatch.id);
+
+    // タスク2.10: 最も緩いOR段まで落ちたことがhintから読める（呼び手が確度を較正できる）
+    expect(result.fallbackStage).toBe("or");
+    expect(result.hint).toContain("（フォールバック段: OR）");
 
     const counters = await readCountersLogWithRetry(memoryPath);
     expect(counters).toContain('"metric":"search_fallback_or"');
@@ -398,6 +410,10 @@ describe("SQLiteStorage - 段階フォールバック（業務意図: 厳しい�
     );
     const ids = result.results.map((r) => r.id);
     expect(ids).toContain(exact.id);
+
+    // タスク2.10: ハイブリッド検索でもFTS候補プールで発火した段が結果とhintから読める
+    expect(result.fallbackStage).toBe("phrase");
+    expect(result.hint).toContain("（フォールバック段: フレーズ）");
   });
 });
 
