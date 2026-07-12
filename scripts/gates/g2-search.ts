@@ -29,13 +29,12 @@
  */
 
 import Database from "better-sqlite3";
-import { createHash } from "crypto";
 import { fileURLToPath } from "url";
 import { tmpdir } from "os";
-import { dirname, join, resolve } from "path";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "fs";
+import { dirname, join, relative, resolve } from "path";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync } from "fs";
 
-import { parseArgs, sha256OfFile } from "../backup-store.js";
+import { parseArgs, sha256OfFile, EXCLUDED_DIR_NAMES } from "../backup-store.js";
 import {
   loadGoldenQueries,
   runGoldenEval,
@@ -48,6 +47,8 @@ import { SQLiteStorage } from "../../src/storage/sqlite.js";
 import { LocalEmbedding } from "../../src/vector/local-embedding.js";
 import { config, getModelsDir } from "../../src/config.js";
 import { handleMemorySearch } from "../../src/tools/search.js";
+import { mutableStateHash } from "../../src/storage/mutable-state-hash.js";
+import { hashBody } from "../../src/utils/hash-body.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -261,26 +262,8 @@ export function evaluateCorrectZero(summary: EvalSummary): CheckResult {
   };
 }
 
-const hashBody = (trimmed: string): string => createHash("sha256").update(trimmed).digest("hex").slice(0, 16);
-
-/** 可変状態（intensity/timestamp と access_count）のスナップショットハッシュ。read-no-side-effect用。 */
-export function mutableStateHash(dbPath: string): { memories: string; vectorMeta: string } {
-  const db = new Database(dbPath, { readonly: true });
-  try {
-    const mem = db.prepare("SELECT id, intensity, timestamp FROM memories ORDER BY id").all();
-    let vmeta = "[]";
-    const hasVm = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='vector_metadata'").get();
-    if (hasVm) {
-      vmeta = JSON.stringify(db.prepare("SELECT id, access_count FROM vector_metadata ORDER BY id").all());
-    }
-    return {
-      memories: createHash("sha256").update(JSON.stringify(mem)).digest("hex"),
-      vectorMeta: createHash("sha256").update(vmeta).digest("hex"),
-    };
-  } finally {
-    db.close();
-  }
-}
+// hashBody・mutableStateHash は共有正本（src/utils/hash-body.ts, src/storage/mutable-state-hash.ts）
+// をimportして使う（cr-verify-07・cr-verify-16。単体テスト側と基準の乖離を防ぐ）。
 
 // ============================================================
 // 収集＋オーケストレーション
@@ -297,12 +280,52 @@ interface G2Options {
   repoRoot?: string;
 }
 
-/** 作業用の使い捨てコピーを作る（原本の凍結保護）。 */
+/** 作業用の使い捨てコピーを作る（原本の凍結保護）。
+ *  models/（埋め込みモデルキャッシュ、実測552MB）は backup-store.ts の EXCLUDED_DIR_NAMES に
+ *  倣って複製せず除外する（cr-verify-06a。本ゲートは1回の実行で最大4回複製するため、除外なしだと
+ *  桁で無駄なI/Oコストになる）。除外後もモデル解決を保つため、除外ディレクトリはシンボリックリンクで
+ *  原本を指す（複製ゼロで読み取り専用の共有・getModelsDir経由の全呼び出しが透過的に原本を読む）。
+ *  rmSync(recursive)はシンボリックリンク自体だけを外し、リンク先の実体は削除しない（fs.rmSync実行時
+ *  にシンボリックリンクをunlinkするのみで、target側を再帰走査しないため）。 */
 function freshCopy(storePath: string): { dir: string; storeDir: string } {
   const dir = mkdtempSync(join(tmpdir(), "g2-"));
   const storeDir = join(dir, ".wasurenagusa");
-  cpSync(storePath, storeDir, { recursive: true });
+  cpSync(storePath, storeDir, {
+    recursive: true,
+    filter: (src: string) => {
+      const relPath = relative(storePath, src);
+      if (EXCLUDED_DIR_NAMES.has(relPath) && existsSync(src) && statSync(src).isDirectory()) {
+        return false;
+      }
+      return true;
+    },
+  });
+  for (const name of EXCLUDED_DIR_NAMES) {
+    const originalDir = join(storePath, name);
+    if (existsSync(originalDir)) {
+      symlinkSync(originalDir, join(storeDir, name), "dir");
+    }
+  }
   return { dir, storeDir };
+}
+
+/** checkSelfSearch・checkFallbackCounters が重複していたストレージ＋埋め込みの初期化4行の抽出
+ *  （cr-verify-08）。初期化失敗時（拡張ロード失敗等）もストレージ接続を確実に閉じてリークを防ぐ
+ *  （cr-verify-01と同型の防御。コンストラクタで既に開いた接続をここで漏らさない）。 */
+async function openStorageAndEmbedding(
+  dbPath: string,
+  storeDir: string,
+): Promise<{ storage: SQLiteStorage; embedding: LocalEmbedding }> {
+  const storage = new SQLiteStorage(dbPath);
+  try {
+    storage.initialize(storeDir);
+    const embedding = new LocalEmbedding(getModelsDir(storeDir));
+    await embedding.initialize();
+    return { storage, embedding };
+  } catch (error) {
+    storage.close();
+    throw error;
+  }
 }
 
 /** self-search 退行プローブ（境界標本・群単位）。全生存100%の正本はPT-04テスト。
@@ -339,10 +362,7 @@ async function checkSelfSearch(storePath: string, sample: number, repoRoot: stri
       if (!repContentByHash.has(h)) repContentByHash.set(h, r.content);
     }
 
-    const storage = new SQLiteStorage(dbPath);
-    storage.initialize(storeDir);
-    const embedding = new LocalEmbedding(getModelsDir(storeDir));
-    await embedding.initialize();
+    const { storage, embedding } = await openStorageAndEmbedding(dbPath, storeDir);
     if (!embedding.isAvailable()) {
       storage.close();
       return {
@@ -393,8 +413,10 @@ async function checkReadNoSideEffect(storePath: string): Promise<CheckResult> {
     // getMemoryPath(projectRoot)=resolve(projectRoot, ".wasurenagusa") が storeDir を指すよう mkdtemp親を渡す。
     const projectRoot = dir;
     // クエリは既存エントリの本文そのもの（自己クエリ）を使う。距離≈0でsearchVectors(medium)が必ず当該
-    // ベクトルを返し、read経路のアクセス計数(search.ts:93)・critical昇格(:107)が発火する条件を保証する。
-    // goldenクエリだと昇格閾値未到達で書き込みが偶然発火せず「書き込みコードは在るのにPASS」の偽陰性になる。
+    // ベクトルを返し、read経路を確実にヒットさせる（invoked>0の母数を稼ぐ）。旧実装にあった
+    // アクセス計数の書き込み・破壊的critical自動昇格はこの読み経路から既に撤去済み（タスク2.7・R-B2 AC3、
+    // src/tools/search.ts参照）で、この検査が発火を保証する対象ではない。goldenクエリだとヒット自体が
+    // 起きず「呼び出しはしたが実質何も検証していない」偽陰性になるため、自己クエリで確実にヒットさせる。
     const probeDb = new Database(dbPath, { readonly: true });
     const probeRows = probeDb
       .prepare("SELECT content FROM memories WHERE state = 'active' AND length(trim(content)) >= 20 ORDER BY id LIMIT 5")
@@ -434,20 +456,25 @@ async function checkFallbackCounters(storePath: string, goldenPath: string): Pro
   const { dir, storeDir } = freshCopy(storePath);
   try {
     const dbPath = join(storeDir, config.sqliteFile);
-    const storage = new SQLiteStorage(dbPath);
-    storage.initialize(storeDir);
-    const embedding = new LocalEmbedding(getModelsDir(storeDir));
-    await embedding.initialize();
-    const golden = loadGoldenQueries(goldenPath).slice(0, 5);
-    if (embedding.isAvailable()) {
-      for (const g of golden) {
-        const emb = await embedding.embed(g.query, "query");
-        storage.searchHybrid({ query: g.query, category: "all", limit: EVAL_LIMIT }, emb);
+    const { storage, embedding } = await openStorageAndEmbedding(dbPath, storeDir);
+    try {
+      const golden = loadGoldenQueries(goldenPath).slice(0, 5);
+      if (embedding.isAvailable()) {
+        for (const g of golden) {
+          const emb = await embedding.embed(g.query, "query");
+          storage.searchHybrid({ query: g.query, category: "all", limit: EVAL_LIMIT }, emb);
+        }
       }
+    } finally {
+      storage.close();
     }
-    storage.close();
+    // カウンタ書き込みは void increment(...).catch(() => {}) の fire-and-forget であり、直後にログを
+    // 読むと未着地の競合になり得る。checkReadNoSideEffect と同じ300ms待機で沈静化させてから読む
+    // （cr-verify-14）。
+    await new Promise((r) => setTimeout(r, 300));
     const logsDir = join(storeDir, "logs");
     let stageEvents = 0;
+    let corruptLineCount = 0;
     const stagesSeen = new Set<string>();
     if (existsSync(logsDir)) {
       for (const f of readdirSync(logsDir).filter((n) => n.startsWith("counters-") && n.endsWith(".jsonl"))) {
@@ -460,7 +487,9 @@ async function checkFallbackCounters(storePath: string, goldenPath: string): Pro
               if (o.stage !== undefined) stagesSeen.add(String(o.stage));
             }
           } catch {
-            /* skip */
+            // JSON.parse失敗行は無言破棄せず件数化して可視化する（src/observability/counters.ts の
+            // corruptLineCount方式に倣う。cr-verify-14）。
+            corruptLineCount += 1;
           }
         }
       }
@@ -468,7 +497,7 @@ async function checkFallbackCounters(storePath: string, goldenPath: string): Pro
     return {
       check: "fallback-counters",
       result: stageEvents > 0 ? "PASS" : "FAIL",
-      measured: { stageEvents, stagesSeen: [...stagesSeen] },
+      measured: { stageEvents, stagesSeen: [...stagesSeen], corruptLineCount },
       threshold: { stageEventsMin: 1 },
     };
   } finally {

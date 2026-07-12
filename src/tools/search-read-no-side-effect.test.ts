@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, mkdirSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import Database from "better-sqlite3";
 
 // LocalEmbedding のみモックし、実モデル非依存で「埋め込み利用可能」の read 経路を通す。
 // SQLiteStorage・config・memory-tier は実物のまま使い、実DBの可変状態が読み取りで不変かを検証する。
@@ -25,6 +24,7 @@ vi.mock("../vector/local-embedding.js", async (importOriginal) => {
 import { SQLiteStorage } from "../storage/sqlite.js";
 import { getMemoryPath, config } from "../config.js";
 import { handleMemorySearch } from "./search.js";
+import { mutableStateHash } from "../storage/mutable-state-hash.js";
 
 function makeVector(values: Record<number, number>): number[] {
   const vec = new Array(384).fill(0);
@@ -32,21 +32,6 @@ function makeVector(values: Record<number, number>): number[] {
     vec[Number(idx)] = val;
   }
   return vec;
-}
-
-// R-B2 AC3 が「読みは記録を変えない」と定める可変状態だけをスナップショットする。
-// 列と並びは G2 ゲート g2-search.ts の mutableStateHash（memories.intensity/timestamp と
-// vector_metadata.access_count を id 昇順）に完全に揃え、ゲートが検査する契約そのものを単体で守る。
-function snapshotMutableState(dbPath: string): { memories: unknown[]; vectorMeta: unknown[] } {
-  const db = new Database(dbPath, { readonly: true });
-  try {
-    return {
-      memories: db.prepare("SELECT id, intensity, timestamp FROM memories ORDER BY id").all(),
-      vectorMeta: db.prepare("SELECT id, access_count FROM vector_metadata ORDER BY id").all(),
-    };
-  } finally {
-    db.close();
-  }
 }
 
 describe("handleMemorySearch - 読み経路の副作用ゼロ（R-B2 AC3・タスク2.7）", () => {
@@ -88,13 +73,13 @@ describe("handleMemorySearch - 読み経路の副作用ゼロ（R-B2 AC3・タ�
   });
 
   it("検索を実行しても memories.intensity/timestamp と vector_metadata.access_count が一切変わらない", async () => {
-    const before = snapshotMutableState(dbPath);
+    const before = mutableStateHash(dbPath);
 
     // 実 read 経路を起動。旧実装ならこの1回で access_count が加算され、閾値超により intensity=5 へ
     // 破壊的昇格され、after が before と乖離する。副作用ゼロなら両テーブルとも不変。
     await handleMemorySearch({ query: selfContent, limit: 10 }, projectRoot);
 
-    const after = snapshotMutableState(dbPath);
+    const after = mutableStateHash(dbPath);
 
     // 読みは記録を変えない（R-B2 AC3）。副作用撤去を戻すと、access_count 加算か破壊的昇格の
     // いずれかで after が before と食い違い、このアサーションが落ちる（＝真の回帰検知器）。

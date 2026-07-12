@@ -51,10 +51,12 @@ export async function handleMemorySearch(
   const memoryPath = getMemoryPath(projectRoot);
   const dbPath = join(memoryPath, config.sqliteFile);
   const storage = new SQLiteStorage(dbPath);
-  storage.initialize(memoryPath);
 
   // 読み経路のDBハンドルは try/finally で必ず閉じ、例外時のリークを封じる（タスク2.7 ③・同一関数の根治範囲）。
+  // initialize() 自体がthrowし得る（拡張ロード失敗等）ため、try の最初の文として実行し、
+  // finally が確実に届く範囲に含める（コンストラクタで既に開いた接続をここで漏らさない）。
   try {
+    storage.initialize(memoryPath);
     const params: SearchParams = {
       query: args.query as string,
       category: (args.category as MemoryCategory | "all") || "all",

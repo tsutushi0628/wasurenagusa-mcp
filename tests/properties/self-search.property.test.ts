@@ -50,11 +50,11 @@
 import { describe, it, expect } from "vitest";
 import { existsSync, writeFileSync } from "fs";
 import { join } from "path";
-import { createHash } from "crypto";
 import Database from "better-sqlite3";
 import { SQLiteStorage } from "../../src/storage/sqlite.js";
 import { LocalEmbedding } from "../../src/vector/local-embedding.js";
 import { config, getModelsDir } from "../../src/config.js";
+import { hashBody } from "../../src/utils/hash-body.js";
 
 const RUN_PT04 = process.env.RUN_PT04 === "1";
 const STORE_PATH = process.env.PT04_STORE;
@@ -88,10 +88,6 @@ interface FailedGroupRecord {
   hash: string;
   groupSize: number;
   resultCount: number;
-}
-
-function hashBody(trimmed: string): string {
-  return createHash("sha256").update(trimmed).digest("hex").slice(0, 16);
 }
 
 describe.skipIf(!RUN_PT04)("PT-04 自己検索性（全生存エントリ・実スナップショット・ユニーク本文単位）", () => {
