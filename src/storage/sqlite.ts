@@ -242,7 +242,10 @@ export class SQLiteStorage {
 
   private generateId(): string {
     const timestamp = Date.now().toString(36);
-    const random = randomBytes(2).toString("hex");
+    // randomBytes(2)（16bit）だと、同一ミリ秒内で数百件挿入するバースト書き込み（バックフィル・
+    // 合成fixture生成等）で誕生日問題によりUNIQUE制約違反が発生し得た（実根因）。
+    // operation-logger.tsのID生成と同じrandomBytes(4)（32bit）に揃え、衝突確率を無視できる水準まで下げる。
+    const random = randomBytes(4).toString("hex");
     return `${timestamp}-${random}`;
   }
 

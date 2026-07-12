@@ -132,18 +132,29 @@ describe("ProjectInitializer", () => {
 
   describe("updateProjectMeta()", () => {
     it("既存のmetaを部分更新する", async () => {
+      // createdAtとupdatedAtはともにミリ秒精度のnew Date().toISOString()で採番される。
+      // 実時計のままだとsaveProjectMeta→updateProjectMeataが同一ミリ秒内で完了し
+      // updatedAt === createdAtになる（flakeの実根因）ため、時計を明示的に進めて
+      // 「更新で値が変わる」という業務意図を決定論的に検証する。
       const initializer = new ProjectInitializer(schedulerDir);
-      await initializer.saveProjectMeta("test-project", "/tmp/test", { phase: "startup" });
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+        await initializer.saveProjectMeta("test-project", "/tmp/test", { phase: "startup" });
 
-      const updated = await initializer.updateProjectMeta("test-project", {
-        phase: "growth",
-        qualityPolicy: "quality_first",
-      });
+        vi.setSystemTime(new Date("2026-01-01T00:00:01.000Z"));
+        const updated = await initializer.updateProjectMeta("test-project", {
+          phase: "growth",
+          qualityPolicy: "quality_first",
+        });
 
-      expect(updated.phase).toBe("growth");
-      expect(updated.qualityPolicy).toBe("quality_first");
-      expect(updated.project).toBe("test-project"); // 変更不可
-      expect(updated.updatedAt).not.toBe(updated.createdAt);
+        expect(updated.phase).toBe("growth");
+        expect(updated.qualityPolicy).toBe("quality_first");
+        expect(updated.project).toBe("test-project"); // 変更不可
+        expect(updated.updatedAt).not.toBe(updated.createdAt);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("存在しないプロジェクトでエラーを投げる", async () => {

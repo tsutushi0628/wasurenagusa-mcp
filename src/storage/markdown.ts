@@ -30,7 +30,9 @@ export class MarkdownStorage {
 
   private generateId(): string {
     const timestamp = Date.now().toString(36);
-    const random = randomBytes(2).toString("hex");
+    // randomBytes(2)（16bit）だと同一ミリ秒内のバースト書き込みで誕生日問題により
+    // ID衝突が発生し得た。operation-logger.tsのID生成と同じrandomBytes(4)（32bit）に揃える。
+    const random = randomBytes(4).toString("hex");
     return `${timestamp}-${random}`;
   }
 
