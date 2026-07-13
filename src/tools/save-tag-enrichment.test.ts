@@ -32,7 +32,15 @@ vi.mock("../vector/local-embedding.js", () => {
     embed = mockEmbed;
     isAvailable = mockEmbedIsAvailable;
   }
-  return { LocalEmbedding: MockLocalEmbedding };
+  return {
+    LocalEmbedding: MockLocalEmbedding,
+    getSharedEmbedding: async () => ({
+      isAvailable: mockEmbedIsAvailable,
+      embed: mockEmbed,
+      embedBatch: vi.fn(),
+    }),
+    disposeSharedEmbedding: async () => {},
+  };
 });
 
 const mockEnrich = vi.fn();

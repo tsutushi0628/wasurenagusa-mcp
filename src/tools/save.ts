@@ -2,7 +2,7 @@ import { basename, join } from "path";
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { SQLiteStorage } from "../storage/sqlite.js";
 import { SaveParams, MemoryCategory } from "../types.js";
-import { LocalEmbedding } from "../vector/local-embedding.js";
+import { getSharedEmbedding, type SharedEmbedding } from "../vector/local-embedding.js";
 import { TagEnricher } from "../vector/tag-enricher.js";
 import { formatWeightedTags } from "../vector/weighted-tag.js";
 import { computePredictionError } from "../vector/prediction-error.js";
@@ -107,162 +107,171 @@ export async function handleMemorySave(
   const memoryPath = getMemoryPath(projectRoot);
   const dbPath = join(memoryPath, config.sqliteFile);
   const storage = new SQLiteStorage(dbPath);
-  storage.initialize(memoryPath);
 
-  let intensity: number | undefined;
-  if (args.intensity !== undefined && args.intensity !== null) {
-    const raw = Number(args.intensity);
-    if (!isNaN(raw)) {
-      const rounded = Math.round(raw);
-      intensity = Math.min(10, Math.max(1, rounded));
-    }
-  }
-
-  const positiveAction = args.positiveAction as string | undefined;
-  if (args.category === "dont" && positiveAction !== undefined && positiveAction.trim() === "") {
-    return JSON.stringify({ success: false, error: "positiveAction は空文字にできません（category=dont では必須です）" }, null, 2);
-  }
-
-  const scenario = args.scenario as string | undefined;
-  const whyCore = args.whyCore as string | undefined;
-
-  // 予測誤差ループ: 渡された見立て・実測を配列化（normalizeTags を流用）
-  const predictedFactors = args.predictedFactors !== undefined ? normalizeTags(args.predictedFactors) : undefined;
-  const actualFactors = args.actualFactors !== undefined ? normalizeTags(args.actualFactors) : undefined;
-  const predictionDelta = args.predictionDelta as string | undefined;
-
-  // 両方が非空なら差分を自動算出（undefined ならフィールド省略）。差分計算はコード側で完結（LLM不使用）。
-  let predictionError: number | undefined;
-  if (predictedFactors && predictedFactors.length > 0 && actualFactors && actualFactors.length > 0) {
-    predictionError = computePredictionError(predictedFactors, actualFactors);
-  }
-
-  // project帰属（design.md禁止フォールバック#5）: 明示指定があればconfirmed、
-  // 省略・空文字時はcwd由来のbasenameへ暗黙フォールバックせず、unknownを明示刻印して
-  // 検索対象に残す（不明バケツをフィルタの裏に消さない。R-A4 AC3）。
-  let project: string;
-  let projectConfidence: "confirmed" | "unknown";
-  if (typeof args.project === "string" && args.project.trim() !== "") {
-    project = args.project.trim();
-    projectConfidence = "confirmed";
-  } else {
-    project = "unknown";
-    projectConfidence = "unknown";
-    console.error(`[save] project省略のためunknownを明示刻印しました（起動プロジェクト: ${basename(projectRoot)}）`);
-  }
-
-  const params: SaveParams = {
-    category: args.category as MemoryCategory,
-    title: args.title as string,
-    content: args.content as string,
-    tags: normalizeTags(args.tags),
-    project,
-    projectConfidence,
-    scope: args.scope as string | undefined,
-    intensity,
-    positiveAction,
-    scenario,
-    whyCore,
-    predictedFactors,
-    actualFactors,
-    predictionError,
-    predictionDelta,
-  };
-
-  // LocalEmbedding初期化（WASURENAGUSA_MODEL_CACHE_DIR設定時は共有キャッシュ先へ、タスク1.13）
-  const modelsDir = getModelsDir(memoryPath);
-  const localEmbedding = new LocalEmbedding(modelsDir);
-  let embeddingAvailable = false;
+  // 書き経路のDBハンドルは try/finally で必ず閉じ、早期return（category=dont・空positiveAction）や
+  // 途中throwでもリークしないようにする（getContext.ts の手本パターンに揃える）。initialize() 自体が
+  // throwし得るため try の最初の文として実行する。
   try {
-    await localEmbedding.initialize();
-    embeddingAvailable = localEmbedding.isAvailable();
-  } catch (error) {
-    console.error("[save] LocalEmbedding初期化失敗:", error);
-  }
+    storage.initialize(memoryPath);
 
-  // Phase 1: タグ拡張 + Embedding生成を並列実行
-  let embedding: number[] | null = null;
-  const tagEnricher = new TagEnricher(config.geminiApiKey);
-  const tagEnricherAvailable = !!config.geminiApiKey;
-
-  const promises: Promise<unknown>[] = [];
-
-  // タグ拡張（LLMのAPIキーが必要）
-  if (tagEnricherAvailable) {
-    promises.push(
-      tagEnricher.enrich(params.title, params.content, params.tags ?? [], []).catch((error) => {
-        console.error("[save] タグ拡張失敗:", error);
-        return null;
-      })
-    );
-  } else {
-    promises.push(Promise.resolve(null));
-  }
-
-  // Embedding生成（ローカル）
-  if (embeddingAvailable) {
-    const textToEmbed = params.title + " " + params.content;
-    promises.push(
-      localEmbedding.embed(textToEmbed, "passage").catch((error) => {
-        console.error("[save] embedding生成失敗:", error);
-        return null;
-      })
-    );
-  } else {
-    promises.push(Promise.resolve(null));
-  }
-
-  const [enrichResult, embeddingResult] = await Promise.all(promises);
-
-  // タグ拡張結果を適用
-  if (enrichResult && typeof enrichResult === "object" && "tags" in enrichResult) {
-    const enriched = enrichResult as { tags: { tag: string; weight: number }[]; newThemes: string[] };
-    params.tags = formatWeightedTags(enriched.tags);
-
-    // Phase 2: 新テーマ検出 → SQLiteのthemesテーブルへ登録（v1書き込み経路のretag-worker
-    // spawnは物理遮断済み。再タグ付け自体はPhase3以降で夜間統合に相乗りさせる想定）
-    if (enriched.newThemes.length > 0) {
-      try {
-        const trulyNewThemes: string[] = [];
-        for (const theme of enriched.newThemes) {
-          if (storage.isNewTheme(theme)) {
-            trulyNewThemes.push(theme);
-          }
-        }
-        if (trulyNewThemes.length > 0) {
-          storage.addThemes(trulyNewThemes);
-        }
-      } catch (error) {
-        console.error("[save] テーマ登録失敗:", error);
+    let intensity: number | undefined;
+    if (args.intensity !== undefined && args.intensity !== null) {
+      const raw = Number(args.intensity);
+      if (!isNaN(raw)) {
+        const rounded = Math.round(raw);
+        intensity = Math.min(10, Math.max(1, rounded));
       }
     }
-  }
 
-  if (embeddingResult && Array.isArray(embeddingResult)) {
-    embedding = embeddingResult as number[];
-  }
-
-  // replaceId指定時: 古いベクトルを削除
-  if (params.replaceId) {
-    try {
-      storage.deleteVectors([params.replaceId]);
-    } catch (error) {
-      console.error("[save] 旧ベクトル削除失敗:", error);
+    const positiveAction = args.positiveAction as string | undefined;
+    if (args.category === "dont" && positiveAction !== undefined && positiveAction.trim() === "") {
+      return JSON.stringify({ success: false, error: "positiveAction は空文字にできません（category=dont では必須です）" }, null, 2);
     }
-  }
 
-  // 保存
-  const result = storage.save(params);
+    const scenario = args.scenario as string | undefined;
+    const whyCore = args.whyCore as string | undefined;
 
-  // Embedding upsert
-  if (embedding) {
-    try {
-      storage.upsertVector(result.id, embedding);
-    } catch (error) {
-      console.error("[save] embedding保存失敗:", error);
+    // 予測誤差ループ: 渡された見立て・実測を配列化（normalizeTags を流用）
+    const predictedFactors = args.predictedFactors !== undefined ? normalizeTags(args.predictedFactors) : undefined;
+    const actualFactors = args.actualFactors !== undefined ? normalizeTags(args.actualFactors) : undefined;
+    const predictionDelta = args.predictionDelta as string | undefined;
+
+    // 両方が非空なら差分を自動算出（undefined ならフィールド省略）。差分計算はコード側で完結（LLM不使用）。
+    let predictionError: number | undefined;
+    if (predictedFactors && predictedFactors.length > 0 && actualFactors && actualFactors.length > 0) {
+      predictionError = computePredictionError(predictedFactors, actualFactors);
     }
-  }
 
-  storage.close();
-  return JSON.stringify(result, null, 2);
+    // project帰属（design.md禁止フォールバック#5）: 明示指定があればconfirmed、
+    // 省略・空文字時はcwd由来のbasenameへ暗黙フォールバックせず、unknownを明示刻印して
+    // 検索対象に残す（不明バケツをフィルタの裏に消さない。R-A4 AC3）。
+    let project: string;
+    let projectConfidence: "confirmed" | "unknown";
+    if (typeof args.project === "string" && args.project.trim() !== "") {
+      project = args.project.trim();
+      projectConfidence = "confirmed";
+    } else {
+      project = "unknown";
+      projectConfidence = "unknown";
+      console.error(`[save] project省略のためunknownを明示刻印しました（起動プロジェクト: ${basename(projectRoot)}）`);
+    }
+
+    const params: SaveParams = {
+      category: args.category as MemoryCategory,
+      title: args.title as string,
+      content: args.content as string,
+      tags: normalizeTags(args.tags),
+      project,
+      projectConfidence,
+      scope: args.scope as string | undefined,
+      intensity,
+      positiveAction,
+      scenario,
+      whyCore,
+      predictedFactors,
+      actualFactors,
+      predictionError,
+      predictionDelta,
+    };
+
+    // 共有埋め込みを利用（プロセス内シングルトン + アイドルTTL解放。WASURENAGUSA_MODEL_CACHE_DIR
+    // 設定時は共有キャッシュ先へ、タスク1.13）。呼び出し後に dispose しない（使い回すのが目的で、
+    // 解放はアイドルTTLタイマーの役目）。
+    const modelsDir = getModelsDir(memoryPath);
+    let localEmbedding: SharedEmbedding | null = null;
+    let embeddingAvailable = false;
+    try {
+      localEmbedding = await getSharedEmbedding(modelsDir);
+      embeddingAvailable = localEmbedding.isAvailable();
+    } catch (error) {
+      console.error("[save] LocalEmbedding初期化失敗:", error);
+    }
+
+    // Phase 1: タグ拡張 + Embedding生成を並列実行
+    let embedding: number[] | null = null;
+    const tagEnricher = new TagEnricher(config.geminiApiKey);
+    const tagEnricherAvailable = !!config.geminiApiKey;
+
+    const promises: Promise<unknown>[] = [];
+
+    // タグ拡張（LLMのAPIキーが必要）
+    if (tagEnricherAvailable) {
+      promises.push(
+        tagEnricher.enrich(params.title, params.content, params.tags ?? [], []).catch((error) => {
+          console.error("[save] タグ拡張失敗:", error);
+          return null;
+        })
+      );
+    } else {
+      promises.push(Promise.resolve(null));
+    }
+
+    // Embedding生成（ローカル）
+    if (embeddingAvailable && localEmbedding) {
+      const textToEmbed = params.title + " " + params.content;
+      promises.push(
+        localEmbedding.embed(textToEmbed, "passage").catch((error) => {
+          console.error("[save] embedding生成失敗:", error);
+          return null;
+        })
+      );
+    } else {
+      promises.push(Promise.resolve(null));
+    }
+
+    const [enrichResult, embeddingResult] = await Promise.all(promises);
+
+    // タグ拡張結果を適用
+    if (enrichResult && typeof enrichResult === "object" && "tags" in enrichResult) {
+      const enriched = enrichResult as { tags: { tag: string; weight: number }[]; newThemes: string[] };
+      params.tags = formatWeightedTags(enriched.tags);
+
+      // Phase 2: 新テーマ検出 → SQLiteのthemesテーブルへ登録（v1書き込み経路のretag-worker
+      // spawnは物理遮断済み。再タグ付け自体はPhase3以降で夜間統合に相乗りさせる想定）
+      if (enriched.newThemes.length > 0) {
+        try {
+          const trulyNewThemes: string[] = [];
+          for (const theme of enriched.newThemes) {
+            if (storage.isNewTheme(theme)) {
+              trulyNewThemes.push(theme);
+            }
+          }
+          if (trulyNewThemes.length > 0) {
+            storage.addThemes(trulyNewThemes);
+          }
+        } catch (error) {
+          console.error("[save] テーマ登録失敗:", error);
+        }
+      }
+    }
+
+    if (embeddingResult && Array.isArray(embeddingResult)) {
+      embedding = embeddingResult as number[];
+    }
+
+    // replaceId指定時: 古いベクトルを削除
+    if (params.replaceId) {
+      try {
+        storage.deleteVectors([params.replaceId]);
+      } catch (error) {
+        console.error("[save] 旧ベクトル削除失敗:", error);
+      }
+    }
+
+    // 保存
+    const result = storage.save(params);
+
+    // Embedding upsert
+    if (embedding) {
+      try {
+        storage.upsertVector(result.id, embedding);
+      } catch (error) {
+        console.error("[save] embedding保存失敗:", error);
+      }
+    }
+
+    return JSON.stringify(result, null, 2);
+  } finally {
+    storage.close();
+  }
 }

@@ -1,7 +1,7 @@
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { SQLiteStorage } from "../storage/sqlite.js";
 import { SearchParams, MemoryCategory, MemoryIndexEntry } from "../types.js";
-import { LocalEmbedding } from "../vector/local-embedding.js";
+import { getSharedEmbedding, type SharedEmbedding } from "../vector/local-embedding.js";
 import { config, getMemoryPath, getModelsDir } from "../config.js";
 import { buildSearchHint } from "../storage/search-hint.js";
 import { homedir } from "os";
@@ -65,12 +65,14 @@ export async function handleMemorySearch(
       scope: args.scope as string | undefined,
     };
 
-    // LocalEmbedding初期化（WASURENAGUSA_MODEL_CACHE_DIR設定時は共有キャッシュ先へ、タスク1.13）
+    // 共有埋め込みを利用（プロセス内シングルトン + アイドルTTL解放。WASURENAGUSA_MODEL_CACHE_DIR
+    // 設定時は共有キャッシュ先へ、タスク1.13）。呼び出し後に dispose しない（使い回すのが目的で、
+    // 解放はアイドルTTLタイマーの役目）。
     const modelsDir = getModelsDir(memoryPath);
-    const localEmbedding = new LocalEmbedding(modelsDir);
+    let localEmbedding: SharedEmbedding | null = null;
     let embeddingAvailable = false;
     try {
-      await localEmbedding.initialize();
+      localEmbedding = await getSharedEmbedding(modelsDir);
       embeddingAvailable = localEmbedding.isAvailable();
     } catch (error) {
       console.error("[search] LocalEmbedding初期化失敗:", error);
@@ -78,7 +80,7 @@ export async function handleMemorySearch(
 
     let result;
 
-    if (embeddingAvailable) {
+    if (embeddingAvailable && localEmbedding) {
       try {
         const queryEmbedding = await localEmbedding.embed(params.query, "query");
 
@@ -105,14 +107,20 @@ export async function handleMemorySearch(
       const activeProjects = await activeTracker.getActiveProjects();
 
       for (const proj of activeProjects) {
+        // DBハンドルは try 内で開き finally で必ず閉じる。SQLiteStorage コンストラクタは
+        // eager に new Database() を開くため、消えた/移動した stale なアクティブプロジェクトの
+        // パスでは SQLITE_CANTOPEN を投げる。コンストラクタも try 内に入れることで、その throw も
+        // catch{continue} が受けて当該プロジェクトだけスキップする（外側 try は catch を持たないため、
+        // try 外で投げると検索全体が中断してしまう。catch{continue} のループ継続挙動を厳密に維持）。
+        const projMemoryPath = getMemoryPath(proj.path);
+        const projDbPath = join(projMemoryPath, config.sqliteFile);
+        let projStorage: SQLiteStorage | null = null;
         try {
-          const projMemoryPath = getMemoryPath(proj.path);
-          const projDbPath = join(projMemoryPath, config.sqliteFile);
-          const projStorage = new SQLiteStorage(projDbPath);
+          projStorage = new SQLiteStorage(projDbPath);
           projStorage.initialize(projMemoryPath);
 
           let projResults;
-          if (embeddingAvailable) {
+          if (embeddingAvailable && localEmbedding) {
             try {
               const projQueryEmbedding = await localEmbedding.embed(params.query, "query");
               projResults = projStorage.searchHybrid(
@@ -148,10 +156,10 @@ export async function handleMemorySearch(
               result.totalCount += 1;
             }
           }
-
-          projStorage.close();
         } catch {
           continue;
+        } finally {
+          projStorage?.close();
         }
       }
     }
@@ -169,10 +177,14 @@ export async function handleMemorySearch(
         const activeProjects = await activeTracker.getActiveProjects();
 
         for (const proj of activeProjects) {
+          // DBハンドルは try 内で開き finally で必ず閉じる（同型2箇所目・タスク2.7 ④）。
+          // コンストラクタも try 内: stale なプロジェクトパスでの new Database() throw を
+          // catch{continue} が受け、angerHistory 合流の中断を防ぐ（catch{continue} 挙動を維持）。
+          const projMemoryPath = getMemoryPath(proj.path);
+          const projDbPath = join(projMemoryPath, config.sqliteFile);
+          let projStorage: SQLiteStorage | null = null;
           try {
-            const projMemoryPath = getMemoryPath(proj.path);
-            const projDbPath = join(projMemoryPath, config.sqliteFile);
-            const projStorage = new SQLiteStorage(projDbPath);
+            projStorage = new SQLiteStorage(projDbPath);
             projStorage.initialize(projMemoryPath);
             const projAnger = projStorage.listHighIntensityDonts(4, 5).map(e => ({
               ...e,
@@ -184,9 +196,10 @@ export async function handleMemorySearch(
                 angerEntries.push(entry);
               }
             }
-            projStorage.close();
           } catch {
             continue;
+          } finally {
+            projStorage?.close();
           }
         }
       }

@@ -1,5 +1,12 @@
-import { describe, it, expect, beforeAll } from "vitest";
-import { LocalEmbedding, EMBEDDING_DIMENSIONS, DEFAULT_MODEL, buildPrefixedText } from "./local-embedding.js";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import {
+  LocalEmbedding,
+  EMBEDDING_DIMENSIONS,
+  DEFAULT_MODEL,
+  buildPrefixedText,
+  getSharedEmbedding,
+  disposeSharedEmbedding,
+} from "./local-embedding.js";
 import { tmpdir } from "os";
 import { join } from "path";
 import { mkdirSync } from "fs";
@@ -100,4 +107,35 @@ describe("LocalEmbedding", () => {
   it("embedBatch throws on empty array", async () => {
     await expect(embedding.embedBatch([], "passage")).rejects.toThrow();
   });
+});
+
+// 共有埋め込みラッパの self-heal: acquire→use 窓やアイドルTTL満了で共有インスタンスが
+// 破棄されても、同じラッパの embed が現在の共有エントリを再解決・再初期化してベクトルを返す
+// （固定インスタンスをクロージャ捕捉していた旧実装は破棄後に "not initialized" で throw していた）。
+describe("getSharedEmbedding self-heal（acquire→use 窓・アイドル解放後）", () => {
+  // 既存 describe と同じ modelDir を使い、ダウンロード済みモデルのディスクキャッシュを再利用する。
+  const modelDir = join(tmpdir(), "wasurenagusa-embedding-test-multilingual-e5-small");
+  mkdirSync(modelDir, { recursive: true });
+
+  afterAll(async () => {
+    await disposeSharedEmbedding(modelDir);
+  });
+
+  it("acquire 後に共有インスタンスが破棄されても、同じラッパの embed が再初期化して384次元ベクトルを返す", async () => {
+    const shared = await getSharedEmbedding(modelDir);
+    const first = await shared.embed("最初のテキスト", "passage");
+    expect(first).toHaveLength(EMBEDDING_DIMENSIONS);
+
+    // アイドルTTL満了と同じ状態を作る: 共有エントリを破棄（instance.dispose + Map から除去）。
+    await disposeSharedEmbedding(modelDir);
+    expect(shared.isAvailable()).toBe(false); // 破棄直後は現在エントリが無いので false
+
+    // 破棄後でも同じラッパで embed でき、ベクトルを欠落させない（self-heal で再初期化）。
+    const second = await shared.embed("破棄後のテキスト", "passage");
+    expect(second).toHaveLength(EMBEDDING_DIMENSIONS);
+    expect(second.some((v) => v !== 0)).toBe(true);
+
+    // 再初期化後は isAvailable も true に戻る。
+    expect(shared.isAvailable()).toBe(true);
+  }, 120_000); // モデル再ロードに時間がかかる
 });
