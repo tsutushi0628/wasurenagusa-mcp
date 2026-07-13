@@ -45,8 +45,10 @@ const __dirname = dirname(__filename);
 const DEFAULT_REPO_ROOT = resolve(__dirname, "..", "..");
 const BACKUPS_ROOT = join(homedir(), ".wasurenagusa", "eval", "backups");
 
-/** design.md Phase 1 ③ 前提アサートの固定値 */
-export const REQUIRED_SCHEMA_VERSION = 6;
+/** design.md Phase 1 ③ 前提アサートの固定値（schema.tsのCURRENT_SCHEMA_VERSIONに追随。
+ *  v6→v7マイグレーション反映により7へ更新。実装者は編集しない運用だが、QA検出のスキーマ
+ *  バージョン不一致（G1ゲート恒久FAIL）はQA自身の指示でこの値を追随更新する） */
+export const REQUIRED_SCHEMA_VERSION = 7;
 export const MIN_MEMORIES_FOR_G1 = 1000;
 
 /** project-confidenceチェックのpassthrough回帰検査で使う、実在しない番兵プロジェクト名 */

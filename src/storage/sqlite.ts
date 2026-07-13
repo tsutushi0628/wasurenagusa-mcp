@@ -23,7 +23,8 @@ import {
 } from "../types.js";
 import { config } from "../config.js";
 import { initializeSchema, initializeVectors, getSchemaVersion, CURRENT_SCHEMA_VERSION } from "./schema.js";
-import { migrateV1ToV2, migrateV1ToV2_categoryAndKnowledgeGap, migrateV2ToV3, migrateV3ToV4, migrateV4ToV5, migrateV5ToV6 } from "./migration.js";
+import { migrateV1ToV2, migrateV1ToV2_categoryAndKnowledgeGap, migrateV2ToV3, migrateV3ToV4, migrateV4ToV5, migrateV5ToV6, migrateV6ToV7 } from "./migration.js";
+import { computeContentHash } from "./content-hash.js";
 import { existsSync } from "fs";
 import { join, dirname } from "path";
 import { formatEntry } from "./formatter.js";
@@ -175,6 +176,30 @@ export function computeTimeDecay(ageDays: number, halfLifeDays: number = TIME_DE
   return Math.pow(0.5, ageDays / halfLifeDays);
 }
 
+// dedup（content-hash一致）ヒット時の付帯情報マージ用ヘルパー。
+// content-hash.ts の設計コメントどおり「付帯情報の差は同じ記憶への追記」として扱うため、
+// 配列系フィールド（tags/knowledgeGap/predictedFactors/actualFactors）は既存値との和集合を取り、
+// 既存の値を消さずに新規分だけ追加する（非破壊）。
+export function safeParseStringArray(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function mergeUniqueStrings(existing: string[], incoming: string[]): string[] {
+  const merged = [...existing];
+  for (const item of incoming) {
+    if (!merged.includes(item)) {
+      merged.push(item);
+    }
+  }
+  return merged;
+}
+
 export class SQLiteStorage {
   private db: Database.Database;
   private vecLoaded = false;
@@ -223,6 +248,11 @@ export class SQLiteStorage {
     // フォールバックする（バックアップ先の解決に memoryPath が必須なため）。
     if (memoriesTableExists) {
       migrateV5ToV6(this.db, memoryPath ?? dirname(this.dbPath));
+    }
+
+    // v6→v7: content-hash dedup 土台列(content_hash)を追加し既存行をバックフィル（カラム存在チェックで冪等）。
+    if (memoriesTableExists) {
+      migrateV6ToV7(this.db);
     }
 
     // 自動マイグレーション: DB新規作成 AND v1ファイル存在 → マイグレーション実行
@@ -432,6 +462,15 @@ export class SQLiteStorage {
     // project_confidence列はNOT NULL（DEFAULT 'unknown'）。呼び出し側（save.ts）が
     // 明示指定しない場合は列の既定値と同じ'unknown'を明示的に渡す（関数引数の既定値相当）。
     const projectConfidence = params.projectConfidence ?? "unknown";
+    // content-hash dedup: project + scope + category + 正規化(title, content) を軸に決定論算出（LLM不使用）。
+    // replaceId経路・新規INSERT経路の両方で使うため先に算出する。
+    const contentHash = computeContentHash({
+      project: params.project,
+      scope: params.scope,
+      category: params.category,
+      title: params.title,
+      content: params.content,
+    });
 
     if (params.replaceId) {
       const existing = this.db.prepare("SELECT id FROM memories WHERE id = ?").get(params.replaceId) as { id: string } | undefined;
@@ -442,7 +481,7 @@ export class SQLiteStorage {
             project = ?, scope = ?, intensity = ?, knowledge_gap = ?, positive_action = ?,
             scenario = ?, why_core = ?,
             predicted_factors = ?, actual_factors = ?, prediction_error = ?, prediction_delta = ?,
-            project_confidence = ?,
+            project_confidence = ?, content_hash = ?,
             updated_at = datetime('now')
           WHERE id = ?
         `);
@@ -451,7 +490,7 @@ export class SQLiteStorage {
           params.project ?? null, params.scope ?? null, params.intensity ?? null,
           knowledgeGap, positiveAction, scenario, whyCore,
           predictedFactors, actualFactors, predictionError, predictionDelta,
-          projectConfidence,
+          projectConfidence, contentHash,
           params.replaceId
         );
         return {
@@ -463,16 +502,85 @@ export class SQLiteStorage {
       }
     }
 
+    // replaceId未指定時のみ: 同一 project/scope/category/content_hash の active な既存行があれば
+    // 新規INSERTせず、その行への追記（updated_at + アクセスカウント）として扱う（重複を増やさない）。
+    // project/scopeはNULL許容列のためIS比較で「両方NULL」も一致とみなす。
+    const duplicate = this.db.prepare(
+      `SELECT id FROM memories
+       WHERE state = 'active' AND category = ? AND content_hash = ?
+         AND project IS ? AND scope IS ?
+       LIMIT 1`
+    ).get(params.category, contentHash, params.project ?? null, params.scope ?? null) as { id: string } | undefined;
+
+    if (duplicate) {
+      // dedupヒット時も付帯情報（tags/intensity/positiveAction等）は破棄せず、既存行へマージして書き込む。
+      // 配列系は既存値との和集合（追加のみ・非破壊）、スカラ系は今回呼び出しで明示指定があれば上書き、
+      // 未指定（undefined）なら既存値を保持する（content-hash.ts の設計コメントに合わせる）。
+      const existingRow = this.db.prepare(
+        `SELECT tags, knowledge_gap, intensity, positive_action, scenario, why_core,
+                predicted_factors, actual_factors, prediction_error, prediction_delta
+         FROM memories WHERE id = ?`
+      ).get(duplicate.id) as {
+        tags: string;
+        knowledge_gap: string | null;
+        intensity: number | null;
+        positive_action: string | null;
+        scenario: string | null;
+        why_core: string | null;
+        predicted_factors: string | null;
+        actual_factors: string | null;
+        prediction_error: number | null;
+        prediction_delta: string | null;
+      };
+
+      const mergedTags = mergeUniqueStrings(safeParseStringArray(existingRow.tags), params.tags ?? []);
+      const mergedKnowledgeGap = params.knowledgeGap !== undefined
+        ? JSON.stringify(mergeUniqueStrings(safeParseStringArray(existingRow.knowledge_gap), params.knowledgeGap))
+        : existingRow.knowledge_gap;
+      const mergedPredictedFactors = params.predictedFactors !== undefined
+        ? JSON.stringify(mergeUniqueStrings(safeParseStringArray(existingRow.predicted_factors), params.predictedFactors))
+        : existingRow.predicted_factors;
+      const mergedActualFactors = params.actualFactors !== undefined
+        ? JSON.stringify(mergeUniqueStrings(safeParseStringArray(existingRow.actual_factors), params.actualFactors))
+        : existingRow.actual_factors;
+      const mergedIntensity = params.intensity !== undefined ? params.intensity : existingRow.intensity;
+      const mergedPositiveAction = params.positiveAction !== undefined ? params.positiveAction : existingRow.positive_action;
+      const mergedScenario = params.scenario !== undefined ? params.scenario : existingRow.scenario;
+      const mergedWhyCore = params.whyCore !== undefined ? params.whyCore : existingRow.why_core;
+      const mergedPredictionError = params.predictionError !== undefined ? params.predictionError : existingRow.prediction_error;
+      const mergedPredictionDelta = params.predictionDelta !== undefined ? params.predictionDelta : existingRow.prediction_delta;
+
+      this.db.prepare(`
+        UPDATE memories SET
+          tags = ?, knowledge_gap = ?, intensity = ?, positive_action = ?, scenario = ?, why_core = ?,
+          predicted_factors = ?, actual_factors = ?, prediction_error = ?, prediction_delta = ?,
+          updated_at = datetime('now')
+        WHERE id = ?
+      `).run(
+        JSON.stringify(mergedTags), mergedKnowledgeGap, mergedIntensity, mergedPositiveAction,
+        mergedScenario, mergedWhyCore, mergedPredictedFactors, mergedActualFactors,
+        mergedPredictionError, mergedPredictionDelta,
+        duplicate.id
+      );
+      this.incrementAccessCount([duplicate.id]);
+      return {
+        success: true,
+        id: duplicate.id,
+        path: "sqlite",
+        message: `Deduplicated into existing ${duplicate.id} in ${params.category}`,
+      };
+    }
+
     const insertStmt = this.db.prepare(`
-      INSERT INTO memories (id, timestamp, category, title, content, tags, project, scope, intensity, knowledge_gap, positive_action, scenario, why_core, predicted_factors, actual_factors, prediction_error, prediction_delta, project_confidence)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO memories (id, timestamp, category, title, content, tags, project, scope, intensity, knowledge_gap, positive_action, scenario, why_core, predicted_factors, actual_factors, prediction_error, prediction_delta, project_confidence, content_hash)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     insertStmt.run(
       id, timestamp, params.category, params.title, params.content, tags,
       params.project ?? null, params.scope ?? null, params.intensity ?? null,
       knowledgeGap, positiveAction, scenario, whyCore,
       predictedFactors, actualFactors, predictionError, predictionDelta,
-      projectConfidence
+      projectConfidence, contentHash
     );
 
     return {

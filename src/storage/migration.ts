@@ -5,6 +5,7 @@ import { MemoryCategory, MemoryEntry } from "../types.js";
 import { parseMarkdown } from "./parser.js";
 import { getSchemaVersion } from "./schema.js";
 import { DEFAULT_MODEL } from "../vector/local-embedding.js";
+import { computeContentHash } from "./content-hash.js";
 
 interface MigrationResult {
   entriesCount: number;
@@ -408,6 +409,67 @@ export function migrateV5ToV6(db: Database.Database, memoryPath: string): void {
     db.prepare(
       "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, datetime('now'))"
     ).run(6);
+  });
+
+  transaction();
+}
+
+/**
+ * v6→v7 マイグレーション（content-hash dedup 土台）
+ *
+ * 変更内容:
+ *   - memories に content_hash TEXT カラムを追加（NULL 許容）
+ *   - 既存の全行（state問わず）へ content-hash.ts の computeContentHash() を適用してバックフィル
+ *   - idx_memories_content_hash インデックスを作成（非UNIQUE。既存重複行の存在によりUNIQUE制約は
+ *     移行自体を失敗させるため、今回は「これ以上増やさない」引き算機構の第一弾に留める）
+ *
+ * 動作:
+ *   - content_hash カラムが既に存在するならスキップ（冪等）
+ *   - ALTER TABLE ADD COLUMN のみでロスレスなため、v5→v6と異なりバックアップ処理は不要
+ *   - バックフィルはUPDATEのみでDELETEは一切行わない（非破壊）
+ */
+export function migrateV6ToV7(db: Database.Database): void {
+  const columnExists = (db.prepare(
+    "SELECT COUNT(*) as cnt FROM pragma_table_info('memories') WHERE name = 'content_hash'"
+  ).get() as { cnt: number }).cnt > 0;
+
+  if (columnExists) {
+    return;
+  }
+
+  const transaction = db.transaction(() => {
+    db.exec(`ALTER TABLE memories ADD COLUMN content_hash TEXT`);
+
+    const rows = db.prepare(
+      "SELECT id, project, scope, category, title, content FROM memories"
+    ).all() as Array<{
+      id: string;
+      project: string | null;
+      scope: string | null;
+      category: string;
+      title: string;
+      content: string;
+    }>;
+
+    const updateStmt = db.prepare("UPDATE memories SET content_hash = ? WHERE id = ?");
+    for (const row of rows) {
+      const hash = computeContentHash({
+        project: row.project ?? undefined,
+        scope: row.scope ?? undefined,
+        category: row.category,
+        title: row.title,
+        content: row.content,
+      });
+      updateStmt.run(hash, row.id);
+    }
+
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash, category, project, scope)"
+    );
+
+    db.prepare(
+      "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, datetime('now'))"
+    ).run(7);
   });
 
   transaction();

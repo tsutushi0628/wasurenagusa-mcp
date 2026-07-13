@@ -1,16 +1,29 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { SQLiteStorage } from "./sqlite.js";
+import RawDatabase from "better-sqlite3";
 import { tmpdir } from "os";
 import { join } from "path";
 import { mkdtempSync, rmSync } from "fs";
 
+/** 保存経路の外から生行数・content_hash等を検証するための読み取り専用ヘルパ。 */
+function countMemoriesByTitle(dbPath: string, title: string): number {
+  const db = new RawDatabase(dbPath, { readonly: true });
+  try {
+    const row = db.prepare("SELECT COUNT(*) as cnt FROM memories WHERE title = ?").get(title) as { cnt: number };
+    return row.cnt;
+  } finally {
+    db.close();
+  }
+}
+
 describe("SQLiteStorage", () => {
   let storage: SQLiteStorage;
   let tmpDir: string;
+  let dbPath: string;
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "wasurenagusa-sqlite-test-"));
-    const dbPath = join(tmpDir, "test.db");
+    dbPath = join(tmpDir, "test.db");
     storage = new SQLiteStorage(dbPath);
     storage.initialize();
   });
@@ -445,6 +458,272 @@ describe("SQLiteStorage", () => {
       const titles = search.results.map((r) => r.title);
       expect(titles).toContain("夢A");
       expect(titles).toContain("成功A");
+    });
+  });
+
+  // =========================
+  // content-hash dedup（重複を増やさない保存経路）
+  // =========================
+  describe("content-hash dedup", () => {
+    it("同一project+scope+category・完全一致content を2回保存すると、行が1つに集約され同じidが返る", () => {
+      const first = storage.save({
+        category: "log",
+        title: "同一内容ログ",
+        content: "重複判定の検証用本文",
+        project: "proj-a",
+        scope: "scope-a",
+        tags: [],
+      });
+
+      const second = storage.save({
+        category: "log",
+        title: "同一内容ログ",
+        content: "重複判定の検証用本文",
+        project: "proj-a",
+        scope: "scope-a",
+        tags: [],
+      });
+
+      expect(second.id).toBe(first.id);
+      expect(countMemoriesByTitle(dbPath, "同一内容ログ")).toBe(1);
+    });
+
+    it("前後・連続空白（改行含む）だけが異なる2回目のsaveも同一idにdedupされる", () => {
+      const first = storage.save({
+        category: "log",
+        title: "空白ゆれログ",
+        content: "1行目\n2行目   3行目",
+        project: "proj-a",
+        tags: [],
+      });
+
+      const second = storage.save({
+        category: "log",
+        title: "  空白ゆれログ  ",
+        content: "  1行目 2行目 3行目  ",
+        project: "proj-a",
+        tags: [],
+      });
+
+      expect(second.id).toBe(first.id);
+      expect(countMemoriesByTitle(dbPath, "空白ゆれログ")).toBe(1);
+    });
+
+    it("contentが違う2回目のsaveは新規行としてINSERTされる", () => {
+      const first = storage.save({
+        category: "log",
+        title: "内容違いログ",
+        content: "本文バージョン1",
+        project: "proj-a",
+        tags: [],
+      });
+
+      const second = storage.save({
+        category: "log",
+        title: "内容違いログ",
+        content: "本文バージョン2",
+        project: "proj-a",
+        tags: [],
+      });
+
+      expect(second.id).not.toBe(first.id);
+      expect(countMemoriesByTitle(dbPath, "内容違いログ")).toBe(2);
+    });
+
+    it("projectだけが異なる同一contentは別記憶として扱われる（誤統合しない境界）", () => {
+      const first = storage.save({
+        category: "log",
+        title: "project境界ログ",
+        content: "同じ本文",
+        project: "proj-a",
+        tags: [],
+      });
+
+      const second = storage.save({
+        category: "log",
+        title: "project境界ログ",
+        content: "同じ本文",
+        project: "proj-b",
+        tags: [],
+      });
+
+      expect(second.id).not.toBe(first.id);
+      expect(countMemoriesByTitle(dbPath, "project境界ログ")).toBe(2);
+    });
+
+    it("categoryだけが異なる同一contentは別記憶として扱われる（誤統合しない境界）", () => {
+      const first = storage.save({
+        category: "log",
+        title: "category境界",
+        content: "同じ本文",
+        project: "proj-a",
+        tags: [],
+      });
+
+      const second = storage.save({
+        category: "decision",
+        title: "category境界",
+        content: "同じ本文",
+        project: "proj-a",
+        tags: [],
+      });
+
+      expect(second.id).not.toBe(first.id);
+      expect(countMemoriesByTitle(dbPath, "category境界")).toBe(2);
+    });
+
+    it("dedup発生時、embeddingを消さずaccess_countを増やしupdated_atを更新する", async () => {
+      const first = storage.save({
+        category: "log",
+        title: "アクセス追跡ログ",
+        content: "本文固定",
+        project: "proj-a",
+        tags: [],
+      });
+      storage.upsertVector(first.id, new Array(384).fill(0.1));
+
+      const before = storage.getVectorMetadata([first.id]).get(first.id);
+      expect(before?.accessCount).toBe(0);
+
+      // updated_at の秒未満差が出るよう少し待つ（datetime('now')は秒精度）
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+
+      storage.save({
+        category: "log",
+        title: "アクセス追跡ログ",
+        content: "本文固定",
+        project: "proj-a",
+        tags: [],
+      });
+
+      const after = storage.getVectorMetadata([first.id]).get(first.id);
+      expect(after?.accessCount).toBe(1);
+
+      const db = new RawDatabase(dbPath, { readonly: true });
+      try {
+        const row = db.prepare("SELECT created_at, updated_at FROM memories WHERE id = ?").get(first.id) as { created_at: string; updated_at: string };
+        expect(row.updated_at).not.toBe(row.created_at);
+      } finally {
+        db.close();
+      }
+    });
+
+    it("dedupヒット時、2回目saveのtags/intensity/positiveAction等の付帯情報が破棄されずマージされる", () => {
+      const first = storage.save({
+        category: "dont",
+        title: "付帯情報マージ検証",
+        content: "本文固定（付帯情報マージ）",
+        project: "proj-a",
+        tags: ["初回タグ"],
+        knowledgeGap: ["初回知識"],
+        predictedFactors: ["初回予測変数"],
+      });
+
+      const second = storage.save({
+        category: "dont",
+        title: "付帯情報マージ検証",
+        content: "本文固定（付帯情報マージ）",
+        project: "proj-a",
+        tags: ["拡張タグA", "拡張タグB"],
+        intensity: 8,
+        positiveAction: "次回は事前に確認する",
+        scenario: "事象の記録",
+        whyCore: "核心の記録",
+        knowledgeGap: ["追加知識"],
+        predictedFactors: ["追加予測変数"],
+        actualFactors: ["実測変数"],
+        predictionDelta: "差分の核心",
+      });
+
+      // 別行が増えず、既存行に統合される（重複を増やさないdedupの前提を維持）
+      expect(second.id).toBe(first.id);
+      expect(countMemoriesByTitle(dbPath, "付帯情報マージ検証")).toBe(1);
+
+      const detail = storage.getDetail({ ids: [first.id] });
+      const entry = detail.entries[0];
+
+      // 配列系は「既存 ∪ 今回分」の和集合（初回タグを消さず今回タグを追加）
+      expect(entry.tags).toEqual(["初回タグ", "拡張タグA", "拡張タグB"]);
+      expect(entry.knowledgeGap).toEqual(["初回知識", "追加知識"]);
+      expect(entry.predictedFactors).toEqual(["初回予測変数", "追加予測変数"]);
+      expect(entry.actualFactors).toEqual(["実測変数"]);
+
+      // スカラ系は今回saveで明示指定した値が書き込まれる（従来は破棄されていた）
+      expect(entry.intensity).toBe(8);
+      expect(entry.positiveAction).toBe("次回は事前に確認する");
+      expect(entry.scenario).toBe("事象の記録");
+      expect(entry.whyCore).toBe("核心の記録");
+      expect(entry.predictionDelta).toBe("差分の核心");
+    });
+
+    it("dedupヒット時、2回目saveで付帯情報を指定しなければ既存値が保持される（未指定=消去ではない）", () => {
+      const first = storage.save({
+        category: "dont",
+        title: "付帯情報保持検証",
+        content: "本文固定（付帯情報保持）",
+        project: "proj-a",
+        tags: ["既存タグ"],
+        intensity: 5,
+        positiveAction: "既存の推奨行動",
+      });
+
+      storage.save({
+        category: "dont",
+        title: "付帯情報保持検証",
+        content: "本文固定（付帯情報保持）",
+        project: "proj-a",
+        tags: [],
+      });
+
+      const detail = storage.getDetail({ ids: [first.id] });
+      const entry = detail.entries[0];
+      expect(entry.tags).toEqual(["既存タグ"]);
+      expect(entry.intensity).toBe(5);
+      expect(entry.positiveAction).toBe("既存の推奨行動");
+    });
+
+    it("replaceId明示指定時はdedupロジックが割り込まず、既存の重複行とは別に対象idが更新される", () => {
+      // 先にactiveな重複候補となる行を1件作っておく
+      const duplicateCandidate = storage.save({
+        category: "dont",
+        title: "置換対象と同一内容になる行",
+        content: "置換後と同じ本文になる",
+        project: "proj-a",
+        tags: [],
+      });
+
+      // 再タグ付け対象の別エントリ（本文は元々別）
+      const target = storage.save({
+        category: "dont",
+        title: "再タグ付け対象",
+        content: "元の本文",
+        project: "proj-a",
+        tags: [],
+        knowledgeGap: ["旧知識"],
+      });
+
+      // retag-worker.ts と同じ形（replaceId指定）で、duplicateCandidateと同一内容に更新する
+      const replaced = storage.save({
+        category: "dont",
+        title: "置換対象と同一内容になる行",
+        content: "置換後と同じ本文になる",
+        project: "proj-a",
+        tags: [],
+        knowledgeGap: ["新知識"],
+        replaceId: target.id,
+      });
+
+      // dedupに吸収されず、replaceId指定どおりtarget.idが更新される
+      expect(replaced.id).toBe(target.id);
+      expect(replaced.id).not.toBe(duplicateCandidate.id);
+
+      const detail = storage.getDetail({ ids: [target.id, duplicateCandidate.id] });
+      const targetEntry = detail.entries.find((e) => e.id === target.id);
+      const duplicateEntry = detail.entries.find((e) => e.id === duplicateCandidate.id);
+      expect(targetEntry?.knowledgeGap).toEqual(["新知識"]);
+      expect(duplicateEntry).toBeDefined();
+      // 両方とも内容が同一になっているが、行としては別のまま残る（replaceIdはdedup対象外）
+      expect(countMemoriesByTitle(dbPath, "置換対象と同一内容になる行")).toBe(2);
     });
   });
 });

@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 import { DEFAULT_MODEL } from "../vector/local-embedding.js";
 
-export const CURRENT_SCHEMA_VERSION = 6;
+export const CURRENT_SCHEMA_VERSION = 7;
 
 export const DDL = `
 -- メモリエントリ本体
@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS memories (
     deleted_at TEXT,
     state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','archived','deleted')),
     project_confidence TEXT NOT NULL DEFAULT 'unknown' CHECK(project_confidence IN ('confirmed','inferred','unknown')),
+    content_hash TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -34,6 +35,10 @@ CREATE TABLE IF NOT EXISTS memories (
 CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
 CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project);
 CREATE INDEX IF NOT EXISTS idx_memories_timestamp ON memories(timestamp DESC);
+-- idx_memories_content_hash はここでは作らない: content_hash は state/project_confidence と同じく
+-- 後発マイグレーション列のため、旧世代DB（CREATE TABLE IF NOT EXISTSがno-opでcontent_hash列が
+-- まだ無い）に対してこのDDLを実行するとCREATE INDEXが未知列エラーで失敗する。新規DBには
+-- initializeSchema()側でcontent_hash列存在チェック後に作成し、旧世代DBにはmigrateV6ToV7で作成する。
 
 -- FTS5全文検索（日本語の部分文字列マッチに対応するためtrigramを採用）
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
@@ -124,6 +129,18 @@ export function initializeSchema(db: Database.Database): void {
 
   // DDL実行
   db.exec(DDL);
+
+  // content_hash列が存在する場合のみインデックスを作成する（新規DB＝DDLのCREATE TABLEで
+  // content_hash列込みで作られた直後のケース。旧世代DBはここではまだ列が無く、
+  // migrateV6ToV7が列追加とインデックス作成を担う）。
+  const contentHashColumnExists = (db.prepare(
+    "SELECT COUNT(*) as cnt FROM pragma_table_info('memories') WHERE name = 'content_hash'"
+  ).get() as { cnt: number }).cnt > 0;
+  if (contentHashColumnExists) {
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash, category, project, scope)"
+    );
+  }
 
   // スキーマバージョン記録（冪等）
   const currentVersion = getSchemaVersion(db);
