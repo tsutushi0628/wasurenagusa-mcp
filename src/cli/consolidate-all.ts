@@ -9,12 +9,15 @@ import { basename } from "path";
 import { homedir } from "os";
 import { join } from "path";
 import { writeFile } from "fs/promises";
+import Database from "better-sqlite3";
 import { ActiveProjectsTracker } from "../active-projects.js";
 import { SQLiteStorage } from "../storage/sqlite.js";
 import {
   isConsolidationStaleSqlite,
   isConfigConsolidationStaleSqlite,
 } from "../consolidator/staleness.js";
+import { computeCapSweep } from "../consolidator/cap-sweep.js";
+import type { CapSweepCandidate } from "../consolidator/cap-sweep.js";
 import { runDreamGenerationForProject } from "./dream-worker.js";
 import { config, getMemoryPath } from "../config.js";
 import { isMainModule } from "../utils/cli-entry.js";
@@ -39,6 +42,14 @@ export interface ConsolidationDryRunReport {
     stale: boolean;
     entryCount: number;
   };
+  /** カテゴリ別上限の dry-run 判定（退避は実行せず候補件数/idのみ） */
+  capSweep: {
+    cap: number;
+    totalArchiveCandidateCount: number;
+    categories: CapSweepCandidate[];
+  };
+  // 忘却（長期未参照）の dry-run 判定は本増分では未搭載。忘却は信頼できる最終参照
+  // （アクセス時刻）配線を敷く次増分で実装する（cap-sweep.ts の JSDoc に非実装の根拠）。
 }
 
 function log(message: string): void {
@@ -78,6 +89,7 @@ export async function consolidateProject(
     project: currentProject,
     dont: { stale: false, aliveEntryCount: 0, clusterCount: 0, dupClusterCount: 0 },
     config: { stale: false, entryCount: 0 },
+    capSweep: { cap: config.maxEntriesPerCategory, totalArchiveCandidateCount: 0, categories: [] },
   };
 
   const storage = new SQLiteStorage(dbPath);
@@ -131,6 +143,28 @@ export async function consolidateProject(
       const configEntries = storage.readConfigEntries(currentProject);
       report.config.entryCount = configEntries.length;
       log(`[consolidate-all] dry-run ${currentProject}: config candidates=${configEntries.length}（書き込みなし）`);
+    }
+
+    // 抑制装置（カテゴリ別上限）の dry-run 判定（読み取り専用・SELECTのみ）。
+    // 記憶レコードへの archive/delete/update は一切行わず、「もし退避したら何件・どの id か」
+    // をレポートへ記録するだけに徹する。cap の実退避（state 変更）は別増分（Phase 3）。
+    // 忘却（長期未参照の退避）は本増分では未搭載（信頼できる最終参照配線を敷く次増分で実装）。
+    // 別コネクション（readonly）で読む: cap-sweep の純関数は与えられた DB を SELECT するだけで、
+    // 統合本体（storage）とは分離しておく。
+    const sweepDb = new Database(dbPath, { readonly: true });
+    try {
+      const capCategories = computeCapSweep(sweepDb, config.maxEntriesPerCategory);
+      report.capSweep.cap = config.maxEntriesPerCategory;
+      report.capSweep.categories = capCategories;
+      report.capSweep.totalArchiveCandidateCount = capCategories.reduce(
+        (sum, c) => sum + c.archiveCandidateCount,
+        0,
+      );
+      log(
+        `[consolidate-all] dry-run ${currentProject}: capSweep candidates=${report.capSweep.totalArchiveCandidateCount}（書き込みなし）`,
+      );
+    } finally {
+      sweepDb.close();
     }
   } finally {
     storage.close();
