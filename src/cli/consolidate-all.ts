@@ -18,6 +18,8 @@ import {
 } from "../consolidator/staleness.js";
 import { computeCapSweep } from "../consolidator/cap-sweep.js";
 import type { CapSweepCandidate } from "../consolidator/cap-sweep.js";
+import { computeForgettingSweep } from "../consolidator/forgetting-sweep.js";
+import type { ForgettingSweepCandidate } from "../consolidator/forgetting-sweep.js";
 import { runDreamGenerationForProject } from "./dream-worker.js";
 import { config, getMemoryPath } from "../config.js";
 import { isMainModule } from "../utils/cli-entry.js";
@@ -48,8 +50,15 @@ export interface ConsolidationDryRunReport {
     totalArchiveCandidateCount: number;
     categories: CapSweepCandidate[];
   };
-  // 忘却（長期未参照）の dry-run 判定は本増分では未搭載。忘却は信頼できる最終参照
-  // （アクセス時刻）配線を敷く次増分で実装する（cap-sweep.ts の JSDoc に非実装の根拠）。
+  /**
+   * 忘却（長期未参照）の dry-run 判定（退避は実行せず候補件数/id・欠損内訳のみ）。
+   * neverTrackedCount 側は last_read_at 未計測（移行直後）で updated_at にフォールバックした代理指標。
+   */
+  forgettingSweep: {
+    windowDays: number;
+    totalCandidateCount: number;
+    categories: ForgettingSweepCandidate[];
+  };
 }
 
 function log(message: string): void {
@@ -90,6 +99,7 @@ export async function consolidateProject(
     dont: { stale: false, aliveEntryCount: 0, clusterCount: 0, dupClusterCount: 0 },
     config: { stale: false, entryCount: 0 },
     capSweep: { cap: config.maxEntriesPerCategory, totalArchiveCandidateCount: 0, categories: [] },
+    forgettingSweep: { windowDays: config.forgettingWindowDays, totalCandidateCount: 0, categories: [] },
   };
 
   const storage = new SQLiteStorage(dbPath);
@@ -162,6 +172,20 @@ export async function consolidateProject(
       );
       log(
         `[consolidate-all] dry-run ${currentProject}: capSweep candidates=${report.capSweep.totalArchiveCandidateCount}（書き込みなし）`,
+      );
+
+      // 忘却（長期未参照）の dry-run 判定（読み取り専用・SELECTのみ・cap-sweep と同じ readonly 接続を再利用）。
+      // 参照時刻 COALESCE(last_read_at, updated_at) が窓より古い active 行を候補として列挙するだけで、
+      // state 変更・削除は一切行わない。移行直後の last_read_at=NULL 行は neverTrackedCount に分離集計する。
+      const forgettingCategories = computeForgettingSweep(sweepDb, config.forgettingWindowDays);
+      report.forgettingSweep.windowDays = config.forgettingWindowDays;
+      report.forgettingSweep.categories = forgettingCategories;
+      report.forgettingSweep.totalCandidateCount = forgettingCategories.reduce(
+        (sum, c) => sum + c.candidateCount,
+        0,
+      );
+      log(
+        `[consolidate-all] dry-run ${currentProject}: forgettingSweep candidates=${report.forgettingSweep.totalCandidateCount}（書き込みなし）`,
       );
     } finally {
       sweepDb.close();

@@ -14,7 +14,9 @@ const DRY_RUN_REPORT_FILE = "consolidation-dryrun-report.json";
 /**
  * SQLiteStorage の破壊メソッド（memories を変更しうる書き込み API の全て）。
  * save=新規/更新, delete=物理削除, softDelete=論理削除, deleteVectors=ベクトル削除,
- * purgeTombstones=tombstone 物理削除, updateIntensity=強度更新（memories.updated_at を動かす）。
+ * purgeTombstones=tombstone 物理削除, updateIntensity=強度更新（memories.updated_at を動かす）,
+ * markLastRead=最終読取時刻の刻み（memories.last_read_at を動かす。読取経路専用で
+ * 統合 dry-run からは呼ばれてはならない＝忘却 dry-run が候補測定中に参照時刻を汚さないことの担保）。
  */
 const DESTRUCTIVE_METHODS = [
   "save",
@@ -23,6 +25,7 @@ const DESTRUCTIVE_METHODS = [
   "deleteVectors",
   "purgeTombstones",
   "updateIntensity",
+  "markLastRead",
 ] as const;
 
 type DestructiveMethod = (typeof DESTRUCTIVE_METHODS)[number];
@@ -405,6 +408,54 @@ describe("consolidate-all: 夜間統合のdry-run化（書き込み停止・レ�
     expect(sum).toBe(7); // (cap+2 − cap) + (cap+5 − cap) = 2 + 5
   });
 
+  it("忘却 dry-run: 窓より古い長期未参照の行が forgettingSweep 候補に上がり、最近の行は上がらない（無書込のまま measure & report）", async () => {
+    const storage = new SQLiteStorage(dbPath);
+    storage.initialize(memoryPath);
+    seedRecentDreamToSkipF3(storage);
+    storage.close();
+
+    // log = 窓より古い（last_read_at 未計測 → updated_at フォールバック＝neverTracked 候補）
+    const old = nowOffset(`-${config.forgettingWindowDays * 4} days`);
+    // decision = 最近更新（窓内 → 候補にならない）
+    const recent = nowOffset("-1 days");
+    const oldLogRows = Array.from({ length: 3 }, (_, i) => ({
+      id: `oldlog-${String(i).padStart(4, "0")}`,
+      category: "log",
+      updatedAt: old,
+    }));
+    const recentDecRows = Array.from({ length: 2 }, (_, i) => ({
+      id: `recdec-${String(i).padStart(4, "0")}`,
+      category: "decision",
+      updatedAt: recent,
+    }));
+    seedRawRows([...oldLogRows, ...recentDecRows]);
+
+    const before = snapshotMemAndVectors();
+    await consolidateProject(projectRoot);
+    const after = snapshotMemAndVectors();
+
+    // 忘却 dry-run も無書込（last_read_at を含む全カラムが不変）
+    expect(after).toBe(before);
+
+    const report = JSON.parse(readFileSync(join(memoryPath, DRY_RUN_REPORT_FILE), "utf-8"));
+    expect(report.forgettingSweep.windowDays).toBe(config.forgettingWindowDays);
+    // log の 3 件だけが候補（decision は窓内・dream は最近保存で候補外）
+    expect(report.forgettingSweep.totalCandidateCount).toBe(3);
+    const byCat: Record<string, { candidateCount: number; neverTrackedCount: number; candidateIds: string[] }> =
+      Object.fromEntries(
+        report.forgettingSweep.categories.map(
+          (c: { category: string; candidateCount: number; neverTrackedCount: number; candidateIds: string[] }) => [c.category, c],
+        ),
+      );
+    expect(byCat.log.candidateCount).toBe(3);
+    // 全件 last_read_at 未計測（移行直後の代理指標）→ neverTracked に計上される
+    expect(byCat.log.neverTrackedCount).toBe(3);
+    // 決定論順序（参照時刻同点 → id 昇順）
+    expect(byCat.log.candidateIds).toEqual(["oldlog-0000", "oldlog-0001", "oldlog-0002"]);
+    // decision（窓内）は候補カテゴリに現れない
+    expect(byCat.decision).toBeUndefined();
+  });
+
   it("dry-run 実行中に SQLiteStorage の破壊メソッド（save/delete/softDelete/deleteVectors/purgeTombstones/updateIntensity）が一度も呼ばれない（実メソッドをスパイする主軸ガード）", async () => {
     const cap = config.maxEntriesPerCategory;
 
@@ -465,6 +516,7 @@ describe("consolidate-all: 夜間統合のdry-run化（書き込み停止・レ�
       deleteVectors: 0,
       purgeTombstones: 0,
       updateIntensity: 0,
+      markLastRead: 0,
     });
     // スナップショットも不変（「破壊呼び出しゼロ」と「無書込」を二重に固定する）
     expect(after).toBe(before);
@@ -538,6 +590,47 @@ describe("consolidate-all: 夜間統合のdry-run化（書き込み停止・レ�
       // 無書込スナップショット: memories が実際に変化し、before/after 比較が必ず破れる
       expect(after, `${form.name}: memories が変化しスナップショット比較が破れる`).not.toBe(before);
     });
+  });
+
+  it("回帰: SQLiteStorageを経由しない生SQL UPDATE（未取得カラム intensity の改ざん）は、破壊メソッドスパイを素通りしても全カラムスナップショットが最後の砦として検知する", () => {
+    // 破壊メソッドスパイは SQLiteStorage.prototype の実装をラップして数えるため、SQLiteStorage を
+    // 一切経由しない生 SQL（better-sqlite3 で直接 UPDATE）は捕捉範囲外（total=0）になる。これは
+    // g-write-severance の静的走査（字面）も prototype スパイ（実行時）も共に逃す「すり抜け」形態。
+    // snapshotMemAndVectors が SELECT *（全カラム）で before/after を比較することで、狭い列スナップ
+    // ショット（例: id/state/content だけ）には載らない intensity 列の改ざんも前後不一致で検知する
+    // ことを固定する（＝全カラム化した無書込スナップショットが最後の砦であることの回帰）。
+    const setup = new SQLiteStorage(dbPath);
+    setup.initialize(memoryPath);
+    seedRecentDreamToSkipF3(setup);
+    const targetId = setup.save({
+      category: "dont",
+      title: "生SQL改ざん検査用の原本",
+      content: "この行の intensity を SQLiteStorage を経由しない生 SQL で書き換える",
+      project: "myproject",
+      intensity: 3,
+    }).id;
+    setup.close();
+
+    const before = snapshotMemAndVectors();
+
+    // スパイを張ったまま、prototype を一切経由しない生 SQL で intensity 列だけを書き換える
+    // （readonly 指定なしで接続。SQLiteStorage のメソッドは 1 つも呼ばない）。
+    const spy = installDestructiveSpy();
+    const raw = new RawDatabase(dbPath);
+    try {
+      raw.prepare("UPDATE memories SET intensity = 999 WHERE id = ?").run(targetId);
+    } finally {
+      raw.close();
+      spy.restore();
+    }
+
+    const after = snapshotMemAndVectors();
+
+    // 破壊メソッドスパイは prototype をラップするだけなので、生 SQL の改ざんは捕捉できない（total=0）。
+    // ＝ここが「すり抜け」の前段。破壊メソッドスパイ単独では intensity 改ざんを見逃す。
+    expect(spy.total()).toBe(0);
+    // 全カラムスナップショット（SELECT *）は、スパイが逃した intensity 改ざんを前後不一致で検知する。
+    expect(after).not.toBe(before);
   });
 });
 

@@ -1,6 +1,6 @@
 {
   "name": "wasurenagusa-mcp",
-  "version": "0.18.1",
+  "version": "0.19.0",
   "description": "MCP server that gives AI coding agents persistent memory — auto-detect mistakes, consolidate lessons, inject context on session start",
   "funding": {
     "type": "ko-fi",

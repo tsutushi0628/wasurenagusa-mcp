@@ -23,7 +23,7 @@ import {
 } from "../types.js";
 import { config } from "../config.js";
 import { initializeSchema, initializeVectors, getSchemaVersion, CURRENT_SCHEMA_VERSION } from "./schema.js";
-import { migrateV1ToV2, migrateV1ToV2_categoryAndKnowledgeGap, migrateV2ToV3, migrateV3ToV4, migrateV4ToV5, migrateV5ToV6, migrateV6ToV7 } from "./migration.js";
+import { migrateV1ToV2, migrateV1ToV2_categoryAndKnowledgeGap, migrateV2ToV3, migrateV3ToV4, migrateV4ToV5, migrateV5ToV6, migrateV6ToV7, migrateV7ToV8 } from "./migration.js";
 import { computeContentHash } from "./content-hash.js";
 import { existsSync } from "fs";
 import { join, dirname } from "path";
@@ -253,6 +253,12 @@ export class SQLiteStorage {
     // v6→v7: content-hash dedup 土台列(content_hash)を追加し既存行をバックフィル（カラム存在チェックで冪等）。
     if (memoriesTableExists) {
       migrateV6ToV7(this.db);
+    }
+
+    // v7→v8: 埋め込み非依存の最終読取時刻の土台列(last_read_at)を追加（カラム存在チェックで冪等）。
+    // 既存行へのバックフィルは行わない（NULL＝未計測を保持。migrateV7ToV8 の JSDoc 参照）。
+    if (memoriesTableExists) {
+      migrateV7ToV8(this.db);
     }
 
     // 自動マイグレーション: DB新規作成 AND v1ファイル存在 → マイグレーション実行
@@ -993,6 +999,18 @@ export class SQLiteStorage {
     const dontEntries = this.readDontEntries(currentProject);
     const dontFormatted = dontEntries.map((e) => formatEntry(e)).join("");
 
+    // 最終読取時刻を刻む: config/dont は SessionStart Hook で毎セッション自動注入される真の読取経路。
+    // updated_at/intensity/timestamp には触れない（markLastRead は last_read_at 専用・順位付けに不干渉）。
+    // この2カテゴリは毎回配信されるため、忘却 dry-run では常にほぼ0候補になる（バグではなく
+    // 「毎回参照される情報」という性質の反映で、レポートのカテゴリ別内訳に自然に表れる）。
+    const readIds = [
+      ...configEntries.map((e) => e.id),
+      ...dontEntries.map((e) => e.id),
+    ];
+    if (readIds.length > 0) {
+      this.markLastRead(readIds);
+    }
+
     // 世界モデル更新: 予測が大きく外れた上位N件を surface（学ぶべき外れ）
     const worldModelEntries = this.listHighErrorEntries(WORLD_MODEL_MIN_ERROR, WORLD_MODEL_LIMIT);
     const worldModelFormatted = worldModelEntries
@@ -1061,6 +1079,25 @@ export class SQLiteStorage {
       SET access_count = access_count + 1, last_accessed_at = datetime('now')
       WHERE id = ?
     `);
+
+    for (const id of ids) {
+      stmt.run(id);
+    }
+  }
+
+  /**
+   * 埋め込み非依存の最終読取時刻を刻む（schema v8 の memories.last_read_at 列）。
+   *
+   * 真の読取経路（get_detail の明示取得・get_context の config/dont 自動注入）でのみ呼ばれ、
+   * active 行の last_read_at のみを datetime('now') で更新する。updated_at / intensity / timestamp /
+   * access_count には一切触れない（search.ts:87-91 が明示する「読み取りで可変状態を書き換えると
+   * 時間減衰順位を汚染する」設計原則を壊さないため。last_read_at は順位付けに使わない専用列）。
+   * この列は忘却 dry-run（forgetting-sweep.ts）が参照時刻の一次シグナルとして使う。
+   */
+  markLastRead(ids: string[]): void {
+    const stmt = this.db.prepare(
+      "UPDATE memories SET last_read_at = datetime('now') WHERE id = ? AND state = 'active'"
+    );
 
     for (const id of ids) {
       stmt.run(id);

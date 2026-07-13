@@ -45,6 +45,9 @@ export async function handleMemoryGetDetail(
     const foundIds = result.entries.map(e => e.id);
     if (foundIds.length > 0) {
       storage.incrementAccessCount(foundIds);
+      // 埋め込み非依存の最終読取時刻を刻む（get_detail はフル内容を返す唯一の明示的取得経路）。
+      // 忘却 dry-run が参照時刻の一次シグナルとして使う（last_read_at 専用・順位付けに不干渉）。
+      storage.markLastRead(foundIds);
     }
 
     const resultJson = JSON.stringify(result, null, 2);

@@ -6,10 +6,11 @@
  * 物理削除）は別増分（Phase 3 の追記型再設計）まで実装しない。夜間統合 dry-run（consolidate-all）
  * が本判定を呼び、結果をレポート JSON へ記録する用途を想定する。
  *
- * 忘却（長期未参照の退避）は本増分では実装しない。忘却の高価値保護に必要な最終参照シグナル
- * （最終アクセス時刻）が現状は埋め込みを持つ行の vector_metadata にしか無く、埋め込みの無い記憶
- * では参照追跡が無音の no-op になって候補集合が信頼できない（高頻度参照の高価値記憶を過大に
- * 候補化しうる）ため。忘却は信頼できる最終参照（アクセス時刻）配線を敷く次増分で実装する。
+ * 忘却（長期未参照の退避）の dry-run 判定は別ファイル forgetting-sweep.ts に分離した。
+ * かつて忘却を先送りした理由（最終参照シグナルが埋め込みを持つ行の vector_metadata にしか無く、
+ * 埋め込みの無い記憶では参照追跡が無音の no-op になる）は、memories 本体へ埋め込み非依存の
+ * last_read_at 列（schema v8）を敷いたことで解消した。忘却の dry-run 本体・移行直後の欠損
+ * （never_tracked）の扱いは forgetting-sweep.ts の JSDoc を正本とする。
  *
  * keep 判定に使うカラムの所在（GroundTruth 実地確定）:
  * - state / updated_at / id / category は memories 本体（schema.ts）に実在し ORDER BY に直接使える。
@@ -96,5 +97,5 @@ export function computeCapSweep(
   return result;
 }
 
-// 忘却（長期未参照の退避）判定は本増分では未実装。忘却は信頼できる最終参照（アクセス時刻）
-// 配線を敷く次増分で実装する（ファイル冒頭の JSDoc に非実装の根拠を記載）。
+// 忘却（長期未参照の退避）の dry-run 判定は forgetting-sweep.ts に分離実装した
+// （最終参照シグナルは memories.last_read_at＝埋め込み非依存の列に一本化。ファイル冒頭の JSDoc 参照）。

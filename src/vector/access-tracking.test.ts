@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // Mocks for getDetail — getDetail.ts imports SQLiteStorage from ../storage/index.js
 const mockStorageGetDetail = vi.fn();
 const mockStorageIncrementAccessCount = vi.fn();
+const mockStorageMarkLastRead = vi.fn();
 const mockStorageInitialize = vi.fn();
 const mockStorageClose = vi.fn();
 vi.mock("../storage/index.js", () => {
@@ -11,6 +12,7 @@ vi.mock("../storage/index.js", () => {
     initialize = mockStorageInitialize;
     getDetail = mockStorageGetDetail;
     incrementAccessCount = mockStorageIncrementAccessCount;
+    markLastRead = mockStorageMarkLastRead;
     close = mockStorageClose;
   }
   return { SQLiteStorage: MockSQLiteStorage };
@@ -27,6 +29,7 @@ describe("access tracking on getDetail", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockStorageIncrementAccessCount.mockReturnValue(undefined);
+    mockStorageMarkLastRead.mockReturnValue(undefined);
   });
 
   it("updates lastAccessedAt when entries are found", async () => {
@@ -40,6 +43,8 @@ describe("access tracking on getDetail", () => {
     await handleMemoryGetDetail({ ids: ["entry-1"] }, "/tmp/project");
 
     expect(mockStorageIncrementAccessCount).toHaveBeenCalledWith(["entry-1"]);
+    // 埋め込み非依存の最終読取時刻も、フル取得した id に対して刻まれる
+    expect(mockStorageMarkLastRead).toHaveBeenCalledWith(["entry-1"]);
   });
 
   it("only updates found entries, not missing ones", async () => {
@@ -64,6 +69,7 @@ describe("access tracking on getDetail", () => {
     await handleMemoryGetDetail({ ids: ["entry-missing"] }, "/tmp/project");
 
     expect(mockStorageIncrementAccessCount).not.toHaveBeenCalled();
+    expect(mockStorageMarkLastRead).not.toHaveBeenCalled();
   });
 
   it("propagates incrementAccessCount errors (sync storage has no error isolation)", async () => {

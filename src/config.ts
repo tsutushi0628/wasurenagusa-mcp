@@ -12,6 +12,41 @@ const __dirname = dirname(__filename);
 dotenvConfig({ path: resolve(__dirname, "../.env") });
 dotenvConfig({ path: join(homedir(), ".wasurenagusa", ".env") });
 
+/**
+ * env から「窓の日数」を読む（Number.isFinite ガード付き）。
+ *
+ * 非数（parseInt が NaN になる値）だけを誤設定として既定値へフォールバックし warn を1行出す。
+ * 非数のまま下流に流れると事故になるため、設定境界で吸収する:
+ *  - forgettingWindowDays が NaN だと忘却 dry-run の SQL 修飾子 '-NaN days' が不正になり
+ *    候補が常に0件＝「忘却が沈黙停止」する（欠陥に気づけない）。
+ *  - logRetentionDays が NaN だと Date 演算が Invalid Date になりログ回転が throw する。
+ * 0 以下は「無効化」を意味する既存仕様（forgetting-sweep の windowDays<=0=忘却無効・
+ * markdown の retentionDays<=0=ログ回転無効）なので、既定へ置換せずそのまま下流へ通す。
+ * 配布パッケージで環境変数の意味を黙って変えないため（0以下は warn もしない）。
+ * 未設定（undefined / 空文字）は正常系なので warn せず既定値を返す。
+ *
+ * 注: maxEntriesPerCategory は「窓日数」ではなく件数上限で、cap-sweep が <=0 を
+ * 「上限無効（退避しない）」として第一級にサポートするため、この関数の対象外とする。
+ */
+export function resolveWindowDaysEnv(
+  raw: string | undefined,
+  defaultValue: number,
+  envName: string,
+): number {
+  if (raw === undefined || raw.trim() === "") {
+    return defaultValue;
+  }
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) {
+    console.warn(
+      `[config] ${envName} が非数です（${JSON.stringify(raw)}）。既定値 ${defaultValue} 日を使用します。`,
+    );
+    return defaultValue;
+  }
+  // 0 以下は下流の「<=0=無効化」既存仕様を保存するためそのまま通す（既定に置換しない）。
+  return parsed;
+}
+
 // Slack Webhook URLのバリデーション（起動時に実行）
 function resolveSlackWebhookUrl(): string {
   const raw = process.env.SLACK_WEBHOOK_URL ?? "";
@@ -40,10 +75,17 @@ export const config = {
   defaultSearchLimit: 5,
 
   // ログローテーション（デフォルト30日保持）
-  logRetentionDays: parseInt(process.env.LOG_RETENTION_DAYS || "30", 10),
+  logRetentionDays: resolveWindowDaysEnv(process.env.LOG_RETENTION_DAYS, 30, "LOG_RETENTION_DAYS"),
 
   // カテゴリ別エントリ上限（超過分は自動アーカイブ）
   maxEntriesPerCategory: parseInt(process.env.MAX_ENTRIES_PER_CATEGORY || "100", 10),
+
+  // 忘却（長期未参照）判定の窓（日数）。参照時刻 COALESCE(last_read_at, updated_at) が
+  // この日数より古い active 行を忘却 dry-run の候補にする（実退避はまだ行わない・読み取り専用）。
+  // cap 閾値と同性質のプロダクト判断点。既定 90 日は暫定で、環境変数 FORGETTING_WINDOW_DAYS で上書き可。
+  // 非数（NaN すり抜け）は既定へフォールバックし忘却の沈黙停止を防ぐ。0以下は下流で「忘却無効」
+  // として弾く既存仕様を保存する（resolveWindowDaysEnv 参照）。
+  forgettingWindowDays: resolveWindowDaysEnv(process.env.FORGETTING_WINDOW_DAYS, 90, "FORGETTING_WINDOW_DAYS"),
 
   // Slack Webhook通知（起動時にバリデーション済み）
   slackWebhookUrl: resolveSlackWebhookUrl(),

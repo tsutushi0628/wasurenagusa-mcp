@@ -4,6 +4,7 @@ import RawDatabase from "better-sqlite3";
 import { tmpdir } from "os";
 import { join } from "path";
 import { mkdtempSync, rmSync } from "fs";
+import { config } from "../config.js";
 
 /** 保存経路の外から生行数・content_hash等を検証するための読み取り専用ヘルパ。 */
 function countMemoriesByTitle(dbPath: string, title: string): number {
@@ -724,6 +725,82 @@ describe("SQLiteStorage", () => {
       expect(duplicateEntry).toBeDefined();
       // 両方とも内容が同一になっているが、行としては別のまま残る（replaceIdはdedup対象外）
       expect(countMemoriesByTitle(dbPath, "置換対象と同一内容になる行")).toBe(2);
+    });
+  });
+
+  describe("markLastRead（埋め込み非依存の最終読取時刻）", () => {
+    /** 生行の指定カラム群を読み取る（保存経路の外から状態を検証する）。 */
+    function rawRow(id: string): Record<string, unknown> {
+      const db = new RawDatabase(dbPath, { readonly: true });
+      try {
+        return db
+          .prepare(
+            "SELECT id, state, intensity, timestamp, updated_at, last_read_at FROM memories WHERE id = ?",
+          )
+          .get(id) as Record<string, unknown>;
+      } finally {
+        db.close();
+      }
+    }
+
+    it("last_read_at を刻むが updated_at / intensity / timestamp は変更しない（読み取り副作用ゼロ設計の担保）", () => {
+      const saved = storage.save({
+        category: "log",
+        title: "最終読取時刻の回帰",
+        content: "markLastRead は last_read_at 以外を動かさない",
+        project: "proj-a",
+        intensity: 3,
+      });
+
+      const before = rawRow(saved.id);
+      expect(before.last_read_at).toBeNull();
+
+      storage.markLastRead([saved.id]);
+
+      const after = rawRow(saved.id);
+      // last_read_at は刻まれる
+      expect(after.last_read_at).not.toBeNull();
+      // 時間減衰順位に効くカラムは一切動かない
+      expect(after.updated_at).toBe(before.updated_at);
+      expect(after.intensity).toBe(before.intensity);
+      expect(after.timestamp).toBe(before.timestamp);
+    });
+
+    it("access_count（vector_metadata）には触れない（incrementAccessCount とは独立）", () => {
+      const saved = storage.save({
+        category: "log",
+        title: "access_count 非干渉",
+        content: "markLastRead は vector_metadata を触らない",
+        project: "proj-a",
+      });
+      storage.upsertVector(saved.id, new Array(config.localEmbeddingDimensions).fill(0).map((_, i) => (i === 0 ? 1 : 0)));
+
+      const meta = storage.getVectorMetadata([saved.id]);
+      const before = meta.get(saved.id);
+
+      storage.markLastRead([saved.id]);
+
+      const afterMeta = storage.getVectorMetadata([saved.id]);
+      const after = afterMeta.get(saved.id);
+      expect(after?.accessCount).toBe(before?.accessCount);
+      expect(after?.lastAccessedAt).toBe(before?.lastAccessedAt);
+    });
+
+    it("state != 'active' の行には刻まない（可視性マトリクスに整合）", () => {
+      const saved = storage.save({
+        category: "log",
+        title: "非active には刻まない",
+        content: "softDelete 後は last_read_at を更新しない",
+        project: "proj-a",
+      });
+      storage.softDelete([saved.id]);
+      const beforeState = rawRow(saved.id).state;
+
+      storage.markLastRead([saved.id]);
+
+      const after = rawRow(saved.id);
+      expect(after.state).toBe(beforeState);
+      expect(after.last_read_at).toBeNull();
     });
   });
 });

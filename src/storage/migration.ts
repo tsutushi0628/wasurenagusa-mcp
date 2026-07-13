@@ -476,6 +476,42 @@ export function migrateV6ToV7(db: Database.Database): void {
 }
 
 /**
+ * v7→v8 マイグレーション（埋め込み非依存の最終読取時刻の土台列）
+ *
+ * 変更内容:
+ *   - memories に last_read_at TEXT カラムを追加（NULL 許容・デフォルト値なし）
+ *
+ * 動作:
+ *   - last_read_at カラムが既に存在するならスキップ（列存在チェックで冪等・2回目呼び出しはno-op）
+ *   - ALTER TABLE ADD COLUMN のみでロスレスなため、v5→v6と異なりバックアップ処理は不要
+ *   - migrateV6ToV7（content_hash）と異なり、既存行への一括UPDATEバックフィルを一切行わない。
+ *     既存行は last_read_at=NULL のまま残し、「まだ最終読取時刻を計測していない」という欠損を
+ *     そのまま保持する（本番DBの大規模UPDATEに伴うロック・所要時間のリスクを回避する）。
+ *     忘却 dry-run（forgetting-sweep.ts）が COALESCE(last_read_at, updated_at) で updated_at へ
+ *     フォールバックし、NULL 起因の候補を never_tracked として分離集計することで、移行直後の
+ *     代理指標と実測の最終読取時刻に基づく候補を区別してレポートに載せる。
+ */
+export function migrateV7ToV8(db: Database.Database): void {
+  const columnExists = (db.prepare(
+    "SELECT COUNT(*) as cnt FROM pragma_table_info('memories') WHERE name = 'last_read_at'"
+  ).get() as { cnt: number }).cnt > 0;
+
+  if (columnExists) {
+    return;
+  }
+
+  const transaction = db.transaction(() => {
+    db.exec(`ALTER TABLE memories ADD COLUMN last_read_at TEXT`);
+
+    db.prepare(
+      "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, datetime('now'))"
+    ).run(8);
+  });
+
+  transaction();
+}
+
+/**
  * vectors.jsonからメタデータ（accessCount等）のみをvector_metadataテーブルに移行。
  * v1のembeddingは768次元（Gemini）、v2は384次元（ローカル）で互換性がないためスキップ。
  */

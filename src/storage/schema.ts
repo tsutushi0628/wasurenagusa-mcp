@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 import { DEFAULT_MODEL } from "../vector/local-embedding.js";
 
-export const CURRENT_SCHEMA_VERSION = 7;
+export const CURRENT_SCHEMA_VERSION = 8;
 
 export const DDL = `
 -- メモリエントリ本体
@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS memories (
     state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','archived','deleted')),
     project_confidence TEXT NOT NULL DEFAULT 'unknown' CHECK(project_confidence IN ('confirmed','inferred','unknown')),
     content_hash TEXT,
+    last_read_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
