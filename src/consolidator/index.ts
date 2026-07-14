@@ -1,5 +1,3 @@
-export { isConsolidationStale, readConsolidatedDont, writeConsolidatedDont, readDontSummary, writeDontSummary } from "./staleness.js";
-export { isConfigConsolidationStale, readConsolidatedConfig, writeConsolidatedConfig } from "./staleness.js";
 export {
   isConsolidationStaleSqlite,
   isConfigConsolidationStaleSqlite,
