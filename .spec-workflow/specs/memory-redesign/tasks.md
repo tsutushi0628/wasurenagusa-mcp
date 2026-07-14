@@ -19,11 +19,12 @@
 完了条件：ゲートG0の全項目PASSと出力貼付。
 注記：本フェーズ内の完了マーク済みタスクは、フェーズゲート運用開始前の先行実施であり、ゲート証跡（G0）は本タスクでは未整備。
 
-- [ ] 0.0 予測誤差ループの扱い判断と版数ベースライン確定
+- [x] 0.0 予測誤差ループの扱い判断と版数ベースライン確定（判断記録済み・v5ベースライン確定。最終判断は(b-撤回)＝存置。2026-07-14 PdM）
   - File: 判断記録は Implementation Logs
   - (a) 予測誤差ループ一式（docs/spec-prediction-error-loop.md、src/storage/prediction-error-loop.test.ts、src/vector/prediction-error.test.ts、src/vector/prediction-error.ts ほか関連差分）は退避すべき未コミットWIPではない。コミット8b915a5（オーナー裁定2026-07-03）で本体へ既に反映済みである。本タスクは「温存するか、物理削除を再計画するか」の判断のみを行う（確定はPdM承認）
   - (b) 判断が「物理削除」の場合は本タスクでは実行せず、判断結果をPhase 4の死機能削除（タスク4.8）へ引き継ぐ旨を記録する。判断が「温存」の場合は、タスク4.8の削除対象から本ループを外す旨を記録する
   - (b-確定) 判断確定済み（2026-07-07・PdM確定）: 物理削除。実行はタスク4.8。根拠と先潰し条件は Implementation Logs/task-0.0-prediction-error-loop-decision.md が正本（実データ全ストア0件の実測、タスク4.2注入再設計との構造衝突、git履歴・退避パッチによる二重保全を根拠とする）
+  - (b-撤回) 判断撤回・再確定（2026-07-14・PdM確定）: 存置（正式機能）。タスク4.8の削除前ゲート再実測で主ストア（firebase-kit）に予測誤差の実データ2件を検出したため、「実データ0件」を前提とした物理削除の根拠が失効した。実利用が確認された以上、予測誤差ループは死機能ではなく正式機能として存置する。タスク4.8の削除対象から本ループを恒久的に外し、削除タスクを撤回する。v5の predicted_factors／actual_factors／prediction_error／prediction_delta 4列は「使用中の正式列」として扱い、schema.ts の未使用注記（タスク4.8）は付与しない
   - (c) 版数ベースライン=v5（src/storage/schema.ts:3 の CURRENT_SCHEMA_VERSION=5、schema_version テーブルの MAX(version)=5）を確定する。v5は予測誤差ループ由来の predicted_factors／actual_factors／prediction_error／prediction_delta カラム（migrateV4ToV5）で占有済みであり、Phase 1以降が新設する状態機械・帰属信頼度・埋め込みモデル列の移行先ではない
   - (d) 本Specの移行版数連鎖は v5（ベースライン）→v6（Phase 1 土台列。タスク1.3〜1.4）→v7（Phase 3 lineage/principles。タスク3.1〜3.2）→v8（Phase 4 guards。タスク4.1）で確定（PdM裁定2026-07-05）
   - Purpose: 全file:line引用と版数ベースラインの基準を正史（HEAD）に固定する
@@ -622,7 +623,7 @@
   - _Requirements: R-A6, R-B4_
   - _Prompt: Role: backend-engineer | Task: カテゴリ限定KNNと型経由の閾値適用をテスト先行で実装する | Restrictions: マージ実行にはまだ進まない（dry-runのまま） | Success: 候補クラスタが実データで生成される_
 
-- [ ] 3.5 ラベル付きペアの作成（検証役）
+- [ ] 3.5 ラベル付きペアの作成（検証役）【人手待ち・据置（2026-07-14 PdM）: same/different 各50件以上の人手ラベルが前提で、実装者に作らせない要件（R-M3）のため自動化不可。本ラベルが揃うまで閾値較正3.6・KPI精度指標（廃止済み決定の上位混入率）は測定不能。オーナー着手待ち】
   - File: ローカルデータ領域 ${WASURENAGUSA_EVAL_DIR}/merge-labels.jsonl（Git外）
   - design.md の形式で same 50件以上と different 50件以上を人手ラベルで作成する
   - 統合候補クラスタと、表現が似て意味が異なるペアの両方を含める
@@ -698,7 +699,7 @@
   - _Requirements: R-A7_
   - _Prompt: Role: backend-engineer | Task: 昇格の人間ゲートをテスト先行で実装する | Restrictions: 承認の自動化や既定承認を作らない | Success: 未承認原則が注入ビルダから返らない_
 
-- [ ] 3.12 初回統合の少量バッチ実行と人間サンプル確認
+- [ ] 3.12 初回統合の少量バッチ実行と人間サンプル確認【オーナー目視待ち・据置（2026-07-14 PdM）: マージ結果サンプルのオーナー目視確認が完了条件で、確認前に次バッチへ進めない要件のため自走不可。前提の閾値較正3.6も3.5の人手ラベル待ち。オーナー確認待ち】
   - File: 実行記録は Implementation Logs、対象はローカルストア
   - 較正済み閾値で少量バッチ（上限は1晩50クラスタ目安、実値は記録）を書き込みモードで実行する
   - マージ結果からサンプルを抽出してオーナーが目視確認し、確認記録を残す（サンプル本文はローカル確認のみで転記しない）
@@ -709,7 +710,7 @@
   - _Requirements: R-A6_
   - _Prompt: Role: backend-engineer | Task: 少量バッチの初回統合を実行し確認材料を揃える | Restrictions: 上限を超えて流さない。オーナー確認前に次バッチへ進まない | Success: 件数と品質確認の記録が残る_
 
-- [ ] 3.13 キュレーション台帳（統合区分）の流し込み
+- [ ] 3.13 キュレーション台帳（統合区分）の流し込み【実データ承認待ち・据置（2026-07-14 PdM）: 本番ストアへの追記型マージ実行（実データ書き込み）で、前提の較正閾値3.6と初回バッチ確認3.12が未了。実データ書き込みはオーナー承認後に実行。据置】
   - File: scripts/apply-merge-ledger.ts（新規）, 台帳はローカルデータ領域
   - 棚卸しで作成済みの統合候補台帳（282クラスタ）を追記型マージへ少量バッチで流す
   - 削除区分の台帳は実行しない（オーナー承認後の別作業。本Specのnon-goal）
@@ -720,7 +721,7 @@
   - _Requirements: R-A6, R-B7_
   - _Prompt: Role: data-investigator | Task: 統合台帳を追記型マージへ少量バッチで流す | Restrictions: 削除区分に触れない。原本を壊さない | Success: 処理とスキップの内訳が数値で残る_
 
-- [ ] 3.14 アーカイブ4,567件の選別投入とコールドストレージ確定
+- [ ] 3.14 アーカイブ4,567件の選別投入とコールドストレージ確定【実データ承認待ち・据置（2026-07-14 PdM）: dont系3,225件の統合入力への実投入はオーナー承認（手順(iv)）を明示前提とし、前提の較正・初回バッチ確認も未了。実データ投入はオーナー承認後。据置】
   - File: scripts/salvage-archive.ts（新規）, 対応テスト
   - 実態（2026-07-05実測）: 実体は各プロジェクト .wasurenagusa/ 直下の dont-archive.md／decisions-archive.md（v1形式Markdown・計4,567件・全件DB不在）。active記憶とのタイトル重複は0.6%
   - 処置方針: dont系3,225件のみ統合パイプラインへの選別投入対象とする。decisions系1,342件はコールドストレージ確定（検索編入しない・削除もしない）
@@ -841,7 +842,7 @@
   - _Requirements: R-C4_
   - _Prompt: Role: backend-engineer | Task: 遮断器とキルスイッチをテスト先行で実装する | Restrictions: 停止判定にDBやLLMを介在させない（ファイルとメモリのみで即応） | Success: ロックアウト経路が実験で再現できない_
 
-- [ ] 4.7 既存64パターンの出所採掘と選別承認申請
+- [x] 4.7 既存64パターンの出所採掘と選別承認申請（2026-07-14 PdM記録: 64件全件の採掘完了、実事故由来と確認できた3件のみ guards へ proposed 登録・オーナー承認待ち。残りは出所不明として非移行・除外理由を件数付き記録。enforce ON（実ブロック有効化）はタスク4.15の観測を経てオーナー承認待ち）
   - File: 採掘記録はローカルデータ領域、承認申請は guards テーブル
   - 応急処置前のガードパターン64個の出所（元になった事故記憶）を採掘し、実事故由来と確認できたものだけを guards へ proposed で登録する
   - 確認できないパターンは移行せず、除外理由を件数つきで記録する
@@ -852,7 +853,7 @@
   - _Requirements: R-C4_
   - _Prompt: Role: data-investigator | Task: 64パターンの出所を採掘し実事故由来のみ承認申請する | Restrictions: 出所不明のパターンを「念のため」残さない。パターン本文の一括転記をしない | Success: 残す根拠が事故IDで裏づけられる_
 
-- [x] 4.8 死機能の依存監査つき物理削除と死因記録（予測誤差ループは削除前ゲート再実測でfirebase-kitに実データ2件を検出し削除を保留・オーナーエスカレーション。他3系＝UserPromptSubmit空回り配線／consolidate-worker・retag-worker・staleness v1判定／save.tsのreplaceIdデッドコードは削除完了。詳細: docs/graveyard.md）
+- [x] 4.8 死機能の依存監査つき物理削除と死因記録（予測誤差ループは削除前ゲート再実測でfirebase-kitに実データ2件を検出し削除を保留・オーナーエスカレーション→2026-07-14 PdM確定で存置（正式機能）・削除撤回。タスク0.0(b-撤回)参照。他3系＝UserPromptSubmit空回り配線／consolidate-worker・retag-worker・staleness v1判定／save.tsのreplaceIdデッドコードは削除完了。詳細: docs/graveyard.md）
   - File: src/vector/prediction-error.ts ほか該当ファイル（削除）, src/cli/context.ts（変更）, src/tools/save.ts（変更）, docs/graveyard.md（新規）
   - 対象：予測誤差ループ（実データ0件）、UserPromptSubmit空回り配線（src/cli/context.ts:381-383）、Phase 0 で遮断済みのv1経路（consolidate-worker のMarkdown統合、retag-worker、staleness v1判定）、save.ts の replaceId デッドコード
   - 条件: 予測誤差ループの削除はタスク0.0の判断が「物理削除」の場合のみ実施する。「温存」判断の場合は対象から外し、残り3系のみ削除する（v5スキーマ列自体は判断によらず本タスクで削除しない。列の去就は別途オーナー判断）
@@ -918,7 +919,7 @@
   - _Requirements: R-M3_
   - _Prompt: Role: qa-engineer | Task: G4を実行し出力本文を貼付する | Restrictions: FAILを隠さない | Success: 全項目PASSの本文が残る_
 
-- [ ] 4.13 KPI定義の実装とベースライン同一手順の再測定
+- [x] 4.13 KPI定義の実装とベースライン同一手順の再測定（2026-07-14 再測定完了。検索精度は既存の検証役資産 scripts/gates/eval-golden.ts＋measure-baseline.mjs を同一手順・読み取り専用で再実行。凍結スナップショット 2026-07-10 に対し HEAD abc7e69 で recall@1 0.243→0.324・recall@5 0.568→0.622・recall@10 0.838→0.784（@10のみ後退）・正ゼロ 0/15 不変。原本 memory.db sha256 は実行前後で不変を実測（3b382c5a…）。主KPI「必要になった時に見つかった率」（get_detail到達）と精度指標（廃止済み決定が正解より上位）は人手ラベル前提のため人手待ち＝代理数字で埋めず未計測を明示。詳細は本セッション handoff）
   - File: scripts/measure-kpi.ts（新規）, 結果はローカルデータ領域と Implementation Logs
   - 主KPI「必要になった時に見つかった率」の代理指標（検索ヒット後の get_detail 到達、または結果IDの後続利用）と、精度指標（廃止済み決定が正解より上位に出た率）をコードで定義する
   - requirements.md のベースライン全項目を、タスク0.12で保存した同一手順で再測定し、改修前後の対比表を作る
