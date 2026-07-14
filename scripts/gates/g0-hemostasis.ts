@@ -70,8 +70,9 @@ const DEFAULT_SCHEDULER_DIR = join(homedir(), ".wasurenagusa", "scheduler");
 /** v1（Markdown＋vectors.json）資産のファイル名一覧。存在すればmtime不変を検証する。 */
 export const V1_ASSET_FILES = ["config.md", "dont.md", "decisions.md", "snippets.md", "vectors.json"] as const;
 
-/** injection検査の最小バイト数閾値（design.md契約: 1KB以上） */
-export const MIN_INJECTION_BYTES = 1024;
+// injection検査の旧契約（1KB下限 MIN_INJECTION_BYTES）は廃止した（PdM裁定2026-07-14:
+// Phase4の最小注入設計が優先。旧下限は止血期の「空注入・壊れ注入の検知」が目的だったため、
+// その目的は evaluateInjection の非空検査＋最小索引の構成要素検査として保存している）。
 
 export interface CheckResult {
   check: string;
@@ -411,6 +412,7 @@ export function readV1FileMtimes(memoryPath: string): Record<string, number | nu
 }
 
 export interface SessionStartRunResult {
+  stdoutText: string;
   stdoutBytes: number;
   stdoutTokensEstimate: number;
   budgetTokens: number;
@@ -460,6 +462,7 @@ export async function runSessionStartAgainstScratchCopy(
     const after = readV1FileMtimes(scratch.memoryPath);
 
     return {
+      stdoutText: stdout,
       stdoutBytes: Buffer.byteLength(stdout, "utf-8"),
       stdoutTokensEstimate: contextModule.estimateTokens(stdout),
       budgetTokens: contextModule.DEFAULT_INJECTION_TOKEN_BUDGET,
@@ -486,13 +489,44 @@ export function evaluateV1Blocked(
   };
 }
 
-export function evaluateInjection(outputBytes: number, tokensEstimate: number, budgetTokens: number): CheckResult {
-  const pass = outputBytes >= MIN_INJECTION_BYTES && tokensEstimate <= budgetTokens;
+/**
+ * injection検査（新契約・PdM裁定2026-07-14）: 旧契約「1KB以上」はPhase4の最小注入設計
+ * （design.md「最小索引」定義）と衝突するため置換した。旧下限の目的（空注入・壊れ注入の検知）
+ * は①非空検査で保存し、質の検査は②最小索引の必須構成要素（セクション見出しと
+ * 「[カテゴリ] 要旨 (ID)」形式の索引行）の存在確認、③トークンバジェット以下、で行う。
+ */
+export function evaluateInjection(stdoutText: string, tokensEstimate: number, budgetTokens: number): CheckResult {
+  const nonEmpty = stdoutText.trim().length > 0;
+  const hasMinimalIndexSection = /### 最小索引/.test(stdoutText);
+  const hasIndexLineFormat = /^\[[^\]]+\] .+ \([^()]+\)$/m.test(stdoutText);
+  const minimalIndexPresent = hasMinimalIndexSection && hasIndexLineFormat;
+  // 「確定原則のみ・索引0件」の正当出力（全記憶が確定原則へ昇華済み等）を PASS にする（rank4）。
+  // 確定原則セクション見出しと「- 要旨 (ID)」形式の原則行が揃っていれば、有効な素材が
+  // 注入されている証拠として最小索引の代替に足りる。空注入・壊れ注入（「（対象なし）」等で
+  // 索引行も原則行も無い出力）は両系統とも不成立となり従来どおり FAIL する。
+  const hasPrinciplesSection = /### 確定原則/.test(stdoutText);
+  const hasPrincipleLineFormat = /^- .+ \([^()]+\)$/m.test(stdoutText);
+  const confirmedPrinciplesPresent = hasPrinciplesSection && hasPrincipleLineFormat;
+  const materialPresent = minimalIndexPresent || confirmedPrinciplesPresent;
+  const withinBudget = tokensEstimate <= budgetTokens;
+  const pass = nonEmpty && materialPresent && withinBudget;
   return {
     check: "injection",
     result: pass ? "PASS" : "FAIL",
-    measured: { outputBytes, tokensEstimate, budgetTokens },
-    threshold: { minBytes: MIN_INJECTION_BYTES, maxTokens: budgetTokens },
+    measured: {
+      outputBytes: Buffer.byteLength(stdoutText, "utf-8"),
+      nonEmpty,
+      hasMinimalIndexSection,
+      hasIndexLineFormat,
+      minimalIndexPresent,
+      hasPrinciplesSection,
+      hasPrincipleLineFormat,
+      confirmedPrinciplesPresent,
+      materialPresent,
+      tokensEstimate,
+      budgetTokens,
+    },
+    threshold: { nonEmpty: true, materialPresent: true, maxTokens: budgetTokens },
   };
 }
 
@@ -773,7 +807,7 @@ export async function runG0(options: G0Options): Promise<G0Output> {
 
   const sessionRun = await runSessionStartAgainstScratchCopy(options.storePath, repoRoot);
   const v1Blocked = evaluateV1Blocked(sessionRun.v1FileMtimesBefore, sessionRun.v1FileMtimesAfter);
-  const injection = evaluateInjection(sessionRun.stdoutBytes, sessionRun.stdoutTokensEstimate, sessionRun.budgetTokens);
+  const injection = evaluateInjection(sessionRun.stdoutText, sessionRun.stdoutTokensEstimate, sessionRun.budgetTokens);
 
   const consolidationRun = await runConsolidationAgainstScratchCopy(options.storePath, repoRoot);
   const guardGenStopped = evaluateGuardGenStopped(

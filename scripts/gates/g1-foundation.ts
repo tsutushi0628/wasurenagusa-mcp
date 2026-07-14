@@ -46,10 +46,12 @@ const DEFAULT_REPO_ROOT = resolve(__dirname, "..", "..");
 const BACKUPS_ROOT = join(homedir(), ".wasurenagusa", "eval", "backups");
 
 /** design.md Phase 1 ③ 前提アサートの固定値（schema.tsのCURRENT_SCHEMA_VERSIONに追随。
- *  v6→v7（content_hash）に続き、v7→v8（last_read_at 最終読取時刻の土台列）マイグレーション反映により
- *  8へ更新。実装者は編集しない運用だが、QA検出のスキーマバージョン不一致（G1ゲート恒久FAIL）は
- *  QA自身の指示でこの値を追随更新する） */
-export const REQUIRED_SCHEMA_VERSION = 8;
+ *  v6→v7（content_hash）→v8（last_read_at 最終読取時刻の土台列）→v9（lineage/principles
+ *  テーブル追加。タスク3.1〜3.2）に続き、Phase 4 の v9→v10（guards テーブル新設・承認制ガード
+ *  レジストリの土台。タスク4.1・migrateV9ToV10）マイグレーション反映により10へ更新。
+ *  実装者は編集しない運用だが、QA検出のスキーマバージョン不一致（G1ゲート恒久FAIL）は
+ *  QA自身の指示でこの値を追随更新する。本更新はスキーマ前進への機械的追随でありゲート論理は不変） */
+export const REQUIRED_SCHEMA_VERSION = 10;
 export const MIN_MEMORIES_FOR_G1 = 1000;
 
 /** project-confidenceチェックのpassthrough回帰検査で使う、実在しない番兵プロジェクト名 */

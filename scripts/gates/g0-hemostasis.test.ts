@@ -37,7 +37,6 @@ import {
   evaluateNightlyDryrun,
   runG0,
   V1_ASSET_FILES,
-  MIN_INJECTION_BYTES,
 } from "./g0-hemostasis.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -78,8 +77,8 @@ function seedV1Files(memoryPath: string): void {
  *  buildMiniStoreの1000件は前提アサート（1,000件以上）を満たすための母数で、既定の
  *  FIXTURE_PROJECTS（sample-webapp等）へ均等分配される。ここで別途 `projectName`
  *  （G0のスクラッチ実行がstorePathの親ディレクトリ名から導く実際のプロジェクト名）に
- *  一致する少数のエントリを直接保存し、「1KB以上・トークンバジェット未満」の両方を
- *  満たす現実的な注入本文を作る（母数全部を一致させるとバジェット超過でinjection検査が
+ *  一致する少数のエントリを直接保存し、「最小索引の構成要素あり・トークンバジェット未満」の
+ *  両方を満たす現実的な注入本文を作る（母数全部を一致させるとバジェット超過でinjection検査が
  *  意図せずFAILする。8000トークン≒16000字前後が閾値の目安）。 */
 function seedMatchingProjectEntries(memoryPath: string, projectName: string): void {
   const dbPath = join(memoryPath, "memory.db");
@@ -270,19 +269,38 @@ describe("evaluate*（純粋関数の単体テスト、合成データで直接�
     expect((result.measured as { changedFiles: string[] }).changedFiles).toEqual(["dont.md"]);
   });
 
-  it("evaluateInjection: 1KB以上かつバジェット以下ならPASS", () => {
-    const result = evaluateInjection(2048, 500, 8000);
+  // injection検査は新契約（PdM裁定2026-07-14: Phase4最小化優先）:
+  // ①非空 ②最小索引の必須要素を含む ③トークンバジェット以下。旧1KB下限は廃止。
+  const VALID_INJECTION_TEXT =
+    "## 記憶インデックス\n\n### 最小索引\n[dont] force pushは既定禁止 (mem-1)\n[config] デプロイ手順 (mem-2)\n";
+
+  it("evaluateInjection: 非空・最小索引あり・バジェット以下ならPASS", () => {
+    const result = evaluateInjection(VALID_INJECTION_TEXT, 500, 8000);
     expect(result.result).toBe("PASS");
   });
 
-  it("evaluateInjection: 意図的な違反（1KB未満）はFAILする", () => {
-    const result = evaluateInjection(MIN_INJECTION_BYTES - 1, 10, 8000);
+  it("evaluateInjection: 意図的な違反（空注入）はFAILする", () => {
+    const result = evaluateInjection("   \n", 0, 8000);
+    expect(result.result).toBe("FAIL");
+  });
+
+  it("evaluateInjection: 意図的な違反（最小索引の構成要素を欠く壊れ注入）はFAILする", () => {
+    const result = evaluateInjection("## 記憶インデックス\n（対象なし）\n", 20, 8000);
     expect(result.result).toBe("FAIL");
   });
 
   it("evaluateInjection: 意図的な違反（バジェット超過）はFAILする", () => {
-    const result = evaluateInjection(2048, 9000, 8000);
+    const result = evaluateInjection(VALID_INJECTION_TEXT, 9000, 8000);
     expect(result.result).toBe("FAIL");
+  });
+
+  it("evaluateInjection: 確定原則のみ・索引0件の正当出力はPASSする（rank4）", () => {
+    // 全記憶が確定原則へ昇華済み等で最小索引が空でも、確定原則セクションに原則行が
+    // 揃っていれば有効な素材が注入されている＝正当出力としてPASSする。
+    const principlesOnly =
+      "## 記憶インデックス\n\n### 確定原則\n- force pushは既定禁止 (prin-1)\n- 破壊的削減はdry-run計測を先に置く (prin-2)\n";
+    const result = evaluateInjection(principlesOnly, 500, 8000);
+    expect(result.result).toBe("PASS");
   });
 
   it("evaluateGuardGenStopped: パターン件数・ファイル内容が不変ならPASS", () => {

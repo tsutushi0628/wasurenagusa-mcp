@@ -33,10 +33,11 @@
  *   （G0/G1と同型）。
  */
 
-import { join } from "path";
-import { existsSync, readFileSync } from "fs";
+import { join, relative } from "path";
+import { existsSync, readFileSync, mkdtempSync, cpSync, rmSync, symlinkSync, statSync } from "fs";
+import { tmpdir } from "os";
 
-import { parseArgs } from "../backup-store.js";
+import { parseArgs, EXCLUDED_DIR_NAMES } from "../backup-store.js";
 import { SQLiteStorage } from "../../src/storage/sqlite.js";
 import { LocalEmbedding } from "../../src/vector/local-embedding.js";
 import { TIER_THRESHOLDS } from "../../src/vector/memory-tier.js";
@@ -360,6 +361,30 @@ export async function runGoldenEval(storePath: string, goldenPath: string): Prom
 // CLI
 // ============================================================
 
+/** 直接実行(CLI)時の凍結保護: 原本ストアをSQLiteで開くと(migration/PRAGMA/WALチェックポイントで)
+ *  memory.dbのバイト列が変わり凍結アンカーのsha256を壊す。runGoldenEvalはSQLiteStorageを
+ *  読み書きで開くため、CLI経路では使い捨てコピー上で評価し原本を一切開かない(G2 freshCopyと同型)。
+ *  models/(埋め込みモデル実体)はシンボリックリンクで原本参照し複製ゼロにする。
+ *  G2内部呼び出しは runGoldenEval を直接importし、既にコピー済みstoreDirを渡すため本コピーは
+ *  かからない(二重コピー回避)。 */
+function freezeSafeCopy(storePath: string): { dir: string; storeDir: string } {
+  const dir = mkdtempSync(join(tmpdir(), "eval-golden-"));
+  const storeDir = join(dir, ".wasurenagusa");
+  cpSync(storePath, storeDir, {
+    recursive: true,
+    filter: (src: string) => {
+      const relPath = relative(storePath, src);
+      if (EXCLUDED_DIR_NAMES.has(relPath) && existsSync(src) && statSync(src).isDirectory()) return false;
+      return true;
+    },
+  });
+  for (const name of EXCLUDED_DIR_NAMES) {
+    const originalDir = join(storePath, name);
+    if (existsSync(originalDir)) symlinkSync(originalDir, join(storeDir, name), "dir");
+  }
+  return { dir, storeDir };
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const storeArg = args["store"];
@@ -372,7 +397,15 @@ async function main(): Promise<void> {
   }
 
   const goldenCount = loadGoldenQueries(goldenArg).length;
-  const { outcomes, failures } = await runGoldenEval(storeArg, goldenArg);
+  // 凍結原本を直接開かず使い捨てコピー上で評価する(凍結アンカー保護)。評価データは同一。
+  const { dir: copyDir, storeDir } = freezeSafeCopy(storeArg);
+  let outcomes: RunResult["outcomes"];
+  let failures: RunResult["failures"];
+  try {
+    ({ outcomes, failures } = await runGoldenEval(storeDir, goldenArg));
+  } finally {
+    rmSync(copyDir, { recursive: true, force: true });
+  }
 
   for (const o of outcomes) {
     console.log(JSON.stringify(o));

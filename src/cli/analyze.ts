@@ -180,15 +180,14 @@ async function main() {
   if (analysis.sessionTopic) {
     try {
       const { EmbeddingService } = await import("../vector/embedding-service.js");
-      const { config } = await import("../config.js");
-      const embeddingService = new EmbeddingService(config.geminiApiKey);
+      const { config, getMemoryPath } = await import("../config.js");
+      const topicProjectRoot = findProjectRoot(hookInput.cwd);
+      const memoryPath = getMemoryPath(topicProjectRoot);
+      const embeddingService = new EmbeddingService(config.geminiApiKey, memoryPath);
       if (embeddingService.isAvailable()) {
         const topicEmbedding = await embeddingService.embed(analysis.sessionTopic);
 
         // last-session-topic.json に保存（次のSessionStartで使用）
-        const topicProjectRoot = findProjectRoot(hookInput.cwd);
-        const { getMemoryPath } = await import("../config.js");
-        const memoryPath = getMemoryPath(topicProjectRoot);
         const topicPath = join(memoryPath, "last-session-topic.json");
 
         const topicData = {
