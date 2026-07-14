@@ -27,6 +27,8 @@
  */
 
 import type Database from "better-sqlite3";
+import type { SQLiteStorage } from "../storage/sqlite.js";
+import { capClusters, DEFAULT_NIGHTLY_CAP } from "./batch-cap.js";
 
 /** 長期未参照による忘却候補（1カテゴリぶん）。 */
 export interface ForgettingSweepCandidate {
@@ -45,6 +47,8 @@ export interface ForgettingSweepCandidate {
   neverTrackedCount: number;
   /** 忘却候補の id（参照時刻昇順 → id 昇順の決定論的順序） */
   candidateIds: string[];
+  /** candidateIds のうち last_read_at が NULL（updated_at フォールバック＝移行直後の代理指標）だった id。 */
+  neverTrackedIds: string[];
 }
 
 /**
@@ -108,8 +112,114 @@ export function computeForgettingSweep(
       candidateCount: rows.length,
       neverTrackedCount: rows.filter((r) => r.never_tracked === 1).length,
       candidateIds: rows.map((r) => r.id),
+      neverTrackedIds: rows.filter((r) => r.never_tracked === 1).map((r) => r.id),
     });
   }
 
   return result;
+}
+
+/** 忘却の実退避（archive）結果。物理削除は一切行わず active→archived の論理退避のみ。 */
+export interface ForgettingApplyResult {
+  /** 適用した忘却窓（日数）。 */
+  windowDays: number;
+  /** archived へ遷移させた総件数（実際に state が変わった行数）。 */
+  archivedCount: number;
+  /**
+   * archived にした行のうち last_read_at が NULL で updated_at フォールバックだった件数
+   * （移行直後の代理指標ベースで退避した件数）。破局的一括退避の可視化用にオーナーへ見せる。
+   */
+  neverTrackedCount: number;
+  /** archived へ遷移させた id（computeForgettingSweep の決定論的順序を保つ）。 */
+  archivedIds: string[];
+  /** カテゴリ別の退避件数。 */
+  perCategory: { category: string; archivedCount: number; neverTrackedCount: number }[];
+  /** この晩の退避上限（batch-cap）。この件数を超える候補は今晩は退避せず翌晩へ持ち越す。 */
+  nightlyCap: number;
+  /** 上限に達して打ち切ったか（true なら deferredCount 件が翌晩へ持ち越し）。 */
+  capped: boolean;
+  /** 上限超過で今晩は退避しなかった候補件数（翌晩へ持ち越し）。 */
+  deferredCount: number;
+}
+
+/**
+ * 忘却（長期未参照）の実退避。候補行を state='archived' へ遷移させる（論理退避・可逆）。
+ *
+ * 候補の選定は computeForgettingSweep をそのまま流用し、保護種別（config/dont）除外・
+ * windowDays<=0 無効化・COALESCE(last_read_at, updated_at) 判定・決定論的順序を単一の真実源に保つ。
+ * 退避は `UPDATE memories SET state='archived' WHERE id=? AND state='active'` のみで、
+ * 物理削除（DELETE）も vectors 削除も他カラムの改変も行わない。archived は可視性マトリクス上
+ * get_detail で読め（sqlite.ts:604）、SQLiteStorage.restoreArchived で active へ戻せる（可逆）。
+ *
+ * 退避の生 SQL は storage 層（SQLiteStorage.archiveMemories・可逆な active→archived の論理更新）に
+ * 閉じる。ここは「候補選定（読み取り）＋ storage の名前付き退避メソッド呼び出し」だけを担い、
+ * 破壊型書き込みプリミティブを consolidator 層へ持ち込まない（severance ガードの層分離と整合）。
+ */
+export function applyForgettingSweep(
+  storage: SQLiteStorage,
+  windowDays: number,
+  nightlyCap: number = DEFAULT_NIGHTLY_CAP,
+): ForgettingApplyResult {
+  const candidates = computeForgettingSweep(storage.connection, windowDays);
+
+  // 全カテゴリの候補を決定論的順序（computeForgettingSweep の返却順・各カテゴリ内は参照時刻昇順）で
+  // 平坦化し、1晩の退避上限（batch-cap の capClusters）で切る。上限超過分は今晩は退避せず翌晩へ
+  // 持ち越す。これで「初回夜間バッチが全プロジェクトの長期未参照記憶を無制限に一括退避する」暴走を
+  // 防ぐ（rank3・cap を実書き込み経路へ配線）。cap<=0 は今晩は1件も退避しない（capClusters の約束）。
+  const neverTrackedSet = new Set<string>();
+  const flat: { id: string; category: string }[] = [];
+  for (const cat of candidates) {
+    for (const id of cat.neverTrackedIds) {
+      neverTrackedSet.add(id);
+    }
+    for (const id of cat.candidateIds) {
+      flat.push({ id, category: cat.category });
+    }
+  }
+
+  const { toProcess, deferred, capped } = capClusters(flat, nightlyCap);
+
+  const perCategoryMap = new Map<string, { archivedCount: number; neverTrackedCount: number }>();
+  const archivedIds: string[] = [];
+  let archivedCount = 0;
+  let neverTrackedCount = 0;
+
+  for (const { id, category } of toProcess) {
+    const archived = storage.archiveMemories([id]);
+    if (archived === 0) {
+      continue;
+    }
+    archivedCount += archived;
+    archivedIds.push(id);
+    const isNeverTracked = neverTrackedSet.has(id);
+    if (isNeverTracked) {
+      neverTrackedCount += 1;
+    }
+    const acc = perCategoryMap.get(category) ?? { archivedCount: 0, neverTrackedCount: 0 };
+    acc.archivedCount += archived;
+    if (isNeverTracked) {
+      acc.neverTrackedCount += 1;
+    }
+    perCategoryMap.set(category, acc);
+  }
+
+  // perCategory は候補が発生したカテゴリの並び（computeForgettingSweep の順）で決定論的に並べる。
+  const perCategory: { category: string; archivedCount: number; neverTrackedCount: number }[] = [];
+  for (const cat of candidates) {
+    const acc = perCategoryMap.get(cat.category);
+    if (acc) {
+      perCategory.push({ category: cat.category, ...acc });
+    }
+  }
+
+  return {
+    windowDays,
+    archivedCount,
+    neverTrackedCount,
+    archivedIds,
+    perCategory,
+    nightlyCap,
+    capped,
+    deferredCount: deferred.length,
+  };
 }

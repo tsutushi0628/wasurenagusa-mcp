@@ -8,6 +8,14 @@ export type LLMProvider = "gemini" | "openai" | "anthropic";
 
 export type GenerateTextFn = (prompt: string) => Promise<string>;
 
+/** RETRIEVAL_QUERY=検索クエリ側、RETRIEVAL_DOCUMENT=保存対象の文書側（Gemini embedding APIのtaskType） */
+export type EmbedTaskType = "RETRIEVAL_QUERY" | "RETRIEVAL_DOCUMENT";
+
+export type EmbedTextFn = (text: string, taskType: EmbedTaskType) => Promise<number[]>;
+
+/** 遠隔埋め込みモデル名の単一真実源（旧 src/vector/embedding-service.ts の EMBEDDING_MODEL を統合） */
+export const DEFAULT_EMBEDDING_MODEL = "gemini-embedding-001";
+
 export const DEFAULT_MODELS: Record<LLMProvider, string> = {
   gemini: "gemini-3.1-flash-lite",
   openai: "gpt-5-nano",
@@ -63,6 +71,25 @@ export function createGenerateTextFn(): GenerateTextFn {
   return async (prompt: string): Promise<string> => {
     const response = await ai.generate({ model, prompt });
     return response.text;
+  };
+}
+
+/**
+ * 遠隔埋め込み（Gemini embedding API）呼び出しをGenkit経由で提供する。
+ * 埋め込みはGeminiのみ提供（LLM本文のプロバイダ選択とは独立。geminiApiKey未設定時は
+ * getGenkitInstance()がgoogleAIプラグインを登録しないため呼び出し時にthrowする）。
+ */
+export function createEmbedTextFn(): EmbedTextFn {
+  const ai = getGenkitInstance();
+  const embedder = googleAI.embedder(DEFAULT_EMBEDDING_MODEL);
+
+  return async (text: string, taskType: EmbedTaskType): Promise<number[]> => {
+    const [result] = await ai.embed({
+      embedder,
+      content: text,
+      options: { taskType },
+    });
+    return result.embedding;
   };
 }
 

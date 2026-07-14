@@ -21,6 +21,7 @@ vi.mock("../storage/sqlite.js", () => {
     getVectorMetadata = mockStorageGetVectorMetadata;
     getDetail = mockStorageGetDetail;
     save = mockStorageSave;
+    markLastRead = vi.fn();
     close = mockStorageClose;
   }
   return { SQLiteStorage: MockSQLiteStorage };

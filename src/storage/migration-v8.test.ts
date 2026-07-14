@@ -108,19 +108,22 @@ describe("migrateV7ToV8", () => {
     expect(getSchemaVersion(db)).toBe(8);
   });
 
-  it("既存行のlast_read_atはバックフィルされずNULLのまま（未計測を保持する）", () => {
+  it("既存行のlast_read_atは移行時刻でバックフィルされる（一括退避の構造的排除・rank1）", () => {
     seedRow(db, "a");
     seedRow(db, "b");
 
     migrateV7ToV8(db);
 
-    const rows = db.prepare("SELECT id, last_read_at FROM memories ORDER BY id").all() as {
+    const rows = db.prepare("SELECT id, last_read_at, updated_at FROM memories ORDER BY id").all() as {
       id: string;
       last_read_at: string | null;
+      updated_at: string;
     }[];
     expect(rows.length).toBe(2);
     for (const r of rows) {
-      expect(r.last_read_at).toBeNull();
+      // NULL のまま残さず、移行時刻を最終読取時刻の起点に置く（updated_at より新しい＝忘却窓の内側）。
+      expect(r.last_read_at).not.toBeNull();
+      expect(r.last_read_at! >= r.updated_at).toBe(true);
     }
   });
 
@@ -131,11 +134,12 @@ describe("migrateV7ToV8", () => {
     migrateV7ToV8(db);
 
     const after = db.prepare("SELECT * FROM memories WHERE id = 'a'").get() as MemoryRow;
-    // last_read_at は新設列なので比較対象から外し、それ以外の全カラムが不変であることを確認する
+    // last_read_at は新設列（移行時刻でバックフィルされる）なので比較対象から外し、
+    // それ以外の全カラムが不変であることを確認する
     const { last_read_at: _beforeLra, ...beforeRest } = before;
     const { last_read_at: afterLra, ...afterRest } = after;
     expect(afterRest).toEqual(beforeRest);
-    expect(afterLra).toBeNull();
+    expect(afterLra).not.toBeNull();
   });
 
   it("再実行しても破壊しない（列存在チェックでスキップし、二重ALTERで落ちない・2回目はno-op）", () => {

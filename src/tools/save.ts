@@ -189,7 +189,7 @@ export async function handleMemorySave(
 
     // Phase 1: タグ拡張 + Embedding生成を並列実行
     let embedding: number[] | null = null;
-    const tagEnricher = new TagEnricher(config.geminiApiKey);
+    const tagEnricher = new TagEnricher(config.geminiApiKey, memoryPath);
     const tagEnricherAvailable = !!config.geminiApiKey;
 
     const promises: Promise<unknown>[] = [];
@@ -247,15 +247,6 @@ export async function handleMemorySave(
 
     if (embeddingResult && Array.isArray(embeddingResult)) {
       embedding = embeddingResult as number[];
-    }
-
-    // replaceId指定時: 古いベクトルを削除
-    if (params.replaceId) {
-      try {
-        storage.deleteVectors([params.replaceId]);
-      } catch (error) {
-        console.error("[save] 旧ベクトル削除失敗:", error);
-      }
     }
 
     // 保存

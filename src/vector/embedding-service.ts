@@ -1,15 +1,18 @@
-import { GoogleGenerativeAI, TaskType } from "@google/generative-ai";
+import { createEmbedTextFn, DEFAULT_EMBEDDING_MODEL } from "../llm/provider.js";
+import { increment } from "../observability/counters.js";
 
-const EMBEDDING_MODEL = "gemini-embedding-001";
+// 遠隔埋め込みモデル名の単一真実源は src/llm/provider.ts の DEFAULT_EMBEDDING_MODEL
+// （タスク3.15でGenkit経路へ統合。旧ローカル定数 EMBEDDING_MODEL は撤去）。
+export const EMBEDDING_MODEL = DEFAULT_EMBEDDING_MODEL;
 export const EMBEDDING_DIMENSIONS = 768;
 
 export class EmbeddingService {
-  private genAI: GoogleGenerativeAI;
   private apiKey: string;
+  private memoryPath: string;
 
-  constructor(apiKey: string) {
+  constructor(apiKey: string, memoryPath: string) {
     this.apiKey = apiKey;
-    this.genAI = new GoogleGenerativeAI(apiKey);
+    this.memoryPath = memoryPath;
   }
 
   isAvailable(): boolean {
@@ -20,12 +23,16 @@ export class EmbeddingService {
   }
 
   async embed(text: string): Promise<number[]> {
-    const model = this.genAI.getGenerativeModel({ model: EMBEDDING_MODEL });
-    const result = await model.embedContent({
-      content: { parts: [{ text }], role: "user" },
-      taskType: TaskType.RETRIEVAL_DOCUMENT,
-    });
-    return result.embedding.values;
+    try {
+      const embedText = createEmbedTextFn();
+      // taskTypeは従来どおり常時RETRIEVAL_DOCUMENT固定（クエリ/文書の非対称は
+      // タスク3.15④で判定済みの既知の設計課題。挙動は変更せず現状維持）。
+      return await embedText(text, "RETRIEVAL_DOCUMENT");
+    } catch (error) {
+      console.error("[embedding-service] 埋め込み失敗:", error);
+      await increment(this.memoryPath, "embedding_failure_count", 1);
+      throw error;
+    }
   }
 
   async embedBatch(texts: string[]): Promise<number[][]> {

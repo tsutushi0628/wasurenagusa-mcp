@@ -5,7 +5,7 @@ import { tmpdir } from "os";
 import RawDatabase from "better-sqlite3";
 import { SQLiteStorage } from "../storage/sqlite.js";
 import { config } from "../config.js";
-import { computeForgettingSweep } from "./forgetting-sweep.js";
+import { computeForgettingSweep, applyForgettingSweep } from "./forgetting-sweep.js";
 
 /**
  * 忘却（長期未参照）dry-run の業務要件を、合成一時DBで固定する。
@@ -208,5 +208,199 @@ describe("computeForgettingSweep（忘却 dry-run・読み取り専用）", () =
     );
     expect(result.length).toBe(1);
     expect(result[0].candidateIds).toEqual(["log-veryold"]);
+  });
+});
+
+/**
+ * 忘却の実退避（applyForgettingSweep）と復元（restoreArchived）の業務要件を固定する。
+ *
+ * 業務要件:
+ *  - 窓より古い長期未参照の active 行は state='archived' へ論理退避される（物理削除しない）。
+ *  - 保護種別（config/dont）と窓内の行は退避されない。
+ *  - windowDays<=0 は忘却無効（1件も退避しない）。
+ *  - archived は get_detail で読める（可視性マトリクス）＝失われず参照可能。
+ *  - restoreArchived で archived → active に戻せる（可逆退避）。
+ */
+describe("applyForgettingSweep（忘却の実退避）＋ restoreArchived（復元）", () => {
+  let tmpDir: string;
+  let dbPath: string;
+  const WINDOW_DAYS = 90;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "wasurenagusa-forgetting-apply-test-"));
+    mkdirSync(tmpDir, { recursive: true });
+    dbPath = join(tmpDir, "memory.db");
+    const storage = new SQLiteStorage(dbPath);
+    storage.initialize(tmpDir);
+    storage.close();
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function nowOffset(offset: string): string {
+    const d = new RawDatabase(dbPath, { readonly: true });
+    try {
+      return (d.prepare("SELECT datetime('now', ?) AS t").get(offset) as { t: string }).t;
+    } finally {
+      d.close();
+    }
+  }
+
+  function seed(rows: { id: string; category: string; updatedAt: string; lastReadAt: string | null; state?: string }[]): void {
+    const d = new RawDatabase(dbPath);
+    try {
+      const insert = d.prepare(
+        `INSERT INTO memories (id, timestamp, category, title, content, state, last_read_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      const tx = d.transaction(() => {
+        for (const r of rows) {
+          insert.run(r.id, "2026-01-01T00:00:00+09:00", r.category, `title-${r.id}`, `content-${r.id}`, r.state ?? "active", r.lastReadAt, r.updatedAt);
+        }
+      });
+      tx();
+    } finally {
+      d.close();
+    }
+  }
+
+  /** SQLiteStorage を開いて忘却の実退避を適用し、確実に閉じる。 */
+  function applyVia(windowDays: number, nightlyCap?: number) {
+    const storage = new SQLiteStorage(dbPath);
+    storage.initialize(tmpDir);
+    try {
+      return nightlyCap === undefined
+        ? applyForgettingSweep(storage, windowDays)
+        : applyForgettingSweep(storage, windowDays, nightlyCap);
+    } finally {
+      storage.close();
+    }
+  }
+
+  function stateOf(id: string): string | undefined {
+    const d = new RawDatabase(dbPath, { readonly: true });
+    try {
+      return (d.prepare("SELECT state FROM memories WHERE id = ?").get(id) as { state: string } | undefined)?.state;
+    } finally {
+      d.close();
+    }
+  }
+
+  it("窓より古い長期未参照の active 行を archived へ論理退避する（物理削除はしない）", () => {
+    const old = nowOffset("-200 days");
+    const recent = nowOffset("-1 days");
+    seed([
+      { id: "log-old-a", category: "log", updatedAt: old, lastReadAt: null },
+      { id: "log-old-b", category: "log", updatedAt: old, lastReadAt: null },
+      // 窓内 → 退避されない
+      { id: "log-recent", category: "log", updatedAt: recent, lastReadAt: null },
+    ]);
+
+    const result = applyVia(WINDOW_DAYS);
+
+    expect(result.archivedCount).toBe(2);
+    expect(result.neverTrackedCount).toBe(2);
+    expect(result.archivedIds.sort()).toEqual(["log-old-a", "log-old-b"]);
+    expect(stateOf("log-old-a")).toBe("archived");
+    expect(stateOf("log-old-b")).toBe("archived");
+    expect(stateOf("log-recent")).toBe("active");
+    // 物理削除されていない（行は残る＝可逆）
+    const d = new RawDatabase(dbPath, { readonly: true });
+    try {
+      expect((d.prepare("SELECT COUNT(*) AS c FROM memories").get() as { c: number }).c).toBe(3);
+    } finally {
+      d.close();
+    }
+  });
+
+  it("保護種別（config/dont）は窓より古く非参照でも退避されない", () => {
+    const veryOld = nowOffset("-999 days");
+    seed([
+      { id: "cfg-old", category: "config", updatedAt: veryOld, lastReadAt: null },
+      { id: "dont-old", category: "dont", updatedAt: veryOld, lastReadAt: null },
+      { id: "log-old", category: "log", updatedAt: veryOld, lastReadAt: null },
+    ]);
+
+    expect(applyVia(WINDOW_DAYS).archivedIds).toEqual(["log-old"]);
+    expect(stateOf("cfg-old")).toBe("active");
+    expect(stateOf("dont-old")).toBe("active");
+    expect(stateOf("log-old")).toBe("archived");
+  });
+
+  it("windowDays <= 0 は忘却無効として 1 件も退避しない", () => {
+    const veryOld = nowOffset("-999 days");
+    seed([{ id: "log-old", category: "log", updatedAt: veryOld, lastReadAt: null }]);
+    const result = applyVia(0);
+    expect(result.archivedCount).toBe(0);
+    expect(result.archivedIds).toEqual([]);
+    expect(stateOf("log-old")).toBe("active");
+  });
+
+  it("退避した記憶は get_detail で読め（可視性）、restoreArchived で active に戻せる（可逆）", () => {
+    const old = nowOffset("-200 days");
+    seed([{ id: "log-old", category: "log", updatedAt: old, lastReadAt: null }]);
+
+    applyVia(WINDOW_DAYS);
+    expect(stateOf("log-old")).toBe("archived");
+
+    const storage = new SQLiteStorage(dbPath);
+    storage.initialize(tmpDir);
+    try {
+      // archived は get_detail で読める（deleted と違い可視）
+      const detail = storage.getDetail({ ids: ["log-old"] });
+      expect(detail.notFound).toEqual([]);
+      expect(detail.entries.map((e) => e.id)).toEqual(["log-old"]);
+
+      // restore で active へ戻る
+      const restored = storage.restoreArchived(["log-old"]);
+      expect(restored).toBe(1);
+    } finally {
+      storage.close();
+    }
+    expect(stateOf("log-old")).toBe("active");
+  });
+
+  it("1晩の退避上限（nightlyCap）を超える候補は今晩は退避せず翌晩へ持ち越す（rank3・cap配線）", () => {
+    // 窓より古い候補を 5 件投入。cap=2 を効かせると、決定論的順序（参照時刻昇順 → id 昇順）の
+    // 先頭 2 件だけ退避され、残り 3 件は active のまま翌晩へ持ち越す。
+    const days = [500, 400, 300, 200, 100];
+    seed(
+      days.map((d, i) => ({
+        id: `log-${String(i)}`,
+        category: "log",
+        updatedAt: nowOffset(`-${String(d)} days`),
+        lastReadAt: null,
+      })),
+    );
+
+    const result = applyVia(WINDOW_DAYS, 2);
+
+    expect(result.nightlyCap).toBe(2);
+    expect(result.capped).toBe(true);
+    expect(result.archivedCount).toBe(2);
+    expect(result.deferredCount).toBe(3);
+    // 最も古い参照時刻（-500,-400 days）の 2 件だけ退避される
+    expect(result.archivedIds).toEqual(["log-0", "log-1"]);
+    expect(stateOf("log-0")).toBe("archived");
+    expect(stateOf("log-1")).toBe("archived");
+    // 上限超過分は今晩は active のまま
+    expect(stateOf("log-2")).toBe("active");
+    expect(stateOf("log-3")).toBe("active");
+    expect(stateOf("log-4")).toBe("active");
+  });
+
+  it("候補が上限以内なら打ち切りは起きず全件退避する（capped=false）", () => {
+    const old = nowOffset("-200 days");
+    seed([
+      { id: "log-a", category: "log", updatedAt: old, lastReadAt: null },
+      { id: "log-b", category: "log", updatedAt: old, lastReadAt: null },
+    ]);
+
+    const result = applyVia(WINDOW_DAYS, 50);
+    expect(result.capped).toBe(false);
+    expect(result.deferredCount).toBe(0);
+    expect(result.archivedCount).toBe(2);
   });
 });

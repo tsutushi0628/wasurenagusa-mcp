@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import Database from "better-sqlite3";
 import { mkdtempSync, rmSync, mkdirSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -81,10 +82,23 @@ describe("handleMemorySearch - 読み経路の副作用ゼロ（R-B2 AC3・タ�
 
     const after = mutableStateHash(dbPath);
 
-    // 読みは記録を変えない（R-B2 AC3）。副作用撤去を戻すと、access_count 加算か破壊的昇格の
-    // いずれかで after が before と食い違い、このアサーションが落ちる（＝真の回帰検知器）。
+    // 読みは順位付け状態（intensity/timestamp/access_count）を変えない（R-B2 AC3）。副作用撤去を
+    // 戻すと、access_count 加算か破壊的昇格のいずれかで after が before と食い違い落ちる（真の回帰検知器）。
+    // last_read_at は mutableStateHash の対象外（順位付けに使わない専用列）なので、下の検索による
+    // 最終読取時刻の更新はこの不変条件に抵触しない。
     expect(after.vectorMeta).toEqual(before.vectorMeta);
     expect(after.memories).toEqual(before.memories);
+
+    // 一方で last_read_at は検索ヒットで更新される（検索でのみ参照される記憶を忘却から守る・rank1）。
+    const lraDb = new Database(dbPath, { readonly: true });
+    try {
+      const lra = (
+        lraDb.prepare("SELECT last_read_at FROM memories LIMIT 1").get() as { last_read_at: string | null }
+      ).last_read_at;
+      expect(lra).not.toBeNull();
+    } finally {
+      lraDb.close();
+    }
 
     // read 経路の best-effort 操作ログ（fire-and-forget）が afterEach の一時ディレクトリ削除と
     // 競合しないよう短く待つ（g2-search.ts の後測待機と同趣旨。ログはDB可変状態には無関係）。

@@ -109,7 +109,9 @@ export interface SearchResult {
   totalCount: number;
   hint: string;                  // 「memory_get_detail で詳細を取得できます」のガイド
   fallbackStage?: FtsFallbackStage; // 発火したFTSフォールバック段（タスク2.10: ヒットの経路可視化）。FTS経路で段がヒットしたときのみ設定
-  angerHistory?: MemoryIndexEntry[]; // 高強度dont（intensity≥4）一覧。クエリ無関係に毎回付与される再発防止リスト
+  // angerHistory（高強度dontの無条件固定付帯）はタスク4.3で廃止。
+  // 検索応答は検索結果とhintのみで構成する（push型固定ブロックの根治）。
+  // 情報自体は削除しておらず storage.listHighIntensityDonts 等でpull取得できる。
 }
 
 // 詳細取得パラメータ
@@ -128,6 +130,7 @@ export interface ContextResult {
   config: string;
   dont: string;
   worldModelUpdates?: string; // 予測が大きく外れた上位N件（世界モデル更新ブロック）
+  truncated?: boolean; // config/dontのいずれかが件数or分量上限で切られたか（タスク4.4）
 }
 
 // Gemini分析結果

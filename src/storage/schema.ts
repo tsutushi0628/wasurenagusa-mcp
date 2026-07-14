@@ -1,7 +1,55 @@
 import type Database from "better-sqlite3";
 import { DEFAULT_MODEL } from "../vector/local-embedding.js";
 
-export const CURRENT_SCHEMA_VERSION = 8;
+export const CURRENT_SCHEMA_VERSION = 10;
+
+// 系譜テーブル（追記型マージ・supersedes の記録。design.md「lineage」定義に厳密準拠）。
+// 新規DBは DDL 経由、旧世代DBは migrateV8ToV9 経由で同一定義から作られる（単一真実源）。
+export const LINEAGE_DDL = `
+CREATE TABLE IF NOT EXISTS lineage (
+    id TEXT PRIMARY KEY,
+    child_id TEXT NOT NULL,
+    parent_id TEXT NOT NULL,
+    relation TEXT NOT NULL CHECK (relation IN ('merged_from','supersedes')),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lineage_child ON lineage(child_id);
+CREATE INDEX IF NOT EXISTS idx_lineage_parent ON lineage(parent_id);
+`;
+
+// 確定原則テーブル（昇格の人間ゲート。design.md「principles」定義に厳密準拠）。
+export const PRINCIPLES_DDL = `
+CREATE TABLE IF NOT EXISTS principles (
+    id TEXT PRIMARY KEY,
+    text TEXT NOT NULL,
+    origin_tier TEXT NOT NULL CHECK (origin_tier IN ('owner_confirmed','agent_observed')),
+    evidence_ids TEXT NOT NULL,
+    valid_until TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('proposed','approved','expired','rejected')),
+    approved_at TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_principles_state ON principles(state, valid_until);
+`;
+
+// 承認制ガードレジストリテーブル（design.md「guards」定義。memory-redesign spec Phase 4）。
+// 版数注記: design.md/tasks.md は「v8移行」と規定していたが、実コードでは v7=content_hash・
+// v8=last_read_at・v9=lineage/principles が既に版数を占有済みのため、guards テーブルの土台は
+// migrateV9ToV10 として実装する（テーブル定義・列・CHECK制約は design.md の定義に厳密に従い、
+// 版数だけを繰り下げた。v8→v9 の版数注記コメントと同じ作法）。
+// 新規DBは DDL 経由、旧世代DBは migrateV9ToV10 経由で同一定義から作られる（単一真実源）。
+export const GUARDS_DDL = `
+CREATE TABLE IF NOT EXISTS guards (
+    id TEXT PRIMARY KEY,
+    pattern TEXT NOT NULL,
+    source_incident_id TEXT NOT NULL,
+    approved_at TEXT,
+    expires_at TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('proposed','active','expired','disabled')),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_guards_state ON guards(state, expires_at);
+`;
 
 export const DDL = `
 -- メモリエントリ本体
@@ -120,6 +168,9 @@ CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY,
     applied_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+${LINEAGE_DDL}
+${PRINCIPLES_DDL}
+${GUARDS_DDL}
 `;
 
 export function initializeSchema(db: Database.Database): void {

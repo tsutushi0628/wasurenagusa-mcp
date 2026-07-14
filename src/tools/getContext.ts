@@ -8,7 +8,9 @@ export const memoryGetContextTool: Tool = {
   name: "memory_get_context",
   description: `config（設定情報）とdont（やってはいけないこと）を一括取得する。
 通常はSessionStart Hookで自動注入されるため、手動で呼ぶ必要は少ない。
-セッション途中でコンテキストを再確認したい場合に使用。`,
+セッション途中でコンテキストを再確認したい場合に使用。
+【上限】各カテゴリ最大200件・20000文字。上限で切られた場合は応答のtruncatedがtrueになり、
+本文末尾にも「上限により省略」マーカーが付く（黙って切り捨てない）。`,
   inputSchema: {
     type: "object",
     properties: {},

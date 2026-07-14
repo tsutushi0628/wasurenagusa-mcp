@@ -99,6 +99,13 @@ export async function handleMemorySearch(
       result = storage.search(params);
     }
 
+    // 埋め込み非依存の最終読取時刻を刻む（起点プロジェクトのヒットのみ・横断マージ前に確定）。
+    // memory_search は「検索でのみ活発に参照され続ける記憶」を忘却から守る唯一の経路。last_read_at は
+    // 順位付けに使わない専用列で、intensity/timestamp/access_count には触れないため時間減衰順位を汚さない
+    // （read-no-side-effect の不変対象は intensity/timestamp/access_count のまま・rank1）。
+    const primaryHitIds = result.results.map((r) => r.id);
+    storage.markLastRead(primaryHitIds);
+
     // アクティブプロジェクト横断検索
     if (params.project === "active") {
       const { ActiveProjectsTracker } = await import("../active-projects.js");
@@ -164,73 +171,17 @@ export async function handleMemorySearch(
       }
     }
 
-    // 再発防止リスト（高強度dont）を毎回付与
-    // クエリ無関係に直近で怒られた事項を surface する
-    try {
-      const angerEntries = storage.listHighIntensityDonts(4, 5);
+    // 再発防止リスト（高強度dont）の無条件付帯は廃止（タスク4.3）。
+    // クエリ無関係な固定ブロックを毎回付与するpush型設計を根治し、必要時は
+    // listHighIntensityDonts / memory_search（category=dont等）で明示的にpull取得する運用にする。
+    // 情報自体は削除しておらず、storage.listHighIntensityDonts経由で引き続き取得可能。
 
-      // active プロジェクト指定時は他プロジェクトの高強度dontも合流
-      if (params.project === "active") {
-        const { ActiveProjectsTracker } = await import("../active-projects.js");
-        const schedulerDir = join(homedir(), ".wasurenagusa", "scheduler");
-        const activeTracker = new ActiveProjectsTracker(schedulerDir);
-        const activeProjects = await activeTracker.getActiveProjects();
-
-        for (const proj of activeProjects) {
-          // DBハンドルは try 内で開き finally で必ず閉じる（同型2箇所目・タスク2.7 ④）。
-          // コンストラクタも try 内: stale なプロジェクトパスでの new Database() throw を
-          // catch{continue} が受け、angerHistory 合流の中断を防ぐ（catch{continue} 挙動を維持）。
-          const projMemoryPath = getMemoryPath(proj.path);
-          const projDbPath = join(projMemoryPath, config.sqliteFile);
-          let projStorage: SQLiteStorage | null = null;
-          try {
-            projStorage = new SQLiteStorage(projDbPath);
-            projStorage.initialize(projMemoryPath);
-            const projAnger = projStorage.listHighIntensityDonts(4, 5).map(e => ({
-              ...e,
-              title: `[${proj.name}] ${e.title}`,
-            }));
-            for (const entry of projAnger) {
-              const exists = angerEntries.some(existing => existing.id === entry.id);
-              if (!exists) {
-                angerEntries.push(entry);
-              }
-            }
-          } catch {
-            continue;
-          } finally {
-            projStorage?.close();
-          }
-        }
-      }
-
-      // intensity降順でソート、上位5件のみ
-      angerEntries.sort((a, b) => (b.intensity ?? 0) - (a.intensity ?? 0));
-      if (angerEntries.length > 0) {
-        result.angerHistory = angerEntries.slice(0, 5);
-      }
-    } catch (error) {
-      console.error("[search] angerHistory取得失敗:", error);
-    }
-
-    // 軽量化: AI向けに id, title, positiveAction（angerHistory用）のみに絞る
-    // 詳細（category/intensity/tags/project等）は memory_get_detail で取得
+    // 軽量化: AI向けに id, title のみに絞る（詳細は memory_get_detail で取得）
     const slimEntry = (e: { id: string; title: string }) => ({ id: e.id, title: e.title });
-    const slimAngerEntry = (e: { id: string; title: string; positiveAction?: string; scenario?: string; whyCore?: string }) => {
-      const result: { id: string; title: string; positiveAction: string; scenario?: string; whyCore?: string } = {
-        id: e.id,
-        title: e.title,
-        positiveAction: e.positiveAction ?? e.title,
-      };
-      if (e.scenario) { result.scenario = e.scenario; }
-      if (e.whyCore) { result.whyCore = e.whyCore; }
-      return result;
-    };
     const slimResult: {
       results: ReturnType<typeof slimEntry>[];
       totalCount: number;
       hint: string;
-      angerHistory?: ReturnType<typeof slimAngerEntry>[];
     } = {
       results: result.results.map(slimEntry),
       totalCount: result.totalCount,
@@ -239,9 +190,6 @@ export async function handleMemorySearch(
       // 横断マージは起点のfallbackStageを変更しない）。
       hint: buildSearchHint(result.results.length, result.fallbackStage),
     };
-    if (result.angerHistory && result.angerHistory.length > 0) {
-      slimResult.angerHistory = result.angerHistory.map(slimAngerEntry);
-    }
     const resultJson = JSON.stringify(slimResult, null, 2);
     const sessionId = generateSearchSessionId();
     const resultIds = result.results.map((r: MemoryIndexEntry) => r.id);

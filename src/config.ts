@@ -3,6 +3,7 @@ import { dirname, resolve, join } from "path";
 import { homedir } from "os";
 import { fileURLToPath } from "url";
 import { validateWebhookUrl } from "./utils/validate-webhook-url.js";
+import { DEFAULT_NIGHTLY_CAP } from "./consolidator/batch-cap.js";
 
 // __dirnameベースで.envを探す（CWDに依存しない）
 const __filename = fileURLToPath(import.meta.url);
@@ -47,6 +48,18 @@ export function resolveWindowDaysEnv(
   return parsed;
 }
 
+/**
+ * 真偽値の環境変数を解決する。未設定（undefined / 空文字）は defaultValue を返す。
+ * 明示無効の語（false / 0 / off / no、大小文字無視）だけを false とし、それ以外の設定値は true とみなす
+ * （「何か設定したら有効」に倒す既定安全側。実退避のような破壊的既定 ON を明示語でのみ落とすため）。
+ */
+export function resolveBoolEnv(raw: string | undefined, defaultValue: boolean): boolean {
+  if (raw === undefined || raw.trim() === "") {
+    return defaultValue;
+  }
+  return !/^(false|0|off|no)$/i.test(raw.trim());
+}
+
 // Slack Webhook URLのバリデーション（起動時に実行）
 function resolveSlackWebhookUrl(): string {
   const raw = process.env.SLACK_WEBHOOK_URL ?? "";
@@ -86,6 +99,24 @@ export const config = {
   // 非数（NaN すり抜け）は既定へフォールバックし忘却の沈黙停止を防ぐ。0以下は下流で「忘却無効」
   // として弾く既存仕様を保存する（resolveWindowDaysEnv 参照）。
   forgettingWindowDays: resolveWindowDaysEnv(process.env.FORGETTING_WINDOW_DAYS, 90, "FORGETTING_WINDOW_DAYS"),
+
+  // 忘却の実退避（archive）を実発動するか。true のとき夜間オーケストレータ（consolidate-all の main）が
+  // 忘却窓より古い長期未参照の active 行を state='archived' へ論理退避する（物理削除はしない・可逆）。
+  // 既定 true（オーナー裁定 2026-07-14「90日しきい値で実発動」）。FORGETTING_APPLY=false/0/off/no で無効化し
+  // 測定（dry-run レポート）のみに戻せる。夜間の測定関数 consolidateProject 自体は常に write-zero を保つ設計で、
+  // 退避はこのフラグで制御される apply 経路（applyForgettingForProject）に分離してある。
+  forgettingApply: resolveBoolEnv(process.env.FORGETTING_APPLY, true),
+
+  // 忘却の実退避における1晩あたりの退避上限（batch-cap）。夜間バッチが1回で退避できる件数の天井で、
+  // 超過分は今晩は退避せず翌晩へ持ち越す。初回夜間バッチが全プロジェクトの長期未参照記憶を無制限に
+  // 一括退避する暴走を防ぐ（rank3）。既定は batch-cap の DEFAULT_NIGHTLY_CAP。環境変数
+  // FORGETTING_NIGHTLY_CAP で上書き可。0以下は「今晩は退避しない」を意味する（capClusters の約束）ため
+  // 既定へ置換せずそのまま通す（resolveWindowDaysEnv と同性質の閾値）。
+  forgettingNightlyCap: resolveWindowDaysEnv(
+    process.env.FORGETTING_NIGHTLY_CAP,
+    DEFAULT_NIGHTLY_CAP,
+    "FORGETTING_NIGHTLY_CAP",
+  ),
 
   // Slack Webhook通知（起動時にバリデーション済み）
   slackWebhookUrl: resolveSlackWebhookUrl(),

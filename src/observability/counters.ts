@@ -32,7 +32,12 @@ export type MetricName =
   | "write_failure_count"
   | "search_fallback_phrase"
   | "search_fallback_and"
-  | "search_fallback_or";
+  | "search_fallback_or"
+  | "tag_enrich_failure_count"
+  | "embedding_failure_count"
+  | "llm_output_guard_warning"
+  | "llm_output_batch_skip"
+  | "injection_skipped_count";
 
 export interface CounterEntry {
   ts: string;

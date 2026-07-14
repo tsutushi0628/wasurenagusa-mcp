@@ -1,11 +1,11 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import { WeightedTag } from "../types.js";
 import { loadPrompt } from "../analyzer/prompt-loader.js";
+import { createGenerateTextFn, DEFAULT_MODELS } from "../llm/provider.js";
+import { increment } from "../observability/counters.js";
 
 // リポジトリ標準のGemini世代（src/llm/provider.ts の既定）に揃える。
-// 旧 gemini-2.0-flash は提供終了で404を返すことを実APIで確認済み（2026-07-05）。
-// provider側だけ世代更新されたときのドリフトは tag-enricher.test.ts の一致テストが検知する。
-export const TAG_MODEL = "gemini-3.1-flash-lite";
+// 単一真実源は provider.ts の DEFAULT_MODELS.gemini（タスク3.15でGenkit経路へ統合）。
+export const TAG_MODEL = DEFAULT_MODELS.gemini;
 
 export interface EnrichResult {
   tags: WeightedTag[];
@@ -13,12 +13,12 @@ export interface EnrichResult {
 }
 
 export class TagEnricher {
-  private genAI: GoogleGenerativeAI;
   private apiKey: string;
+  private memoryPath: string;
 
-  constructor(apiKey: string) {
+  constructor(apiKey: string, memoryPath: string) {
     this.apiKey = apiKey;
-    this.genAI = new GoogleGenerativeAI(apiKey);
+    this.memoryPath = memoryPath;
   }
 
   isAvailable(): boolean {
@@ -38,9 +38,8 @@ export class TagEnricher {
         .replace("{{content}}", content)
         .replace("{{existingTags}}", existingTags.join(", "));
 
-      const model = this.genAI.getGenerativeModel({ model: TAG_MODEL });
-      const result = await model.generateContent(prompt);
-      const text = result.response.text();
+      const generateText = createGenerateTextFn();
+      const text = await generateText(prompt);
 
       const parsed = this.parseResponse(text);
       if (!parsed) {
@@ -60,6 +59,7 @@ export class TagEnricher {
       return { tags, newThemes };
     } catch (error) {
       console.error("[tag-enricher] タグ拡張失敗:", error);
+      await increment(this.memoryPath, "tag_enrich_failure_count", 1);
       return this.fallback(existingTags);
     }
   }

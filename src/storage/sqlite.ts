@@ -23,8 +23,9 @@ import {
 } from "../types.js";
 import { config } from "../config.js";
 import { initializeSchema, initializeVectors, getSchemaVersion, CURRENT_SCHEMA_VERSION } from "./schema.js";
-import { migrateV1ToV2, migrateV1ToV2_categoryAndKnowledgeGap, migrateV2ToV3, migrateV3ToV4, migrateV4ToV5, migrateV5ToV6, migrateV6ToV7, migrateV7ToV8 } from "./migration.js";
+import { migrateV1ToV2, migrateV1ToV2_categoryAndKnowledgeGap, migrateV2ToV3, migrateV3ToV4, migrateV4ToV5, migrateV5ToV6, migrateV6ToV7, migrateV7ToV8, migrateV8ToV9, migrateV9ToV10 } from "./migration.js";
 import { computeContentHash } from "./content-hash.js";
+import { asL2Distance, l2ToCosineSim, meetsSimilarity, type CosineSimilarity, type Threshold } from "../vector/distance-types.js";
 import { existsSync } from "fs";
 import { join, dirname } from "path";
 import { formatEntry } from "./formatter.js";
@@ -40,6 +41,48 @@ export interface VectorSearchResult {
 // 世界モデルブロック（getContext）の閾値・件数（マジックナンバー禁止）
 const WORLD_MODEL_MIN_ERROR = 0.5; // この予測誤差以上を「学ぶべき外れ」として surface
 const WORLD_MODEL_LIMIT = 3;        // surface する上限件数（dream の SEED_LIMIT=3 に倣う）
+
+// get_context（memory_get_context ツール）の件数・分量上限（タスク4.4・R-C3）。
+// LIMITなしの全件読みで1呼び出し69万字ダンプが起きた事故（監査D6）の根治。
+// 上限超過時は黙って切り捨てず、ContextResult.truncated と本文マーカーで必ず明示する。
+export const GET_CONTEXT_MAX_ENTRIES = 200;
+export const GET_CONTEXT_MAX_CHARS = 20000;
+
+/**
+ * カテゴリ1件分のエントリ配列を件数上限・文字数上限の両方でキャップする。
+ * 件数超過を先に切り、それでも整形結果が文字数上限を超えていたら文字境界で切る。
+ * 呼び出し側が「何件中何件を返したか」を明示できるよう総数と返却数を返す
+ * （無言の切り捨て禁止・タスク4.4）。
+ */
+function capContextEntries<T>(
+  entries: T[],
+  maxEntries: number,
+  maxChars: number,
+  formatter: (e: T) => string,
+  joiner: string,
+): { formatted: string; truncated: boolean; totalEntries: number; returnedEntries: number } {
+  const totalEntries = entries.length;
+  const truncatedByCount = totalEntries > maxEntries;
+  const sliced = entries.slice(0, maxEntries);
+  let formatted = sliced.map(formatter).join(joiner);
+  let returnedEntries = sliced.length;
+
+  let truncatedByChars = false;
+  if (formatted.length > maxChars) {
+    truncatedByChars = true;
+    formatted = formatted.slice(0, maxChars);
+    // 文字上限で切った場合、返却件数の厳密なカウントは意味を失う（エントリ途中で切れるため）
+    // ので「上限で切られた」ことだけを truncated フラグで表す。件数表示は上限件数を用いる。
+    returnedEntries = Math.min(returnedEntries, maxEntries);
+  }
+
+  return {
+    formatted,
+    truncated: truncatedByCount || truncatedByChars,
+    totalEntries,
+    returnedEntries,
+  };
+}
 
 // --- ハイブリッド検索: FTS5(trigram)トークナイズ + RRF関連度統合 ---
 //
@@ -259,6 +302,18 @@ export class SQLiteStorage {
     // 既存行へのバックフィルは行わない（NULL＝未計測を保持。migrateV7ToV8 の JSDoc 参照）。
     if (memoriesTableExists) {
       migrateV7ToV8(this.db);
+    }
+
+    // v8→v9: 代謝（統合と昇格）の土台テーブル lineage / principles を新設（テーブル存在チェックで冪等）。
+    // 新規DBは initializeSchema の DDL で既に作成済みのため、本呼び出しは旧世代DBの追加を担う。
+    if (memoriesTableExists) {
+      migrateV8ToV9(this.db, memoryPath ?? dirname(this.dbPath));
+    }
+
+    // v9→v10: 承認制ガードレジストリの土台テーブル guards を新設（テーブル存在チェックで冪等）。
+    // 新規DBは initializeSchema の DDL で既に作成済みのため、本呼び出しは旧世代DBの追加を担う。
+    if (memoriesTableExists) {
+      migrateV9ToV10(this.db, memoryPath ?? dirname(this.dbPath));
     }
 
     // 自動マイグレーション: DB新規作成 AND v1ファイル存在 → マイグレーション実行
@@ -992,12 +1047,22 @@ export class SQLiteStorage {
   getContext(currentProject?: string): ContextResult {
     const configEntries = this.readConfigEntries(currentProject);
     const dedupedConfig = this.deduplicateConfigEntries(configEntries);
-    const configFormatted = dedupedConfig
-      .map((e) => `### ${e.title}\n${e.content}`)
-      .join("\n\n");
+    const configCap = capContextEntries(
+      dedupedConfig,
+      GET_CONTEXT_MAX_ENTRIES,
+      GET_CONTEXT_MAX_CHARS,
+      (e) => `### ${e.title}\n${e.content}`,
+      "\n\n",
+    );
 
     const dontEntries = this.readDontEntries(currentProject);
-    const dontFormatted = dontEntries.map((e) => formatEntry(e)).join("");
+    const dontCap = capContextEntries(
+      dontEntries,
+      GET_CONTEXT_MAX_ENTRIES,
+      GET_CONTEXT_MAX_CHARS,
+      (e) => formatEntry(e),
+      "",
+    );
 
     // 最終読取時刻を刻む: config/dont は SessionStart Hook で毎セッション自動注入される真の読取経路。
     // updated_at/intensity/timestamp には触れない（markLastRead は last_read_at 専用・順位付けに不干渉）。
@@ -1021,14 +1086,58 @@ export class SQLiteStorage {
       })
       .join("\n\n");
 
+    // 上限で切られたことは黙って切り捨てず、応答本文にもマーカー行として明示する
+    // （タスク4.4・design.md禁止フォールバック#6系の類型「無言の切り捨て」を避ける）。
+    let configFormatted = configCap.formatted || "（設定情報なし）";
+    if (configCap.truncated) {
+      configFormatted += `\n\n（上限により省略: 全${configCap.totalEntries}件中${configCap.returnedEntries}件のみ表示）`;
+    }
+    let dontFormatted = dontCap.formatted || "（ルールなし）";
+    if (dontCap.truncated) {
+      dontFormatted += `\n\n（上限により省略: 全${dontCap.totalEntries}件中${dontCap.returnedEntries}件のみ表示）`;
+    }
+
     const result: ContextResult = {
-      config: configFormatted || "（設定情報なし）",
-      dont: dontFormatted || "（ルールなし）",
+      config: configFormatted,
+      dont: dontFormatted,
+      truncated: configCap.truncated || dontCap.truncated,
     };
     if (worldModelFormatted) {
       result.worldModelUpdates = worldModelFormatted;
     }
     return result;
+  }
+
+  /**
+   * 注入ビルダ用の最小索引を取得する（design.md「最小索引」定義・タスク4.2）。
+   * state='active' のタイトル行のみを、直近アクセス上位（last_read_at）を優先しつつ
+   * timestamp降順で上限 limit 件まで返す。本文（content）は含めない
+   * （全文を持ち回るコード経路を作らないため。索引のみ→詳細は memory_get_detail へpull）。
+   */
+  getMinimalIndexEntries(currentProject: string | undefined, limit: number): Array<{
+    id: string;
+    title: string;
+    category: MemoryCategory;
+  }> {
+    let query =
+      "SELECT id, title, category FROM memories WHERE state = 'active'";
+    const params: string[] = [];
+    if (currentProject) {
+      query += " AND (project IS NULL OR project = 'unknown' OR project = ?)";
+      params.push(currentProject);
+    }
+    query += " ORDER BY last_read_at IS NULL, last_read_at DESC, timestamp DESC LIMIT ?";
+
+    const rows = this.db.prepare(query).all(...params, limit) as Array<{
+      id: string;
+      title: string;
+      category: string;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      title: row.title,
+      category: row.category as MemoryCategory,
+    }));
   }
 
   readConfigEntries(currentProject?: string): MemoryEntry[] {
@@ -1073,6 +1182,50 @@ export class SQLiteStorage {
     return rows.filter((row) => row.distance <= threshold);
   }
 
+  /**
+   * カテゴリ限定の近傍探索（統合候補生成用・タスク3.4／R-A6, R-B4）。
+   *
+   * 従来の統合候補生成は全カテゴリKNN（searchVectors）で近傍枠を取り、後段でカテゴリ外を捨てて
+   * いた（近傍枠の浪費）。本メソッドは vec0 KNN を過剰取得したうえで active な対象カテゴリの行だけへ
+   * 事前に絞り込み、L2距離を l2ToCosineSim でコサイン類似度へ変換して meetsSimilarity（型付き・
+   * 尺度混同不可）で閾値判定する。返す限界件数は limit。
+   *
+   * vec0 は追加WHEREを後段適用（KNN後フィルタ）するため、カテゴリで削られる分を見越して
+   * 内部の k を limit より大きく取る（over-fetch）。
+   */
+  searchVectorsByCategory(
+    queryEmbedding: number[],
+    category: string,
+    threshold: Threshold<"cosineSim">,
+    limit: number,
+  ): { id: string; similarity: CosineSimilarity }[] {
+    const buf = this.embeddingToBuffer(queryEmbedding);
+    // カテゴリで削られる分を見越した過剰取得。テーブル総数を上限にクランプする（k>行数はエラー要因を避ける）。
+    const totalVectors = (
+      this.db.prepare("SELECT COUNT(*) as c FROM vectors").get() as { c: number }
+    ).c;
+    if (totalVectors === 0) return [];
+    const overFetchK = Math.min(Math.max(limit * 10, 100), totalVectors);
+
+    const rows = this.db.prepare(
+      `SELECT v.id AS id, v.distance AS distance
+       FROM vectors v
+       JOIN memories m ON m.id = v.id
+       WHERE v.embedding MATCH ? AND v.k = ?
+         AND m.category = ? AND m.state = 'active'`
+    ).all(buf, overFetchK, category) as { id: string; distance: number }[];
+
+    const out: { id: string; similarity: CosineSimilarity }[] = [];
+    for (const row of rows) {
+      const sim = l2ToCosineSim(asL2Distance(row.distance));
+      if (meetsSimilarity(sim, threshold)) {
+        out.push({ id: row.id, similarity: sim });
+      }
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
+
   incrementAccessCount(ids: string[]): void {
     const stmt = this.db.prepare(`
       UPDATE vector_metadata
@@ -1102,6 +1255,222 @@ export class SQLiteStorage {
     for (const id of ids) {
       stmt.run(id);
     }
+  }
+
+  /**
+   * 忘却の実退避: 長期未参照の active 行を archived へ論理退避する（物理削除しない・可逆）。
+   *
+   * active 行のみを対象にし（WHERE state='active'）、archived/deleted 行や last_read_at 等の
+   * 他カラムには一切触れない。呼び出し側（forgetting-sweep.ts applyForgettingSweep）は
+   * computeForgettingSweep が選定した候補 id（config/dont 保護・窓判定済み）だけを渡す。
+   * 物理削除・vectors 削除はしないため archived は get_detail で読め、restoreArchived で戻せる。
+   *
+   * @returns 実際に archived へ遷移させた件数。
+   */
+  archiveMemories(ids: string[]): number {
+    const stmt = this.db.prepare(
+      "UPDATE memories SET state = 'archived' WHERE id = ? AND state = 'active'"
+    );
+
+    let archived = 0;
+    const tx = this.db.transaction((targetIds: string[]) => {
+      for (const id of targetIds) {
+        archived += stmt.run(id).changes;
+      }
+    });
+    tx(ids);
+    return archived;
+  }
+
+  /**
+   * 読み取り専用の判定関数（cap-sweep / forgetting-sweep の compute 系）へ渡す用の生コネクション。
+   * これらの純関数は与えられた Database を SELECT するだけで書き込まない。書き込みは storage の
+   * 名前付きメソッド（archiveMemories 等）に閉じる。
+   */
+  get connection(): Database.Database {
+    return this.db;
+  }
+
+  /**
+   * 忘却で archived にした記憶を active へ戻す（可逆退避の復元経路）。
+   *
+   * 忘却の実退避（forgetting-sweep.ts applyForgettingSweep）は物理削除ではなく
+   * state='archived' への論理退避なので、この API で元に戻せる。archived 行のみを対象にし
+   * （WHERE state='archived'）、他 state（active/deleted）や last_read_at 等には触れない。
+   * memory_stash/memory_restore（stash テーブルの一時退避）とは別系統で、こちらは記憶本体の退避復元。
+   *
+   * @returns 実際に active へ戻した件数。
+   */
+  restoreArchived(ids: string[]): number {
+    const stmt = this.db.prepare(
+      "UPDATE memories SET state = 'active' WHERE id = ? AND state = 'archived'"
+    );
+
+    let restored = 0;
+    for (const id of ids) {
+      const info = stmt.run(id);
+      restored += info.changes;
+    }
+    return restored;
+  }
+
+  /**
+   * 追記型マージ（Phase 3 / R-A6・タスク3.7）。統合結果を「新レコード」として追記し、
+   * 吸収された原本は本文を一切書き換えず deleted へ論理遷移させ、その索引行（vectors /
+   * vector_metadata）を同一トランザクションで除去する。原本行の本文 UPDATE も物理 DELETE も
+   * しない（append-only・非破壊。可逆情報は lineage の merged_from で保全）。
+   *
+   * severance 対策: 破壊 SQL はこの定義ファイル（sqlite.ts=STORAGE_PRIMITIVE_DEF_FILES）内に閉じ、
+   * 呼び出し側は名前付き `.applyAppendOnlyMerge(` のみを使う（CLOSURE_WRITE_PATTERNS 非一致）。
+   *
+   * @returns 追記された新レコード id と、deleted へ遷移した原本 id の一覧。
+   */
+  applyAppendOnlyMerge(input: { merged: SaveParams; sourceIds: string[] }): {
+    mergedId: string;
+    absorbedIds: string[];
+  } {
+    const insertLineageStmt = this.db.prepare(
+      "INSERT INTO lineage (id, child_id, parent_id, relation, created_at) VALUES (?, ?, ?, 'merged_from', datetime('now'))"
+    );
+    const softDeleteStmt = this.db.prepare(
+      "UPDATE memories SET deleted_at = datetime('now'), state = 'deleted' WHERE id = ? AND state = 'active'"
+    );
+    const deleteVec = this.db.prepare("DELETE FROM vectors WHERE id = ?");
+    const deleteMeta = this.db.prepare("DELETE FROM vector_metadata WHERE id = ?");
+
+    const tx = this.db.transaction(() => {
+      // 統合結果は saveInternal で新規 INSERT（原本は一切触らない＝append-only）。
+      const saved = this.saveInternal(input.merged);
+      const mergedId = saved.id;
+      const absorbedIds: string[] = [];
+      for (const sid of input.sourceIds) {
+        // マージ結果の 100% に merged_from 系譜を付与（原本が既に非activeでも来歴は残す）。
+        insertLineageStmt.run(this.generateId(), mergedId, sid);
+        const changed = softDeleteStmt.run(sid).changes;
+        if (changed > 0) {
+          // deleted へ遷移した原本のみ索引行を同一トランザクションで除去（I2維持）。
+          deleteVec.run(sid);
+          deleteMeta.run(sid);
+          absorbedIds.push(sid);
+        }
+      }
+      return { mergedId, absorbedIds };
+    });
+    return tx();
+  }
+
+  /**
+   * supersedes 系譜を1件記録する（Phase 3 / タスク3.8）。newId が oldId を上書き（優先）する関係。
+   * 原本（oldId）の本文・state は変更しない（記録のみ）。表示側で旧版を下げるために使う。
+   */
+  insertSupersedes(newId: string, oldId: string): void {
+    this.db.prepare(
+      "INSERT INTO lineage (id, child_id, parent_id, relation, created_at) VALUES (?, ?, ?, 'supersedes', datetime('now'))"
+    ).run(this.generateId(), newId, oldId);
+  }
+
+  /** child_id の merged_from 親（吸収した原本 id）を新しい順で返す（タスク3.7検証／表示用）。 */
+  getMergeParents(childId: string): string[] {
+    return (
+      this.db.prepare(
+        "SELECT parent_id FROM lineage WHERE child_id = ? AND relation = 'merged_from' ORDER BY created_at, id"
+      ).all(childId) as { parent_id: string }[]
+    ).map((r) => r.parent_id);
+  }
+
+  /**
+   * oldId を supersede している新版 id を返す（無ければ null）。検索結果の旧版抑制に使う（タスク3.8）。
+   * 複数あれば最新の1件（created_at 降順）。
+   */
+  getSupersededBy(oldId: string): string | null {
+    const row = this.db.prepare(
+      "SELECT child_id FROM lineage WHERE parent_id = ? AND relation = 'supersedes' ORDER BY created_at DESC, id DESC LIMIT 1"
+    ).get(oldId) as { child_id: string } | undefined;
+    return row?.child_id ?? null;
+  }
+
+  // ── 確定原則（principles）: 昇格の人間ゲート（Phase 3・タスク3.11／R-A7）──
+  // 起草は state='proposed'（approved_at=NULL）で入り、CLI 承認でのみ 'approved' へ遷移する。
+  // 自動昇格の経路は storage に存在しない（approve は明示的な人間操作のみが呼ぶ）。
+
+  /** 起草済み原則を1件 INSERT する（state='proposed'・approved_at=NULL）。検証は promotion 層で先に行う。 */
+  insertPrinciple(p: {
+    id: string;
+    text: string;
+    originTier: "owner_confirmed" | "agent_observed";
+    evidenceIds: string[];
+    validUntil: string;
+  }): void {
+    this.db.prepare(
+      `INSERT INTO principles (id, text, origin_tier, evidence_ids, valid_until, state, approved_at, created_at)
+       VALUES (?, ?, ?, ?, ?, 'proposed', NULL, datetime('now'))`
+    ).run(p.id, p.text, p.originTier, JSON.stringify(p.evidenceIds), p.validUntil);
+  }
+
+  /** proposed の原則を承認する（approved_at を刻む）。proposed 以外は変更しない。@returns 承認件数(0/1)。 */
+  approvePrinciple(id: string, now: Date = new Date()): number {
+    return this.db.prepare(
+      "UPDATE principles SET state = 'approved', approved_at = ? WHERE id = ? AND state = 'proposed'"
+    ).run(now.toISOString(), id).changes;
+  }
+
+  /** proposed の原則を却下する。proposed 以外は変更しない。@returns 却下件数(0/1)。 */
+  rejectPrinciple(id: string): number {
+    return this.db.prepare(
+      "UPDATE principles SET state = 'rejected' WHERE id = ? AND state = 'proposed'"
+    ).run(id).changes;
+  }
+
+  /**
+   * valid_until が到来した approved 原則を expired へ遷移させる（TTL失効）。
+   * @returns 失効させた件数。
+   */
+  expirePrinciples(now: Date = new Date()): number {
+    return this.db.prepare(
+      "UPDATE principles SET state = 'expired' WHERE state = 'approved' AND valid_until <= ?"
+    ).run(now.toISOString()).changes;
+  }
+
+  /**
+   * 注入対象になれる原則（承認済み・approved_at 非NULL・TTL未到来）を返す。
+   * approved_at が NULL の原則や、未承認/失効/却下は決して返さない（R-A7 の構造遮断）。
+   */
+  getInjectablePrinciples(now: Date = new Date()): {
+    id: string;
+    text: string;
+    originTier: string;
+    validUntil: string;
+  }[] {
+    const rows = this.db.prepare(
+      `SELECT id, text, origin_tier AS originTier, valid_until AS validUntil
+       FROM principles
+       WHERE state = 'approved' AND approved_at IS NOT NULL AND valid_until > ?
+       ORDER BY created_at`
+    ).all(now.toISOString()) as { id: string; text: string; originTier: string; validUntil: string }[];
+    return rows;
+  }
+
+  /** 指定 state（未指定なら全件）の原則を一覧する（CLI 表示用・本文含む）。 */
+  listPrinciples(state?: "proposed" | "approved" | "expired" | "rejected"): {
+    id: string;
+    text: string;
+    originTier: string;
+    state: string;
+    validUntil: string;
+    approvedAt: string | null;
+  }[] {
+    const sql = state
+      ? `SELECT id, text, origin_tier AS originTier, state, valid_until AS validUntil, approved_at AS approvedAt FROM principles WHERE state = ? ORDER BY created_at`
+      : `SELECT id, text, origin_tier AS originTier, state, valid_until AS validUntil, approved_at AS approvedAt FROM principles ORDER BY created_at`;
+    const stmt = this.db.prepare(sql);
+    return (state ? stmt.all(state) : stmt.all()) as {
+      id: string;
+      text: string;
+      originTier: string;
+      state: string;
+      validUntil: string;
+      approvedAt: string | null;
+    }[];
   }
 
   getVectorMetadata(ids: string[]): Map<string, { lastAccessedAt: string; accessCount: number }> {

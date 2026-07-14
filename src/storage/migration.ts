@@ -3,7 +3,7 @@ import { existsSync, readFileSync, readdirSync, mkdirSync, cpSync } from "fs";
 import { join } from "path";
 import { MemoryCategory, MemoryEntry } from "../types.js";
 import { parseMarkdown } from "./parser.js";
-import { getSchemaVersion } from "./schema.js";
+import { getSchemaVersion, LINEAGE_DDL, PRINCIPLES_DDL, GUARDS_DDL } from "./schema.js";
 import { DEFAULT_MODEL } from "../vector/local-embedding.js";
 import { computeContentHash } from "./content-hash.js";
 
@@ -336,7 +336,7 @@ export function migrateV4ToV5(db: Database.Database): void {
  * 反映させてから、そのファイルを同期的にコピーする。コピー失敗（ディレクトリ作成不能等）は
  * そのままthrowし、呼び出し元は後続のALTER TABLEへ進まない（fail-loud、移行中止）。
  */
-function backupBeforeV6Migration(db: Database.Database, memoryPath: string): void {
+function backupBeforeMigration(db: Database.Database, memoryPath: string, prefix: string): void {
   const dbFilePath = db.name;
   if (!dbFilePath || dbFilePath === ":memory:") {
     // インメモリDB（テストの一部）はファイルバックアップ対象外
@@ -348,8 +348,12 @@ function backupBeforeV6Migration(db: Database.Database, memoryPath: string): voi
   const backupDir = join(memoryPath, "migration-backups");
   mkdirSync(backupDir, { recursive: true });
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const backupPath = join(backupDir, `pre-v6-migration-${timestamp}.db`);
+  const backupPath = join(backupDir, `${prefix}-${timestamp}.db`);
   cpSync(dbFilePath, backupPath);
+}
+
+function backupBeforeV6Migration(db: Database.Database, memoryPath: string): void {
+  backupBeforeMigration(db, memoryPath, "pre-v6-migration");
 }
 
 /**
@@ -484,12 +488,13 @@ export function migrateV6ToV7(db: Database.Database): void {
  * 動作:
  *   - last_read_at カラムが既に存在するならスキップ（列存在チェックで冪等・2回目呼び出しはno-op）
  *   - ALTER TABLE ADD COLUMN のみでロスレスなため、v5→v6と異なりバックアップ処理は不要
- *   - migrateV6ToV7（content_hash）と異なり、既存行への一括UPDATEバックフィルを一切行わない。
- *     既存行は last_read_at=NULL のまま残し、「まだ最終読取時刻を計測していない」という欠損を
- *     そのまま保持する（本番DBの大規模UPDATEに伴うロック・所要時間のリスクを回避する）。
- *     忘却 dry-run（forgetting-sweep.ts）が COALESCE(last_read_at, updated_at) で updated_at へ
- *     フォールバックし、NULL 起因の候補を never_tracked として分離集計することで、移行直後の
- *     代理指標と実測の最終読取時刻に基づく候補を区別してレポートに載せる。
+ *   - 列追加直後に、既存の全行の last_read_at を「移行時刻（datetime('now')）」でバックフィルする。
+ *     これをしないと、last_read_at=NULL の既存行は忘却判定で COALESCE(last_read_at, updated_at) の
+ *     updated_at へフォールバックし、updated_at が忘却窓より古い（＝過去に作成され以後は検索でのみ
+ *     参照されてきた）記憶が、初回夜間バッチで一括 archived へ実退避される（rank1・出荷ブロッカー）。
+ *     移行時刻を最終読取時刻の起点に置けば、移行直後は全既存行が忘却窓の内側に入り、一括退避を
+ *     構造的に排除できる。以後の最終読取時刻は真の読取経路（get_detail / memory_search のヒット・
+ *     get_context の自動注入）が実測値で上書きしていく。
  */
 export function migrateV7ToV8(db: Database.Database): void {
   const columnExists = (db.prepare(
@@ -502,10 +507,98 @@ export function migrateV7ToV8(db: Database.Database): void {
 
   const transaction = db.transaction(() => {
     db.exec(`ALTER TABLE memories ADD COLUMN last_read_at TEXT`);
+    // 既存行を移行時刻でバックフィルする（一括退避の構造的排除。JSDoc参照）。
+    db.exec(`UPDATE memories SET last_read_at = datetime('now') WHERE last_read_at IS NULL`);
 
     db.prepare(
       "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, datetime('now'))"
     ).run(8);
+  });
+
+  transaction();
+}
+
+/**
+ * v8→v9 マイグレーション（代謝＝統合と昇格の土台。memory-redesign spec Phase 3）
+ *
+ * 版数注記: design.md/tasks.md は lineage・principles を「v7新設」と規定していたが、実コードでは
+ * v7=content_hash（wave1事故の是正で消費）・v8=last_read_at（忘却実退避で消費）が既に版数を
+ * 占有していた。よって系譜（lineage）と昇格（principles）の土台は migrateV8ToV9 として実装する。
+ * テーブル定義・列・CHECK制約は design.md「lineage（v7新設）」「principles（v7新設）」節の定義に厳密に従う
+ * （版数だけを繰り下げた）。Phase 4 の guards テーブルは玉突きで v10 になる。
+ *
+ * 変更内容（追加のみ・既存テーブルは無改変）:
+ *   - lineage テーブル新設（child_id/parent_id/relation〔merged_from|supersedes〕/created_at）
+ *   - principles テーブル新設（text/origin_tier〔owner_confirmed|agent_observed〕/evidence_ids〔JSON配列NOT NULL〕/
+ *     valid_until〔NOT NULL〕/state〔proposed|approved|expired|rejected〕/approved_at/created_at）
+ *
+ * 動作:
+ *   - 移行開始前に軽量バックアップ（WALチェックポイント+ファイルコピー）を実行する。失敗時は移行中止（fail-loud）
+ *   - lineage テーブルが既に存在するならスキップ（冪等・2回目呼び出しは no-op）
+ *   - 全操作を db.transaction() 内で実行し、失敗時は自動ロールバック
+ *   - 既存テーブルの列変更・行更新・物理削除は一切行わない
+ */
+export function migrateV8ToV9(db: Database.Database, memoryPath: string): void {
+  const lineageExists = (db.prepare(
+    "SELECT COUNT(*) as cnt FROM sqlite_master WHERE type = 'table' AND name = 'lineage'"
+  ).get() as { cnt: number }).cnt > 0;
+
+  if (lineageExists) {
+    return;
+  }
+
+  // バックアップ失敗時はここでthrowし、以降のDDLには進まない（移行中止）。
+  backupBeforeMigration(db, memoryPath, "pre-v9-migration");
+
+  const transaction = db.transaction(() => {
+    db.exec(LINEAGE_DDL);
+    db.exec(PRINCIPLES_DDL);
+
+    db.prepare(
+      "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, datetime('now'))"
+    ).run(9);
+  });
+
+  transaction();
+}
+
+/**
+ * v9→v10 マイグレーション（承認制ガードレジストリの土台。memory-redesign spec Phase 4）。
+ *
+ * 版数注記: design.md/tasks.md は guards テーブルを「v8移行」と規定していたが、実コードでは
+ * v7=content_hash（wave1事故の是正で消費）・v8=last_read_at（忘却実退避で消費）・
+ * v9=lineage/principles（代謝の土台で消費）が既に版数を占有していた。よって承認制ガードの
+ * 土台は migrateV9ToV10 として実装する（テーブル定義・列・CHECK制約は design.md「guards」定義に
+ * 厳密に従い、版数だけを繰り下げた。migrateV8ToV9 の版数注記コメントと同じ作法）。
+ *
+ * 変更内容（追加のみ・既存テーブルは無改変）:
+ *   - guards テーブル新設（id/pattern/source_incident_id/approved_at/expires_at/
+ *     state〔proposed|active|expired|disabled〕/created_at）
+ *
+ * 動作:
+ *   - 移行開始前に軽量バックアップ（WALチェックポイント+ファイルコピー）を実行する。失敗時は移行中止（fail-loud）
+ *   - guards テーブルが既に存在するならスキップ（冪等・2回目呼び出しは no-op）
+ *   - 全操作を db.transaction() 内で実行し、失敗時は自動ロールバック
+ *   - 既存テーブルの列変更・行更新・物理削除は一切行わない
+ */
+export function migrateV9ToV10(db: Database.Database, memoryPath: string): void {
+  const guardsExists = (db.prepare(
+    "SELECT COUNT(*) as cnt FROM sqlite_master WHERE type = 'table' AND name = 'guards'"
+  ).get() as { cnt: number }).cnt > 0;
+
+  if (guardsExists) {
+    return;
+  }
+
+  // バックアップ失敗時はここでthrowし、以降のDDLには進まない（移行中止）。
+  backupBeforeMigration(db, memoryPath, "pre-v10-migration");
+
+  const transaction = db.transaction(() => {
+    db.exec(GUARDS_DDL);
+
+    db.prepare(
+      "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, datetime('now'))"
+    ).run(10);
   });
 
   transaction();

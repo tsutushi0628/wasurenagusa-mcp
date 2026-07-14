@@ -21,6 +21,7 @@ vi.mock("../storage/sqlite.js", () => {
     getVectorMetadata = mockStorageGetVectorMetadata;
     getDetail = mockStorageGetDetail;
     listHighIntensityDonts = mockListHighIntensityDonts;
+    markLastRead = vi.fn();
     close = mockStorageClose;
   }
   return { SQLiteStorage: MockSQLiteStorage };
@@ -60,7 +61,13 @@ vi.mock("../config.js", () => ({
 
 import { handleMemorySearch } from "./search.js";
 
-describe("angerHistory positiveAction フォールバック", () => {
+/**
+ * search応答からangerHistory固定付帯ブロックが廃止されたことを検証する（タスク4.3）。
+ * 業務要件: 検索応答は「検索結果とhintのみ」で構成され、クエリ無関係な高強度dontの
+ * 固定リストを毎回付与しない。listHighIntensityDontsが何を返そうと応答に反映されない
+ * ことを確認する（=呼び出し自体が発生しない設計に根治済みであることの外形検証）。
+ */
+describe("search応答: angerHistory固定付帯の廃止（タスク4.3）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockEmbedInitialize.mockResolvedValue(undefined);
@@ -71,7 +78,7 @@ describe("angerHistory positiveAction フォールバック", () => {
     mockStorageGetVectorMetadata.mockReturnValue(new Map());
   });
 
-  it("angerHistory エントリに positiveAction があれば positiveAction がそのまま返る", async () => {
+  it("高強度dontが存在してもangerHistoryフィールドが応答に含まれない", async () => {
     mockStorageSearchHybrid.mockReturnValue({
       results: [],
       totalCount: 0,
@@ -89,145 +96,29 @@ describe("angerHistory positiveAction フォールバック", () => {
         positiveAction: "データ保存時は完全形を保持し、表示文字数制限はCSS truncationまたはdisplay:noneで表示層に委譲する",
       },
     ]);
-
-    const resultJson = await handleMemorySearch({ query: "テスト" }, "/tmp/project");
-    const result = JSON.parse(resultJson);
-
-    expect(result.angerHistory).toHaveLength(1);
-    expect(result.angerHistory[0].positiveAction).toBe(
-      "データ保存時は完全形を保持し、表示文字数制限はCSS truncationまたはdisplay:noneで表示層に委譲する"
-    );
-  });
-
-  it("angerHistory エントリに positiveAction がなければ title が positiveAction キーでフォールバック返却される", async () => {
-    mockStorageSearchHybrid.mockReturnValue({
-      results: [],
-      totalCount: 0,
-      hint: "",
-    });
-    mockStorageSearchVectors.mockReturnValue([]);
-    mockListHighIntensityDonts.mockReturnValue([
-      {
-        id: "old-dont-id",
-        timestamp: "2026-01-01T00:00:00+09:00",
-        category: "dont",
-        title: "旧タイトル（positiveAction未設定）",
-        tags: [],
-        intensity: 9,
-      },
-    ]);
-
-    const resultJson = await handleMemorySearch({ query: "テスト" }, "/tmp/project");
-    const result = JSON.parse(resultJson);
-
-    expect(result.angerHistory).toHaveLength(1);
-    expect(result.angerHistory[0].title).toBe("旧タイトル（positiveAction未設定）");
-    expect(result.angerHistory[0].positiveAction).toBe("旧タイトル（positiveAction未設定）");
-  });
-
-  it("angerHistory エントリが空なら angerHistory フィールド自体が返らない", async () => {
-    mockStorageSearchHybrid.mockReturnValue({
-      results: [],
-      totalCount: 0,
-      hint: "",
-    });
-    mockStorageSearchVectors.mockReturnValue([]);
-    mockListHighIntensityDonts.mockReturnValue([]);
 
     const resultJson = await handleMemorySearch({ query: "テスト" }, "/tmp/project");
     const result = JSON.parse(resultJson);
 
     expect(result.angerHistory).toBeUndefined();
+    expect(mockListHighIntensityDonts).not.toHaveBeenCalled();
   });
 
-  it("angerHistory 複数エントリで positiveAction の有無が混在してもそれぞれ正しく返る", async () => {
+  it("通常の検索結果とhintのみが返る（応答フィールドがresults/totalCount/hint/fallbackStageのみに限定される）", async () => {
     mockStorageSearchHybrid.mockReturnValue({
-      results: [],
-      totalCount: 0,
+      results: [{ id: "m1", title: "設定A", tags: [] }],
+      totalCount: 1,
       hint: "",
     });
     mockStorageSearchVectors.mockReturnValue([]);
-    mockListHighIntensityDonts.mockReturnValue([
-      {
-        id: "id-with-positive-action",
-        timestamp: "2026-01-01T00:00:00+09:00",
-        category: "dont",
-        title: "タイトルA",
-        tags: [],
-        intensity: 9,
-        positiveAction: "肯定形アクションA",
-      },
-      {
-        id: "id-without-positive-action",
-        timestamp: "2026-01-01T00:00:00+09:00",
-        category: "dont",
-        title: "タイトルB（フォールバック対象）",
-        tags: [],
-        intensity: 8,
-      },
-    ]);
 
-    const resultJson = await handleMemorySearch({ query: "テスト" }, "/tmp/project");
+    const resultJson = await handleMemorySearch({ query: "設定" }, "/tmp/project");
     const result = JSON.parse(resultJson);
 
-    expect(result.angerHistory).toHaveLength(2);
-    expect(result.angerHistory[0].positiveAction).toBe("肯定形アクションA");
-    expect(result.angerHistory[1].positiveAction).toBe("タイトルB（フォールバック対象）");
-  });
-
-  it("angerHistory エントリに scenario / whyCore があれば slimAngerEntry に含まれる", async () => {
-    mockStorageSearchHybrid.mockReturnValue({
-      results: [],
-      totalCount: 0,
-      hint: "",
-    });
-    mockStorageSearchVectors.mockReturnValue([]);
-    mockListHighIntensityDonts.mockReturnValue([
-      {
-        id: "mow30vwu-731c",
-        timestamp: "2026-01-01T00:00:00+09:00",
-        category: "dont",
-        title: "データは完全形保存／表示は表示層で制御",
-        tags: [],
-        intensity: 9,
-        positiveAction: "データ保存時は完全形を保持し、表示文字数制限はCSS truncationまたはdisplay:noneで表示層に委譲する",
-        scenario: "politician-checker パイプラインで公報原文先頭20字を切り捨てて格納",
-        whyCore: "データ層で切り詰めると後で完全形が必要な時に取り戻せない",
-      },
-    ]);
-
-    const resultJson = await handleMemorySearch({ query: "テスト" }, "/tmp/project");
-    const result = JSON.parse(resultJson);
-
-    expect(result.angerHistory).toHaveLength(1);
-    expect(result.angerHistory[0].scenario).toBe("politician-checker パイプラインで公報原文先頭20字を切り捨てて格納");
-    expect(result.angerHistory[0].whyCore).toBe("データ層で切り詰めると後で完全形が必要な時に取り戻せない");
-  });
-
-  it("angerHistory エントリに scenario / whyCore がなければそのフィールドは返らない", async () => {
-    mockStorageSearchHybrid.mockReturnValue({
-      results: [],
-      totalCount: 0,
-      hint: "",
-    });
-    mockStorageSearchVectors.mockReturnValue([]);
-    mockListHighIntensityDonts.mockReturnValue([
-      {
-        id: "old-dont-id",
-        timestamp: "2026-01-01T00:00:00+09:00",
-        category: "dont",
-        title: "旧タイトル",
-        tags: [],
-        intensity: 9,
-        positiveAction: "肯定形アクション",
-      },
-    ]);
-
-    const resultJson = await handleMemorySearch({ query: "テスト" }, "/tmp/project");
-    const result = JSON.parse(resultJson);
-
-    expect(result.angerHistory).toHaveLength(1);
-    expect(result.angerHistory[0].scenario).toBeUndefined();
-    expect(result.angerHistory[0].whyCore).toBeUndefined();
+    const allowedKeys = new Set(["results", "totalCount", "hint", "fallbackStage"]);
+    for (const key of Object.keys(result)) {
+      expect(allowedKeys.has(key)).toBe(true);
+    }
+    expect(result.results).toEqual([{ id: "m1", title: "設定A" }]);
   });
 });

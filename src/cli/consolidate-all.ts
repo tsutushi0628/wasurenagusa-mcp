@@ -10,6 +10,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { writeFile } from "fs/promises";
 import Database from "better-sqlite3";
+import { asL2Distance, cosineSimThreshold, l2ToCosineSim } from "../vector/distance-types.js";
 import { ActiveProjectsTracker } from "../active-projects.js";
 import { SQLiteStorage } from "../storage/sqlite.js";
 import {
@@ -18,8 +19,8 @@ import {
 } from "../consolidator/staleness.js";
 import { computeCapSweep } from "../consolidator/cap-sweep.js";
 import type { CapSweepCandidate } from "../consolidator/cap-sweep.js";
-import { computeForgettingSweep } from "../consolidator/forgetting-sweep.js";
-import type { ForgettingSweepCandidate } from "../consolidator/forgetting-sweep.js";
+import { computeForgettingSweep, applyForgettingSweep } from "../consolidator/forgetting-sweep.js";
+import type { ForgettingSweepCandidate, ForgettingApplyResult } from "../consolidator/forgetting-sweep.js";
 import { runDreamGenerationForProject } from "./dream-worker.js";
 import { config, getMemoryPath } from "../config.js";
 import { isMainModule } from "../utils/cli-entry.js";
@@ -117,7 +118,11 @@ export async function consolidateProject(
       // multilingual-e5-small の距離分布に合わせた再較正値・実運用で要チューニング。
       // 旧モデル(all-MiniLM-L6-v2)の距離分布(最近傍平均0.7)を前提にした0.6は、新モデルの
       // 距離分布(最近傍平均0.32へ収縮)ではほぼ弁別せず過統合の懸念があるため、保守的に絞った。
-      const SIM_DISTANCE_THRESHOLD = 0.25;
+      // 統合候補の類似判定はコサイン類似度の型で行う（尺度取り違え防止・タスク3.4）。
+      // 従来のL2距離閾値0.25と同じ決定境界を保つため cos = 1 - L2^2/2 で換算した
+      // 0.96875 を等価なコサイン類似度閾値として用いる（値そのものの較正はタスク3.6）。
+      // 近傍探索は対象カテゴリ(dont)で事前に絞り込み、近傍枠の浪費を無くす（型付き閾値経由）。
+      const SIM_COSINE_THRESHOLD = cosineSimThreshold(l2ToCosineSim(asL2Distance(0.25)).value);
       const clusters: MemoryEntry[][] = [];
       const assigned = new Set<string>();
       for (const entry of dontEntries) {
@@ -126,7 +131,7 @@ export async function consolidateProject(
         const cluster = [entry];
         assigned.add(entry.id);
         if (eEmb) {
-          const similar = storage.searchVectors(eEmb, SIM_DISTANCE_THRESHOLD, 30);
+          const similar = storage.searchVectorsByCategory(eEmb, "dont", SIM_COSINE_THRESHOLD, 30);
           for (const r of similar) {
             if (assigned.has(r.id) || r.id === entry.id) continue;
             const candidate = dontEntries.find(e => e.id === r.id);
@@ -216,6 +221,49 @@ export async function consolidateProject(
   }
 }
 
+/**
+ * 忘却の実退避（archive）を1プロジェクトへ適用する（可逆・物理削除なし）。
+ *
+ * 夜間の測定関数 consolidateProject は全カラムスナップショット＋破壊メソッドspyの二重ガードで
+ * write-zero を厳守する「測定」の場である。実際に忘れる（state='archived' への遷移）はその不変条件を
+ * 壊さないよう、測定と分離したこの apply 経路に置き、書き込み可能な別接続で行う。
+ * 候補選定・保護種別除外・windowDays<=0 無効化は applyForgettingSweep（forgetting-sweep.ts）が
+ * computeForgettingSweep を流用して単一の真実源に保つ。
+ *
+ * config.forgettingApply=false のときは何もしない（archivedCount=0 を返す）。
+ */
+export function applyForgettingForProject(projectPath: string): ForgettingApplyResult {
+  const memoryPath = getMemoryPath(projectPath);
+  const dbPath = join(memoryPath, config.sqliteFile);
+
+  if (!config.forgettingApply) {
+    return {
+      windowDays: config.forgettingWindowDays,
+      archivedCount: 0,
+      neverTrackedCount: 0,
+      archivedIds: [],
+      perCategory: [],
+      nightlyCap: config.forgettingNightlyCap,
+      capped: false,
+      deferredCount: 0,
+    };
+  }
+
+  const storage = new SQLiteStorage(dbPath);
+  storage.initialize(memoryPath);
+  try {
+    const result = applyForgettingSweep(storage, config.forgettingWindowDays, config.forgettingNightlyCap);
+    log(
+      `[consolidate-all] forgetting apply ${basename(projectPath)}: archived=${result.archivedCount}` +
+        `（うち移行直後の代理指標=${result.neverTrackedCount}・window=${result.windowDays}日・可逆論理退避` +
+        `・cap=${result.nightlyCap}${result.capped ? `・上限到達で翌晩へ持ち越し=${result.deferredCount}件` : ""}）`,
+    );
+    return result;
+  } finally {
+    storage.close();
+  }
+}
+
 async function main(): Promise<void> {
   // 統合はdry-run化されておりLLM呼び出しは行わない（consolidateProjectのJSDoc参照）ため、
   // APIキーの有無に関わらず処理を実行する。夢生成（F3）はAPIキー無し環境ではプロバイダ側で
@@ -235,6 +283,9 @@ async function main(): Promise<void> {
     log(`[consolidate-all] ${project.name}`);
     try {
       await consolidateProject(project.path);
+      // 測定（dry-run レポート）の後に、忘却の実退避を適用する（config.forgettingApply=true のとき）。
+      // 測定と退避を分離することで consolidateProject の write-zero 不変条件を保ったまま実発動する。
+      applyForgettingForProject(project.path);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       log(`[consolidate-all] ERROR (${project.name}): ${message}`);
