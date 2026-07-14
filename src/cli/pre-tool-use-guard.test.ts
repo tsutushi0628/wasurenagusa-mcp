@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, unlinkSync, 
 import { join, resolve } from "path";
 import { tmpdir } from "os";
 import { spawnSync } from "child_process";
+import Database from "better-sqlite3";
 import {
   extractToolInputMessage,
   runPreToolUseGuard,
@@ -11,6 +12,8 @@ import {
 import type { ConsolidatedDont, ConsolidatedPrinciple } from "../types.js";
 import type { BlockCounts } from "./guard.js";
 import { MAX_BLOCK_COUNT, getBlockCountPath } from "./guard.js";
+import { GUARDS_DDL } from "../storage/schema.js";
+import { getKillSwitchPath } from "../guards/kill-switch.js";
 
 function makePrinciple(overrides: Partial<ConsolidatedPrinciple> = {}): ConsolidatedPrinciple {
   return {
@@ -172,12 +175,26 @@ describe("runPreToolUseGuard", () => {
 /**
  * CLI 実機スモークテスト：dist/cli/pre-tool-use-guard.js を spawn して exit code を確認。
  * ビルド済みでないとスキップされる。
+ *
+ * タスク4.5で照合元が consolidated-dont.json から guards テーブルへ差し替わったため、
+ * ここでは memory.db に guards 行を直接INSERTしてCLIへ渡す。既定は dry-run（タスク4.15）
+ * のため、enforce系のテストは WASURENAGUSA_GUARD_MODE=enforce を明示する。
  */
 describe("pre-tool-use-guard CLI (integration)", () => {
   let tmpDir: string;
   let projectRoot: string;
   let memoryPath: string;
   const cliPath = resolve(__dirname, "../../dist/cli/pre-tool-use-guard.js");
+
+  function insertActiveGuard(id: string, pattern: string): void {
+    const db = new Database(join(memoryPath, "memory.db"));
+    db.exec(GUARDS_DDL);
+    db.prepare(
+      `INSERT INTO guards (id, pattern, source_incident_id, approved_at, expires_at, state, created_at)
+       VALUES (?, ?, ?, datetime('now'), '2099-01-01T00:00:00.000Z', 'active', datetime('now'))`,
+    ).run(id, pattern, "incident-smoke");
+    db.close();
+  }
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "wasurenagusa-pre-guard-test-"));
@@ -218,9 +235,7 @@ describe("pre-tool-use-guard CLI (integration)", () => {
       // ビルド前: スキップ
       return;
     }
-    // 空の consolidated-dont.json
-    const consolidated = makeConsolidated([]);
-    writeFileSync(join(memoryPath, "consolidated-dont.json"), JSON.stringify(consolidated));
+    insertActiveGuard("g-smoke-1", "border-left");
 
     const hookInput: PreToolUseHookInput = {
       session_id: "smoke-1",
@@ -233,16 +248,16 @@ describe("pre-tool-use-guard CLI (integration)", () => {
     const proc = spawnSync("node", [cliPath], {
       input: JSON.stringify(hookInput),
       encoding: "utf-8",
+      env: { ...process.env, WASURENAGUSA_GUARD_MODE: "enforce" },
     });
     expect(proc.status).toBe(0);
   });
 
-  it("ビルド成果物が存在すれば、マッチするコマンドで exit 2 を返す", () => {
+  it("ビルド成果物が存在すれば、enforceモードでマッチするコマンドは exit 2 を返す", () => {
     if (!existsSync(cliPath)) {
       return;
     }
-    const consolidated = makeConsolidated([makePrinciple({ guardPattern: "border-left" })]);
-    writeFileSync(join(memoryPath, "consolidated-dont.json"), JSON.stringify(consolidated));
+    insertActiveGuard("g-smoke-2", "border-left");
 
     const hookInput: PreToolUseHookInput = {
       session_id: "smoke-2",
@@ -255,9 +270,10 @@ describe("pre-tool-use-guard CLI (integration)", () => {
     const proc = spawnSync("node", [cliPath], {
       input: JSON.stringify(hookInput),
       encoding: "utf-8",
+      env: { ...process.env, WASURENAGUSA_GUARD_MODE: "enforce" },
     });
     expect(proc.status).toBe(2);
-    expect(proc.stderr).toContain("wasurenagusa-pretool-guard");
+    expect(proc.stderr).toContain("g-smoke-2");
 
     // 可観測性カウンタ（タスク0.9、R-M1）: process.exit(2)前にguard_block_countの
     // 書き込みが完了していること（実サブプロセスでの検証。fire-and-forgetだと
@@ -265,11 +281,75 @@ describe("pre-tool-use-guard CLI (integration)", () => {
     const logsDir = join(memoryPath, "logs");
     expect(existsSync(logsDir)).toBe(true);
     const counterFiles = readdirSync(logsDir).filter(f => f.startsWith("counters-"));
-    expect(counterFiles.length).toBe(1);
-    const counterLines = readFileSync(join(logsDir, counterFiles[0]), "utf-8").trim().split("\n");
-    const blockEntry = counterLines.map(l => JSON.parse(l)).find(e => e.metric === "guard_block_count");
+    expect(counterFiles.length).toBeGreaterThanOrEqual(1);
+    const allLines = counterFiles.flatMap(f => readFileSync(join(logsDir, f), "utf-8").trim().split("\n"));
+    const blockEntry = allLines.map(l => JSON.parse(l)).find(e => e.metric === "guard_block_count");
     expect(blockEntry).toBeDefined();
     expect(blockEntry.value).toBe(1);
+  });
+
+  it("ビルド成果物が存在すれば、既定(dry-run)モードではマッチするコマンドでも exit 0 を返す（本配線未実施）", () => {
+    if (!existsSync(cliPath)) {
+      return;
+    }
+    insertActiveGuard("g-smoke-3", "border-left");
+
+    const hookInput: PreToolUseHookInput = {
+      session_id: "smoke-3",
+      transcript_path: "/tmp/x",
+      cwd: projectRoot,
+      hook_event_name: "PreToolUse",
+      tool_name: "Edit",
+      tool_input: { new_string: "border-left: 4px" },
+    };
+    const proc = spawnSync("node", [cliPath], {
+      input: JSON.stringify(hookInput),
+      encoding: "utf-8",
+    });
+    expect(proc.status).toBe(0);
+  });
+
+  it("ビルド成果物が存在すれば、guardsテーブルが0件（fail-safe）でも exit 0 を返す", () => {
+    if (!existsSync(cliPath)) {
+      return;
+    }
+    const hookInput: PreToolUseHookInput = {
+      session_id: "smoke-4",
+      transcript_path: "/tmp/x",
+      cwd: projectRoot,
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "echo anything" },
+    };
+    const proc = spawnSync("node", [cliPath], {
+      input: JSON.stringify(hookInput),
+      encoding: "utf-8",
+      env: { ...process.env, WASURENAGUSA_GUARD_MODE: "enforce" },
+    });
+    expect(proc.status).toBe(0);
+  });
+
+  it("ビルド成果物が存在すれば、キルスイッチ(guards.kill)存在時は enforce でも exit 0 を返す", () => {
+    if (!existsSync(cliPath)) {
+      return;
+    }
+    insertActiveGuard("g-smoke-5", "border-left");
+    writeFileSync(getKillSwitchPath(memoryPath), "");
+
+    const hookInput: PreToolUseHookInput = {
+      session_id: "smoke-5",
+      transcript_path: "/tmp/x",
+      cwd: projectRoot,
+      hook_event_name: "PreToolUse",
+      tool_name: "Edit",
+      tool_input: { new_string: "border-left: 4px" },
+    };
+    const proc = spawnSync("node", [cliPath], {
+      input: JSON.stringify(hookInput),
+      encoding: "utf-8",
+      env: { ...process.env, WASURENAGUSA_GUARD_MODE: "enforce" },
+    });
+    expect(proc.status).toBe(0);
   });
 
   it("ビルド成果物が存在すれば、壊れた JSON を流しても exit 0 を返す（fail-open）", () => {

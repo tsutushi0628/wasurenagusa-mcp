@@ -1,24 +1,30 @@
 #!/usr/bin/env node
 /**
  * wasurenagusa-pretool-guard CLI
- * PreToolUse Hook用: Claude Code がツールを実行する直前に
- * consolidated-dont.json の guardPattern で tool_input をチェックする。
+ * PreToolUse Hook用: Claude Code がツールを実行する直前に、承認制ガードレジストリ
+ * （guards テーブル。src/guards/registry.ts）の state='active' かつ期限内の規則で
+ * tool_input をチェックする。
  *
- * stdin から PreToolUse hook input JSON（tool_name + tool_input 含む）を受け取り、
- * tool_input を JSON.stringify した文字列を message として既存 guard.ts の
- * checkGuard 純粋関数に渡す。
+ * 照合元は memory-redesign spec Phase 4 タスク4.5 で consolidated-dont.json の
+ * guardPattern 読取から guards テーブルへ差し替え済み（統合キャッシュJSONの
+ * guardPatterns 読み取りは廃止）。旧 checkGuard ベースの純粋関数（runPreToolUseGuard等）
+ * は Stop Hook（guard.ts）向けの後方互換のためファイル内に残すが、本CLIの main() は
+ * 参照しない。
  *
- * - マッチ → exit 2 + stderr に理由（Claude Code がツール実行を中断）
- * - 不一致 → exit 0
- * - 同一セッション・同一パターンで MAX_BLOCK_COUNT(3) 超過 → exit 0（警告のみ）
+ * 評価の最前段はキルスイッチ→サーキットブレーカ→ガード評価の順で固定する（タスク4.6）。
+ * 既定モードは dry-run（タスク4.15。違反を検出してもブロックせずログにのみ記録する）。
+ * settings.json本配線・実ブロック有効化はオーナー承認後の別作業（本タスクでは行わない）。
+ *
+ * - dry-run（既定）: 検出しても常に exit 0（ブロックしない）。履歴のみ記録する
+ * - enforce（WASURENAGUSA_GUARD_MODE=enforce 明示時のみ）: マッチ → exit 2 + stderr
+ * - キルスイッチ有効時・サーキットブレーカ作動時: 評価自体をスキップして exit 0
  *
  * fail-open 設計を厳守: 想定外例外は全て exit 0 でツール実行を通過させる。
  */
 
 import { join } from "path";
-import { readFile } from "fs/promises";
 import { findProjectRoot } from "../utils/projectRoot.js";
-import { getMemoryPath } from "../config.js";
+import { getMemoryPath, config } from "../config.js";
 import {
   checkGuard,
   extractGuardPrinciples,
@@ -29,6 +35,10 @@ import {
 } from "./guard.js";
 import { increment } from "../observability/counters.js";
 import type { ConsolidatedDont } from "../types.js";
+import { isKilled } from "../guards/kill-switch.js";
+import { isCircuitOpen, getRecentHistory, recordEvaluation } from "../guards/circuit-breaker.js";
+import { getActiveGuards, evaluateGuardsWithMode, DEFAULT_GUARD_RUN_MODE, type GuardRunMode } from "../guards/registry.js";
+import { SQLiteStorage } from "../storage/sqlite.js";
 
 export interface PreToolUseHookInput {
   session_id: string;
@@ -80,6 +90,11 @@ export function runPreToolUseGuard(
   return checkGuard(message, guardPrinciples, blockCounts);
 }
 
+function resolveGuardMode(): GuardRunMode {
+  // 既定は dry-run（タスク4.15）。settings.json本配線・本番有効化は別作業のオーナー承認後。
+  return process.env.WASURENAGUSA_GUARD_MODE === "enforce" ? "enforce" : DEFAULT_GUARD_RUN_MODE;
+}
+
 async function main() {
   // stdin から Hook 入力を読み取る（1MB 上限: 巨大入力による OOM 防止）
   const MAX_STDIN_SIZE = 1024 * 1024; // 1MB
@@ -115,50 +130,58 @@ async function main() {
     process.exit(0);
   }
 
-  // consolidated-dont.json を読み込み
-  let consolidated: ConsolidatedDont | null;
+  // 最前段①: 外部キルスイッチ（ストア直下 guards.kill の存在で即時全停止）。
+  if (isKilled(memoryPath)) {
+    process.exit(0);
+  }
+
+  // 最前段②: サーキットブレーカ（直近100回のブロック率>10%で全ガード自動停止＋警報）。
+  const recentHistory = await getRecentHistory(memoryPath);
+  if (isCircuitOpen(recentHistory)) {
+    console.error(
+      "[wasurenagusa-pretool-guard] サーキットブレーカ作動: 直近評価のブロック率が閾値を超過したため全ガードを停止しました。"
+    );
+    process.exit(0);
+  }
+
+  const message = extractToolInputMessage(hookInput);
+  if (!message) {
+    process.exit(0);
+  }
+
+  // guards テーブル（正本）から state='active' かつ期限内の規則を取得して評価する。
+  // 未承認(proposed)・失効(expired)・停止(disabled)は一切評価されない（fail-safe）。
+  let storage: SQLiteStorage | undefined;
   try {
-    const filePath = join(memoryPath, "consolidated-dont.json");
-    const raw = await readFile(filePath, "utf-8");
-    consolidated = JSON.parse(raw) as ConsolidatedDont;
-  } catch {
-    // ファイルなし/読み込み失敗 → fail-open（ガードなし）
-    process.exit(0);
-  }
+    storage = new SQLiteStorage(join(memoryPath, config.sqliteFile));
+    storage.initialize(memoryPath);
+    const activeGuards = getActiveGuards(storage.connection);
+    const mode = resolveGuardMode();
+    const { result, observation } = evaluateGuardsWithMode(message, activeGuards, mode);
 
-  if (!consolidated) {
-    process.exit(0);
-  }
+    // サーキットブレーカ履歴へ記録（検出の実態＝observation.action。dry-runでも記録する）。
+    await recordEvaluation(memoryPath, observation.action);
 
-  // ブロックカウント読み込み
-  const sessionId = hookInput.session_id ?? "unknown";
-  const blockCounts = await readBlockCounts(sessionId);
-
-  // ガード判定実行
-  const result = runPreToolUseGuard(hookInput, blockCounts, consolidated);
-
-  // ガード判定の出力フォーマットを pretool-guard 用に整える
-  const formatStderr = (msg: string): string => {
-    // checkGuard の prefix は "[wasurenagusa-guard]" なので、PreTool 版に置換
-    return msg.replace(/^\[wasurenagusa-guard\]/, "[wasurenagusa-pretool-guard]");
-  };
-
-  if (result.action === "block") {
-    await writeBlockCounts(sessionId, blockCounts);
-    // 可観測性カウンタ（タスク0.9、R-M1）: ガードブロック件数を記録する。
-    // process.exit(2)でプロセスが即終了するため、書き込み完了を待ってから終了する。
-    await increment(memoryPath, "guard_block_count", 1);
-    if (result.message) {
-      process.stderr.write(formatStderr(result.message) + "\n");
+    if (result.action === "block") {
+      await increment(memoryPath, "guard_block_count", 1);
+      if (result.message) {
+        process.stderr.write(result.message + "\n");
+      }
+      storage.close();
+      process.exit(2);
     }
-    process.exit(2);
-  }
 
-  // pass（警告メッセージありの場合）
-  if (result.message) {
-    process.stderr.write(formatStderr(result.message) + "\n");
+    storage.close();
+    process.exit(0);
+  } catch {
+    // guards テーブル未初期化・DB接続失敗等 → fail-open（ガード不能でも通過させる）
+    try {
+      storage?.close();
+    } catch {
+      // クローズ失敗も握りつぶす（fail-open）
+    }
+    process.exit(0);
   }
-  process.exit(0);
 }
 
 main().catch(() => {
