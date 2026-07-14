@@ -1,6 +1,6 @@
 {
   "name": "wasurenagusa-mcp",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "description": "MCP server that gives AI coding agents persistent memory — auto-detect mistakes, consolidate lessons, inject context on session start",
   "funding": {
     "type": "ko-fi",
@@ -19,7 +19,9 @@
     "wasurenagusa-scheduler": "./dist/cli/scheduler-setup.js",
     "wasurenagusa-guard": "./dist/cli/guard.js",
     "wasurenagusa-pretool-guard": "./dist/cli/pre-tool-use-guard.js",
-    "wasurenagusa-dream-worker": "./dist/cli/dream-worker.js"
+    "wasurenagusa-dream-worker": "./dist/cli/dream-worker.js",
+    "wasurenagusa-promote": "./dist/cli/promote.js",
+    "wasurenagusa-guard-approve": "./dist/cli/guard-approve.js"
   },
   "scripts": {
     "build": "tsc && chmod +x dist/cli/*.js dist/index.js",
