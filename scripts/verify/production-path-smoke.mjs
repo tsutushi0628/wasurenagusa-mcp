@@ -27,7 +27,7 @@
 // 終了コード: 全項目PASSで0、1つでもFAILまたは致命エラーで1。
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
@@ -35,6 +35,11 @@ import Database from "better-sqlite3";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..", "..");
 const SERVER_ENTRY = join(REPO_ROOT, "dist", "index.js");
+
+// 版数の単一真実源（package.json）を実行時に読む。実起動したサーバの自己申告版数
+// （MCP serverInfo.version と起動ログ）がこれと一致することを検査する。リテラルの
+// 版数番号を焼き込まない（版数を上げれば検査側も自動追従する）。
+const PKG_VERSION = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf-8")).version;
 
 if (!existsSync(SERVER_ENTRY)) {
   throw new Error(
@@ -62,12 +67,16 @@ console.error(`[production-path-smoke] 検証対象DB: ${DB_PATH}`);
 const proc = spawn("node", [SERVER_ENTRY], { cwd: targetProject, stdio: ["pipe", "pipe", "pipe"] });
 
 const tagEnricherWarnings = [];
+let startupVersionLog = null;
 proc.stderr.on("data", (d) => {
   const text = d.toString();
   process.stderr.write("[server-err] " + text);
   for (const line of text.split("\n")) {
     if (line.includes("tag-enricher")) {
       tagEnricherWarnings.push(line.trim());
+    }
+    if (line.includes("wasurenagusa-mcp server started")) {
+      startupVersionLog = line.trim();
     }
   }
 });
@@ -136,12 +145,22 @@ let fatalError = false;
 let savedEntryId = null;
 
 try {
-  await rpc("initialize", {
+  const initResp = await rpc("initialize", {
     protocolVersion: "2024-11-05",
     capabilities: {},
     clientInfo: { name: "production-path-smoke", version: "0.0.1" },
   });
   notify("notifications/initialized", {});
+
+  // 検査0a: MCP initialize ハンドシェイクの serverInfo.version が package.json と一致するか。
+  // クライアントが受け取る自己申告版数（主バグ面）を dist の実パス解決を通して検証する唯一の砦。
+  // Server コンストラクタ（旧ハードコード版数）が単一真実源を消費している配線を保証する。
+  const reportedVersion = initResp?.result?.serverInfo?.version ?? null;
+  report(
+    "検査0a: MCP serverInfo.version が package.json と一致する",
+    reportedVersion === PKG_VERSION,
+    `serverInfo.version=${reportedVersion} (期待: ${PKG_VERSION})`,
+  );
 
   // 検査1: active横断検索の「件数とヒントの整合」。
   // 件数>0ならヒントは memory_get_detail への誘導、件数0なら「見つかりませんでした」を
@@ -243,6 +262,17 @@ try {
   }
   proc.kill();
 }
+
+// 検査0b: dist 実起動の stderr 起動ログが package.json の版数を名乗るか（起動ログ配線の検証）。
+// serverInfo（検査0a）とは独立した2つ目の自己申告点で、ログ行だけ直し忘れる／逆の配線ミスを捕まえる。
+// 全 RPC 往復を経た後に評価するため、起動ログは既に stderr へ flush 済み。
+report(
+  "検査0b: 起動ログの版数が package.json と一致する",
+  startupVersionLog !== null && startupVersionLog.includes(`(v${PKG_VERSION})`),
+  startupVersionLog !== null
+    ? `起動ログ="${startupVersionLog}" (期待: (v${PKG_VERSION}))`
+    : `起動ログ（"wasurenagusa-mcp server started"）が stderr に観測されなかった`,
+);
 
 if (tagEnricherWarnings.length > 0) {
   console.log(`\n== WARN: tag-enricher関連のエラー行が${tagEnricherWarnings.length}件検出されました（fail-openのため失敗扱いにはしていません） ==`);

@@ -39,6 +39,7 @@ import { ensureOwnerProfileExists } from "./utils/owner-profile.js";
 import { sanitizeErrorMessage } from "./utils/sanitize-error.js";
 import { getMemoryPath } from "./config.js";
 import { startZombieReaper } from "./utils/zombie-reaper.js";
+import { SERVER_VERSION } from "./version.js";
 
 dotenvConfig();
 
@@ -47,7 +48,7 @@ const PROJECT_ROOT = findProjectRoot();
 const server = new Server(
   {
     name: "wasurenagusa-mcp",
-    version: "0.3.1",
+    version: SERVER_VERSION,
   },
   {
     capabilities: {
@@ -158,7 +159,7 @@ async function main() {
   // ゾンビプロセスの自動掃除を開始
   startZombieReaper();
 
-  console.error("wasurenagusa-mcp server started (v0.3.0)");
+  console.error(`wasurenagusa-mcp server started (v${SERVER_VERSION})`);
 }
 
 main().catch((error) => {
