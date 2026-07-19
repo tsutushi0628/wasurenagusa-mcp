@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -161,5 +161,40 @@ describe("migrateV7ToV8", () => {
       }
     ).last_read_at;
     expect(lra).toBe("2026-05-05 12:00:00");
+  });
+
+  it("ALTER実行後にバックフィルUPDATEが失敗しても、列追加ごとロールバックされversionは7のまま（トランザクション原子性）", () => {
+    seedRow(db, "atomic");
+
+    // 実 migrateV7ToV8 を通したまま、ALTER TABLE ADD COLUMN は本物を走らせ、その直後の
+    // バックフィル UPDATE だけを失敗させる（トランザクション途中・ALTER後の中断を注入）。
+    // db.exec は ALTER と UPDATE の両方に使われるため、UPDATE を含む呼び出しのみ throw に差し替える。
+    const originalExec = db.exec.bind(db);
+    const execSpy = vi
+      .spyOn(db, "exec")
+      .mockImplementation(((sql: string) => {
+        if (typeof sql === "string" && sql.includes("UPDATE memories SET last_read_at")) {
+          throw new Error("injected post-ALTER backfill failure");
+        }
+        return originalExec(sql);
+      }) as typeof db.exec);
+
+    try {
+      expect(() => migrateV7ToV8(db)).toThrow(/injected post-ALTER backfill failure/);
+    } finally {
+      execSpy.mockRestore();
+    }
+
+    // (a) ALTER で追加された last_read_at 列がロールバックで消えている（部分適用が残らない）。
+    //     db.transaction のラッパを外すとこの不変条件が崩れる（ALTER が autocommit で残る）ため、
+    //     このアサーションが原子性の実効ガードになる。
+    expect(columnNames(db, "memories")).not.toContain("last_read_at");
+    // (b) schema_version は移行前の 7 のまま（version=8 は書かれていない）。
+    expect(getSchemaVersion(db)).toBe(7);
+    // 種行は無傷で残っている。
+    const row = db.prepare("SELECT content FROM memories WHERE id = 'atomic'").get() as
+      | { content: string }
+      | undefined;
+    expect(row?.content).toBe("content-atomic");
   });
 });

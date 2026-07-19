@@ -295,7 +295,9 @@ export class SQLiteStorage {
       migrateV1ToV2_categoryAndKnowledgeGap(this.db);
     }
 
-    initializeSchema(this.db);
+    // 新規DB（memories が initializeSchema 前に未存在）は initializeSchema 内で version=CURRENT を
+    // 原子確定する。既存DBは昇格させず、後続の migrate 群と末尾整合が CURRENT への到達を担う。
+    initializeSchema(this.db, !memoriesTableExists);
 
     // v2→v3: positive_action カラム追加（カラム存在チェックで冪等）
     if (memoriesTableExists) {
@@ -329,7 +331,8 @@ export class SQLiteStorage {
     }
 
     // v7→v8: 埋め込み非依存の最終読取時刻の土台列(last_read_at)を追加（カラム存在チェックで冪等）。
-    // 既存行へのバックフィルは行わない（NULL＝未計測を保持。migrateV7ToV8 の JSDoc 参照）。
+    // 既存行の last_read_at は移行時刻でバックフィルする（NULL放置だと初回夜間バッチで一括退避に
+    // 至るため。migrateV7ToV8 の JSDoc 参照）。
     if (memoriesTableExists) {
       migrateV7ToV8(this.db);
     }
@@ -344,6 +347,19 @@ export class SQLiteStorage {
     // 新規DBは initializeSchema の DDL で既に作成済みのため、本呼び出しは旧世代DBの追加を担う。
     if (memoriesTableExists) {
       migrateV9ToV10(this.db, memoryPath ?? dirname(this.dbPath));
+    }
+
+    // 末尾整合: 全スキーマ移行が throw せず完了した後にのみ schema_version を CURRENT へ整合させる。
+    // 途中で migrate が throw した場合はここに到達せず、version は最後に成功した migrate の版数
+    // （部分進捗）を正確に保持する。次回起動時、列/テーブル存在ゲートが未完のバックフィルを再実行して
+    // 自己修復する。この整合が必要なのは、既存DBでも initializeSchema の DDL が
+    // CREATE TABLE IF NOT EXISTS で lineage/principles/guards を作ってしまい、後続の migrateV8ToV9・
+    // migrateV9ToV10 が存在ゲートでスキップして版数 9/10 を設定しないため（旧コードはこの穴を先行昇格で
+    // 塞いでいた）。新規DBは既に initializeSchema で CURRENT 済みのため下の条件は false（no-op）。
+    if (getSchemaVersion(this.db) < CURRENT_SCHEMA_VERSION) {
+      this.db.prepare(
+        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, datetime('now'))"
+      ).run(CURRENT_SCHEMA_VERSION);
     }
 
     // 自動マイグレーション: DB新規作成 AND v1ファイル存在 → マイグレーション実行

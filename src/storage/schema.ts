@@ -173,18 +173,45 @@ ${PRINCIPLES_DDL}
 ${GUARDS_DDL}
 `;
 
-export function initializeSchema(db: Database.Database): void {
-  // WALモード有効化
+export function initializeSchema(db: Database.Database, isNewDatabase?: boolean): void {
+  // WALモード有効化（journal_mode=WAL はトランザクション内では設定できないため、常に先に行う）。
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   db.pragma("foreign_keys = ON");
 
-  // DDL実行
+  // 新規/既存の判別。呼び出し元（SQLiteStorage.initialize）は DDL 実行前に算出済みの
+  // シグナル（!memoriesTableExists）を渡す。省略時（initializeSchema を直接呼ぶ既存テスト等）は
+  // DDL 実行前に memories テーブルの有無を自己判定する。
+  const brandNew = isNewDatabase ??
+    (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='memories'").get() === undefined);
+
+  if (brandNew) {
+    // 新規DBは現行スキーマを作り切る＝バックフィル対象が一切ない。DDL・content_hash インデックス・
+    // version=CURRENT を単一トランザクションで原子確定する（版数昇格をバックフィルより前に
+    // 別コミットする経路を構造的に排除する）。
+    const tx = db.transaction(() => {
+      db.exec(DDL);
+      // 新規DBは DDL の CREATE TABLE で content_hash 列込みで作られるため常にインデックスを作成する。
+      db.exec(
+        "CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash, category, project, scope)"
+      );
+      db.prepare(
+        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, datetime('now'))"
+      ).run(CURRENT_SCHEMA_VERSION);
+    });
+    tx();
+    return;
+  }
+
+  // 既存DB（アップグレード経路）。DDL は CREATE TABLE IF NOT EXISTS の冪等適用のみで、
+  // ここでは schema_version を昇格させない（旧コードの「先行昇格」を撤去）。版数昇格は各 migrate が
+  // 自分のトランザクション内で行い、全 migrate 完了後の SQLiteStorage.initialize() 末尾整合が
+  // CURRENT への到達を担う。これによりバックフィルが throw した場合に version が CURRENT を
+  // 騙る（= 偽の「移行完了」マーカー）ことが構造的に起きなくなる。
   db.exec(DDL);
 
-  // content_hash列が存在する場合のみインデックスを作成する（新規DB＝DDLのCREATE TABLEで
-  // content_hash列込みで作られた直後のケース。旧世代DBはここではまだ列が無く、
-  // migrateV6ToV7が列追加とインデックス作成を担う）。
+  // content_hash 列が存在する場合のみインデックスを作成する（旧世代DBはここではまだ列が無く、
+  // migrateV6ToV7 が列追加とインデックス作成を担う）。
   const contentHashColumnExists = (db.prepare(
     "SELECT COUNT(*) as cnt FROM pragma_table_info('memories') WHERE name = 'content_hash'"
   ).get() as { cnt: number }).cnt > 0;
@@ -192,14 +219,6 @@ export function initializeSchema(db: Database.Database): void {
     db.exec(
       "CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash, category, project, scope)"
     );
-  }
-
-  // スキーマバージョン記録（冪等）
-  const currentVersion = getSchemaVersion(db);
-  if (currentVersion < CURRENT_SCHEMA_VERSION) {
-    db.prepare(
-      "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, datetime('now'))"
-    ).run(CURRENT_SCHEMA_VERSION);
   }
 }
 
