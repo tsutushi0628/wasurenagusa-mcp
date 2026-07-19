@@ -10,3 +10,4 @@ export { projectInitTool, handleProjectInit } from "./projectInit.js";
 export { memoryUpdateIntensityTool, handleMemoryUpdateIntensity } from "./updateIntensity.js";
 export { memoryStashTool, handleMemoryStash } from "./stash.js";
 export { memoryRestoreTool, handleMemoryRestore } from "./restore.js";
+export { memoryUnarchiveTool, handleMemoryUnarchive } from "./unarchive.js";

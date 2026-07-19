@@ -33,6 +33,8 @@ import {
   handleMemoryStash,
   memoryRestoreTool,
   handleMemoryRestore,
+  memoryUnarchiveTool,
+  handleMemoryUnarchive,
 } from "./tools/index.js";
 import { findProjectRoot } from "./utils/projectRoot.js";
 import { ensureOwnerProfileExists } from "./utils/owner-profile.js";
@@ -57,7 +59,7 @@ const server = new Server(
   }
 );
 
-// ツール一覧（12ツール: メモリ8 + 自律タスク3 + プロジェクト1）
+// ツール一覧（13ツール: メモリ9 + 自律タスク3 + プロジェクト1）
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
@@ -73,6 +75,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       memoryUpdateIntensityTool,
       memoryStashTool,
       memoryRestoreTool,
+      memoryUnarchiveTool,
     ],
   };
 });
@@ -120,6 +123,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "memory_restore":
         result = handleMemoryRestore(args || {}, PROJECT_ROOT);
+        break;
+      case "memory_unarchive":
+        result = handleMemoryUnarchive(args || {}, PROJECT_ROOT);
         break;
       default:
         throw new Error(`Unknown tool: ${name}`);

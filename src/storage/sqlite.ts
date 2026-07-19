@@ -1306,12 +1306,57 @@ export class SQLiteStorage {
       "UPDATE memories SET state = 'active' WHERE id = ? AND state = 'archived'"
     );
 
+    // archiveMemories と対称に db.transaction で包む。ループ途中で SQLITE_BUSY 等が起きても
+    // 一部だけ active 化して restored カウントを失う（部分適用）ことを防ぐ。シグネチャ ((ids)=>number)
+    // は不変なので既存呼び出し元（forgetting-sweep.test.ts:357）は無影響。
     let restored = 0;
-    for (const id of ids) {
-      const info = stmt.run(id);
-      restored += info.changes;
-    }
+    const tx = this.db.transaction((targetIds: string[]) => {
+      for (const id of targetIds) {
+        restored += stmt.run(id).changes;
+      }
+    });
+    tx(ids);
     return restored;
+  }
+
+  /**
+   * 忘却で archived にした記憶の一覧を返す（アンアーカイブ導線の発見経路・読み取り専用）。
+   *
+   * state='archived' の行のみを対象にし（他 state=active/deleted には触れない）、本文（content）は
+   * 含めず索引情報だけを返す（全文を持ち回るコード経路を作らない設計＝getMinimalIndexEntries と同方針）。
+   * 並び順は最終参照時刻の新しい順→timestamp降順（直近まで使っていた退避を上位に出す）。
+   * 復元は restoreArchived(ids) が担い、こちらは選定のための読み取りだけを行う。
+   */
+  listArchived(limit: number = 100): Array<{
+    id: string;
+    title: string;
+    category: MemoryCategory;
+    project: string | null;
+    timestamp: string;
+    lastReadAt: string | null;
+  }> {
+    const rows = this.db
+      .prepare(
+        "SELECT id, title, category, project, timestamp, last_read_at FROM memories " +
+          "WHERE state = 'archived' " +
+          "ORDER BY last_read_at IS NULL, last_read_at DESC, timestamp DESC LIMIT ?"
+      )
+      .all(limit) as Array<{
+      id: string;
+      title: string;
+      category: string;
+      project: string | null;
+      timestamp: string;
+      last_read_at: string | null;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      title: r.title,
+      category: r.category as MemoryCategory,
+      project: r.project,
+      timestamp: r.timestamp,
+      lastReadAt: r.last_read_at,
+    }));
   }
 
   /**
