@@ -120,18 +120,27 @@ function classifyFtsChar(ch: string): FtsCharClass | null {
   return null;
 }
 
-// クエリをFTS5(trigram)向けの語に分割する。ひらがな連続・カタカナ連続・漢字連続・
-// 英数字連続をそれぞれ1語として拾い（extractTitleTokens系の考え方に倣うが、スクリプト
-// 境界で分割する点が異なる）、3文字未満（trigramでは絶対にマッチしない）の語は捨てる。
-export function tokenizeForFts(query: string): string[] {
-  const tokens: string[] = [];
+interface FtsScriptRun {
+  text: string;
+  cls: FtsCharClass;
+}
+
+// クエリを文字クラス（ひらがな/カタカナ/漢字/英数字）の連続区間runへ分割する。
+// クラス外文字（記号・空白等）はrunの境界にする。tokenizeForFts / extractShortCjkTokens の
+// 両方がこの分割を共有する（run分割の単一真実源。原則9: 重複実装の回避）。
+function splitFtsScriptRuns(query: string): FtsScriptRun[] {
+  const runs: FtsScriptRun[] = [];
   let current = "";
   let currentClass: FtsCharClass | null = null;
+
+  const flush = () => {
+    if (current && currentClass) runs.push({ text: current, cls: currentClass });
+  };
 
   for (const ch of query) {
     const cls = classifyFtsChar(ch);
     if (cls === null) {
-      if (current) tokens.push(current);
+      flush();
       current = "";
       currentClass = null;
       continue;
@@ -139,14 +148,35 @@ export function tokenizeForFts(query: string): string[] {
     if (cls === currentClass) {
       current += ch;
     } else {
-      if (current) tokens.push(current);
+      flush();
       current = ch;
       currentClass = cls;
     }
   }
-  if (current) tokens.push(current);
+  flush();
+  return runs;
+}
 
-  return tokens.filter((t) => t.length >= MIN_FTS_TOKEN_LENGTH);
+// クエリをFTS5(trigram)向けの語に分割する。ひらがな連続・カタカナ連続・漢字連続・
+// 英数字連続をそれぞれ1語として拾い（extractTitleTokens系の考え方に倣うが、スクリプト
+// 境界で分割する点が異なる）、3文字未満（trigramでは絶対にマッチしない）の語は捨てる。
+export function tokenizeForFts(query: string): string[] {
+  return splitFtsScriptRuns(query)
+    .map((r) => r.text)
+    .filter((t) => t.length >= MIN_FTS_TOKEN_LENGTH);
+}
+
+// FTS(trigram)索引で拾えない「2文字の漢字・カタカナ連続」語を抽出する（LIKE救済用）。
+// trigramは3文字未満の語をMATCHで一致させられず（実測: MATCH "決算" は0件、
+// AND段では2文字語が式全体を0件に汚染する）、tokenizeForFtsがこれらを捨てるため、
+// FTS経路が空振りしたときにLIKEで拾い直す取りこぼし語をここで復元する。
+// ひらがな2文字（助詞・活用でノイズ大）と英数字2文字（部分文字列一致でノイズ大）は
+// 意図的に対象外。1文字語もLIKEノイズが強いためバグ焦点の2文字のみを対象にする。
+export function extractShortCjkTokens(query: string): string[] {
+  const short = splitFtsScriptRuns(query)
+    .filter((r) => r.text.length === 2 && (r.cls === "kanji" || r.cls === "katakana"))
+    .map((r) => r.text);
+  return Array.from(new Set(short)); // 同一語の重複LIKEを避ける
 }
 
 // 複数の順位付きIDリスト（各リストは関連度が高い順に並んでいる前提、0始まりindex）を
@@ -486,6 +516,60 @@ export class SQLiteStorage {
 
     this.recordFtsFallbackStage(stage);
     return { ids: result, stage };
+  }
+
+  /**
+   * 短語（2文字CJK）LIKE救済用のWHERE句とパラメータを組む。search()とsearchHybrid()の
+   * 両方から使う（同一のcategory/project/scopeフィルタを適用）。複数語はOR結合（recall優先）。
+   * shortTokensは呼び出し側で空でないことを保証する。2文字漢字/カタカナは%/_等のLIKEメタ文字を
+   * 含み得ない（ASCIIはclassifyFtsCharがrun境界にするため）のでエスケープ不要。SQLは全て
+   * プレースホルダでinjection無し。
+   */
+  private buildShortTokenLikeWhere(
+    shortTokens: string[],
+    params: SearchParams
+  ): { where: string; sqlParams: (string | number)[] } {
+    const perToken = shortTokens
+      .map(() => "(title LIKE ? OR content LIKE ? OR tags LIKE ?)")
+      .join(" OR ");
+    let where = `(${perToken}) AND state = 'active'`;
+    const sqlParams: (string | number)[] = [];
+    for (const t of shortTokens) {
+      const p = `%${t}%`;
+      sqlParams.push(p, p, p);
+    }
+    if (params.category && params.category !== "all") {
+      where += " AND category = ?";
+      sqlParams.push(params.category);
+    }
+    if (params.project) {
+      where += " AND (project IS NULL OR project = 'unknown' OR project = ?)"; // R-A4 AC3
+      sqlParams.push(params.project);
+    }
+    if (params.scope) {
+      where += " AND (scope IS NULL OR scope = 'general' OR scope = ?)";
+      sqlParams.push(params.scope);
+    }
+    return { where, sqlParams };
+  }
+
+  /**
+   * search()用の短語LIKE救済。FTS経路が0件のときだけ呼ぶ想定。LIKEには関連度が無いため
+   * timestamp DESCで決定的に並べる（既存の3文字未満LIKE経路と同一の並び）。
+   */
+  private searchShortTokenLike(
+    shortTokens: string[],
+    params: SearchParams,
+    limit: number
+  ): { rows: MemoryRow[]; countRow: { count: number } } {
+    const { where, sqlParams } = this.buildShortTokenLikeWhere(shortTokens, params);
+    const rows = this.db
+      .prepare(`SELECT * FROM memories WHERE ${where} ORDER BY timestamp DESC LIMIT ?`)
+      .all(...sqlParams, limit) as MemoryRow[];
+    const countRow = this.db
+      .prepare(`SELECT COUNT(*) as count FROM memories WHERE ${where}`)
+      .get(...sqlParams) as { count: number };
+    return { rows, countRow };
   }
 
   private generateTimestamp(): string {
@@ -829,6 +913,18 @@ export class SQLiteStorage {
       rows = staged.rows;
       countRow = staged.countRow;
       fallbackStage = staged.stage;
+
+      // B1-jp2char: FTSが空振りし、かつtrigramで拾えない2文字CJK語があればLIKEで救済する。
+      // FTSが1件でもヒットしたときは触らない（既存の非空結果を1バイトも変えない）。段の概念は
+      // 無いのでfallbackStageはnullのまま（0件時のsearchFtsStagedは既にstage=nullを返す）。
+      if (rows.length === 0) {
+        const shortTokens = extractShortCjkTokens(trimmedQuery);
+        if (shortTokens.length > 0) {
+          const rescued = this.searchShortTokenLike(shortTokens, params, limit);
+          rows = rescued.rows;
+          countRow = rescued.countRow;
+        }
+      }
     } else {
       let query: string;
       const queryParams: (string | number)[] = [];
@@ -915,6 +1011,10 @@ export class SQLiteStorage {
     // 発火したフォールバック段（タスク2.10: ヒットの経路可視化）。FTS候補プールで段がヒットしたときのみ
     // 非null。LIKE経路・空クエリ・ベクトルのみのヒットには段の概念が無いためnullのまま。
     let fallbackStage: FtsFallbackStage | null = null;
+    // B1-additive: FTSキーワードが空振りしたときだけ控える、2文字CJK語のLIKE救済トークン。
+    // ここではRRF入力(ftsRankedIds)へ一切注入しない（字面がベクトル上位の意味一致を押し退ける再発の防止）。
+    // 実際の救済は融合結果を確定させた後に「純加算・並び替えゼロ」で末尾へ追補する（下記ステップ6）。
+    let rescueShortTokens: string[] = [];
     if (params.query && params.query.trim()) {
       const trimmedQ = params.query.trim();
 
@@ -924,6 +1024,15 @@ export class SQLiteStorage {
         const staged = this.searchHybridFtsCandidates(trimmedQ, params);
         ftsRankedIds.push(...staged.ids);
         fallbackStage = staged.stage;
+
+        // B1-additive: FTSキーワード候補が空（=全段0件でstage=null）のときだけ、trigramで拾えない
+        // 2文字CJK語をLIKE救済の手がかりとして控える。ここではRRF入力(ftsRankedIds)を書き換えない。
+        // 旧実装は救済IDを ftsRankedIds へ注入し2つ目のRRF項を与えていたが、ベクトルpoolに既に居るIDが
+        // 加点で意味的強一致（ベクトル上位）を押し退ける「字面が意味に勝つ」再発になるため廃止した。
+        // 実際の救済は融合結果の確定後にnet-newのみ末尾へ純加算する（searchHybrid末尾ステップ6）。
+        if (staged.ids.length === 0) {
+          rescueShortTokens = extractShortCjkTokens(trimmedQ);
+        }
       } else {
         const likePattern = `%${trimmedQ}%`;
         let ftsQuery = `SELECT id FROM memories WHERE (title LIKE ? OR content LIKE ? OR tags LIKE ?) AND state = 'active'`;
@@ -1034,12 +1143,46 @@ export class SQLiteStorage {
       return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
     });
 
-    const limited = scoredEntries.slice(0, limit).map((e) => e.entry);
+    // 6. 融合結果を先に確定する（RRF×時間減衰×利用実績で並んだ、救済を一切含まないハイブリッド順位）。
+    const results = scoredEntries.slice(0, limit).map((e) => e.entry);
+
+    // B1-additive ハイブリッド救済（純加算・並び替えゼロ）:
+    //   FTSキーワードが空振りし2文字CJK語だけが手がかりのとき、確定済みの融合結果を1件も動かさずに、
+    //   融合結果に含まれないnet-new記憶だけを timestamp DESC で末尾の空きスロットへ追補する。
+    //   (a) 融合に既に居るID（scoredEntries全体＝ベクトルpool上位の意味一致を含む）には触れない
+    //       ＝2つ目のRRF項を与えず順位も動かさない。computeRrfScores の入力(ftsRankedIds)も書き換えない。
+    //   (b) 追補は limit までの空きスロットに限る（顔ぶれの上限件数を増やさない）。
+    let rescuedNetNewCount = 0;
+    if (rescueShortTokens.length > 0 && results.length < limit) {
+      // 融合に登場した全ID（top-limitに残らなかった下位候補も含む）。net-new判定の母集合にすることで、
+      // ベクトルpool内で下位に沈んだ救済語一致IDを末尾へ繰り上げてしまう（=順位を動かす）ことを防ぐ。
+      const fusionIds = new Set(scoredEntries.map((e) => e.entry.id));
+      const { where, sqlParams } = this.buildShortTokenLikeWhere(rescueShortTokens, params);
+      const rescuedRows = this.db
+        .prepare(`SELECT * FROM memories WHERE ${where} ORDER BY timestamp DESC LIMIT ?`)
+        .all(...sqlParams, SEARCH_CANDIDATE_POOL) as MemoryRow[];
+      for (const row of rescuedRows) {
+        if (results.length >= limit) break;
+        if (fusionIds.has(row.id)) continue; // 融合結果に既に在るIDは不動（追補しない・順位を動かさない）
+        results.push({
+          id: row.id,
+          timestamp: row.timestamp,
+          category: row.category as MemoryCategory,
+          title: row.title,
+          tags: JSON.parse(row.tags),
+          project: row.project ?? undefined,
+          scope: row.scope ?? undefined,
+          intensity: row.intensity ?? undefined,
+        });
+        fusionIds.add(row.id); // 同一救済行の二重追補を防ぐ（防御的・LIKEは重複行を返さない前提）
+        rescuedNetNewCount++;
+      }
+    }
 
     return {
-      results: limited,
-      totalCount: scoredEntries.length,
-      hint: buildSearchHint(limited.length, fallbackStage),
+      results,
+      totalCount: scoredEntries.length + rescuedNetNewCount,
+      hint: buildSearchHint(results.length, fallbackStage),
       fallbackStage: fallbackStage ?? undefined,
     };
   }
