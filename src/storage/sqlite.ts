@@ -182,14 +182,25 @@ export function extractShortCjkTokens(query: string): string[] {
 // 複数の順位付きIDリスト（各リストは関連度が高い順に並んでいる前提、0始まりindex）を
 // RRF (Reciprocal Rank Fusion) で統合する。片方のリストにしか出現しないIDは、出現した
 // リストの項のみ加算する（もう片方を満点扱いしたり0点扱いしたりしない）。
-export function computeRrfScores(rankedLists: string[][]): Map<string, number> {
+//
+// 較正シーム（B2/B4評価土台・後方互換の加算）: 第2引数 k（RRF定数）と第3引数 listWeights
+// （リスト別の段重み）を任意で受ける。既定は k=RRF_K・重み無し（各リスト重み1.0）で、
+// 省略時は従来と完全同一の寄与式 1/(RRF_K+position) を計算する（1.0 の乗算は IEEE754 で恒等）。
+// これにより本番 searchHybrid は tuning 未指定時にバイト同一の順位を保ちつつ、評価ハーネスは
+// 融合式を複製せず同一コードを param 差だけで A/B できる（単一真実源の維持）。
+export function computeRrfScores(
+  rankedLists: string[][],
+  k: number = RRF_K,
+  listWeights?: number[],
+): Map<string, number> {
   const scores = new Map<string, number>();
-  for (const list of rankedLists) {
+  rankedLists.forEach((list, listIndex) => {
+    const weight = listWeights?.[listIndex] ?? 1;
     list.forEach((id, position) => {
-      const contribution = 1 / (RRF_K + position);
+      const contribution = weight * (1 / (k + position));
       scores.set(id, (scores.get(id) ?? 0) + contribution);
     });
-  }
+  });
   return scores;
 }
 
@@ -247,6 +258,28 @@ export function computeAgeDays(timestamp: string, now: number = Date.now()): num
 
 export function computeTimeDecay(ageDays: number, halfLifeDays: number = TIME_DECAY_HALF_LIFE_DAYS): number {
   return Math.pow(0.5, ageDays / halfLifeDays);
+}
+
+/**
+ * 融合・減衰の較正シーム（B2/B4評価土台・後方互換の加算）。
+ *
+ * searchHybrid に任意で渡す調整パラメータ。全フィールド省略（または引数自体の省略）で
+ * 本番定数（RRF_K=60・TIME_DECAY_HALF_LIFE_DAYS=90・SEARCH_CANDIDATE_POOL=50・重み無し・
+ * now=各行 Date.now()）に解決し、シーム導入前とバイト同一の順位を返す（本番読取経路
+ * handleMemorySearch は tuning を渡さないため挙動不変）。評価ハーネス（eval-order.ts）だけが
+ * この口から A/B 変種を融合式の複製なしに走らせる。
+ */
+export interface SearchFusionTuning {
+  /** RRF定数（既定 RRF_K=60）。値が大きいほど順位差が潰れる。 */
+  rrfK?: number;
+  /** 時間減衰の半減期日数（既定 TIME_DECAY_HALF_LIFE_DAYS=90）。 */
+  halfLifeDays?: number;
+  /** RRFのリスト別段重み [FTSリスト, ベクトルリスト]（既定 各1.0=対等）。 */
+  listWeights?: number[];
+  /** 候補プールサイズ（既定 SEARCH_CANDIDATE_POOL=50）。B1短語救済のLIMITは対象外（定数のまま）。 */
+  poolSize?: number;
+  /** 現在時刻の注入（決定論テスト用）。未指定時は従来どおり各行で Date.now() を都度サンプルする。 */
+  now?: number;
 }
 
 // dedup（content-hash一致）ヒット時の付帯情報マージ用ヘルパー。
@@ -501,7 +534,8 @@ export class SQLiteStorage {
    */
   private searchHybridFtsCandidates(
     trimmedQuery: string,
-    params: SearchParams
+    params: SearchParams,
+    pool: number = SEARCH_CANDIDATE_POOL
   ): { ids: string[]; stage: FtsFallbackStage | null } {
     let filterClause = "";
     const filterParams: (string | number)[] = [];
@@ -524,7 +558,7 @@ export class SQLiteStorage {
         const sql =
           `SELECT m.id FROM memories m INNER JOIN memories_fts fts ON m.rowid = fts.rowid ` +
           `WHERE memories_fts MATCH ? AND m.state = 'active'${filterClause} ORDER BY fts.rank LIMIT ?`;
-        const rows = this.db.prepare(sql).all(matchExpr, ...filterParams, SEARCH_CANDIDATE_POOL) as { id: string }[];
+        const rows = this.db.prepare(sql).all(matchExpr, ...filterParams, pool) as { id: string }[];
         return rows.map((r) => r.id);
       },
       (ids) => ids.length > 0
@@ -1012,8 +1046,15 @@ export class SQLiteStorage {
 
   // --- ハイブリッド検索 (TASK-015、関連度RRF統合) ---
 
-  searchHybrid(params: SearchParams, queryEmbedding: number[]): SearchResult {
+  searchHybrid(params: SearchParams, queryEmbedding: number[], tuning?: SearchFusionTuning): SearchResult {
     const limit = params.limit ?? config.defaultSearchLimit;
+
+    // 較正シーム（B2/B4評価土台）: tuning 未指定時は本番定数へ解決し、シーム導入前とバイト同一の
+    // 順位を返す（本番読取経路は tuning を渡さない）。now だけは「未指定なら各行 Date.now() を都度
+    // サンプル」する従来挙動を保つため下のスコアリングループ内で解決する（tuning?.now ?? Date.now()）。
+    const rrfK = tuning?.rrfK ?? RRF_K;
+    const halfLife = tuning?.halfLifeDays ?? TIME_DECAY_HALF_LIFE_DAYS;
+    const pool = tuning?.poolSize ?? SEARCH_CANDIDATE_POOL;
 
     // R-B3（自己検索性）判定に使う正規化クエリ。FTS候補生成用のtrimmedQとは別に、
     // スコアリングループ（時間減衰の自己一致例外）から参照できるメソッドスコープ変数として持つ。
@@ -1037,7 +1078,7 @@ export class SQLiteStorage {
       // 可視性マトリクス: 検索(ハイブリッド)はactiveのみ可（I1）。
       if (trimmedQ.length >= 3) {
         // FTS経路は段階フォールバック（フレーズ→AND→OR）で候補を取得する（design.md Phase2定義1）。
-        const staged = this.searchHybridFtsCandidates(trimmedQ, params);
+        const staged = this.searchHybridFtsCandidates(trimmedQ, params, pool);
         ftsRankedIds.push(...staged.ids);
         fallbackStage = staged.stage;
 
@@ -1067,7 +1108,7 @@ export class SQLiteStorage {
           ftsParams.push(params.scope);
         }
         ftsQuery += " ORDER BY timestamp DESC LIMIT ?";
-        ftsParams.push(SEARCH_CANDIDATE_POOL);
+        ftsParams.push(pool);
 
         const ftsRows = this.db.prepare(ftsQuery).all(...ftsParams) as { id: string }[];
         for (const row of ftsRows) {
@@ -1077,14 +1118,14 @@ export class SQLiteStorage {
     }
 
     // 2. ベクトルKNN候補プール（distance昇順=関連度降順で返る。既存のsearchVectorsをそのまま使う）
-    const vectorResults = this.searchVectors(queryEmbedding, 999, SEARCH_CANDIDATE_POOL);
+    const vectorResults = this.searchVectors(queryEmbedding, 999, pool);
     const vectorRankedIds = vectorResults.map((r) => r.id);
 
     // 3. RRF (Reciprocal Rank Fusion) で2つの順位リストをスコア付き統合する。
     //    従来はIDをSetでUNIONして関連度情報を全て捨て、最後にtimestamp DESCで
     //    並べ直していた（=関連度無視の時系列順）。ここでは順位情報を保持したまま
     //    合成スコアを持たせ、そのスコア降順を最終順位にする。
-    const rrfScores = computeRrfScores([ftsRankedIds, vectorRankedIds]);
+    const rrfScores = computeRrfScores([ftsRankedIds, vectorRankedIds], rrfK, tuning?.listWeights);
 
     // 4. project/scope/categoryフィルタ + エントリ取得（可視性マトリクス: 検索はactiveのみ可。
     //    FTS経路はプール取得時点で絞り込み済みだが、ベクトル側は対象外のためここで最終確認する）
@@ -1120,7 +1161,7 @@ export class SQLiteStorage {
       }
 
       const tags = JSON.parse(row.tags) as string[];
-      const ageDays = computeAgeDays(row.timestamp);
+      const ageDays = computeAgeDays(row.timestamp, tuning?.now ?? Date.now());
       // R-B3（自己検索性）保証: クエリが記憶本文と完全一致する自己検索では、経年減衰で自己が
       // 沈まないよう当該候補のみ減衰を無効化する（timeDecay=1.0）。発火条件は「クエリ＝本文
       // （正規化後）」に限定されるため、日常検索（クエリ≠本文＝言い換え・キーワード）には一切
@@ -1128,7 +1169,7 @@ export class SQLiteStorage {
       // @10=0.784で減衰適用時とバイト一致を実測）。発火するのは自己とその完全重複のみで、他
       // エントリの自己検索性を新たに損なわない（PT-04全生存9,596件でunique-body本文の新規失敗0を実測）。
       const isExactSelfMatch = normalizedQuery.length > 0 && row.content.trim() === normalizedQuery;
-      const timeDecay = isExactSelfMatch ? 1.0 : computeTimeDecay(ageDays);
+      const timeDecay = isExactSelfMatch ? 1.0 : computeTimeDecay(ageDays, halfLife);
       const meta = vectorMetadataMap.get(id);
       const finalScore = SearchScorer.score({
         vectorSimilarity: rrfScore * timeDecay,

@@ -247,7 +247,16 @@ export function evaluateRecall(summary: EvalSummary, baselineRecall5: number): C
   return {
     check: "recall",
     result: summary.recallAt5 > baselineRecall5 ? "PASS" : "FAIL",
-    measured: { recallAt1: summary.recallAt1, recallAt5: summary.recallAt5, recallAt10: summary.recallAt10, hitQueries: summary.hitQueries },
+    // rankPrecision/mrr は本番順序から算出した記録層（合否はrecall@5のみ・不変条件I4）。summarizeOutcomes
+    // に orderOutcomes が渡ったときのみ埋まる。undefined でも measured に載せて可観測にする。
+    measured: {
+      recallAt1: summary.recallAt1,
+      recallAt5: summary.recallAt5,
+      recallAt10: summary.recallAt10,
+      hitQueries: summary.hitQueries,
+      rankPrecision: summary.rankPrecision,
+      mrr: summary.mrr,
+    },
     threshold: { recallAt5MustExceed: baselineRecall5 },
   };
 }
@@ -535,7 +544,8 @@ export async function runG2(options: G2Options): Promise<G2Output> {
   let currentRecall5 = 0;
   try {
     const run = await runGoldenEval(storeDir, options.goldenPath);
-    const summary = summarizeOutcomes(run.outcomes);
+    // 記録層(rankPrecision/MRR)は本番順序 run.orderOutcomes から併記する（recall合否は不変・不変条件I4）。
+    const summary = summarizeOutcomes(run.outcomes, run.orderOutcomes);
     currentRecall5 = summary.recallAt5;
     recallCheck = evaluateRecall(summary, options.baselineRecall5);
     correctZeroCheck = evaluateCorrectZero(summary);

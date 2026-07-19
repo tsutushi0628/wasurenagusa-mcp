@@ -1,0 +1,99 @@
+{
+  "kind": "order-eval",
+  "tuning": null,
+  "limit": 50,
+  "ndcgK": 10,
+  "summary": {
+    "hitQueries": 37,
+    "recallAt1": 0.486,
+    "recallAt5": 0.73,
+    "recallAt10": 0.784,
+    "mrr": 0.61,
+    "ndcgAt10": 0.542,
+    "rankPrecision": 0.73,
+    "perQueryBestRank": {
+      "GQ-001": 1,
+      "GQ-002": 2,
+      "GQ-003": 2,
+      "GQ-004": 2,
+      "GQ-005": 1,
+      "GQ-006": 9,
+      "GQ-007": 6,
+      "GQ-008": 1,
+      "GQ-009": 1,
+      "GQ-010": 35,
+      "GQ-011": 1,
+      "GQ-012": 1,
+      "GQ-013": 2,
+      "GQ-014": 2,
+      "GQ-015": 1,
+      "GQ-016": 1,
+      "GQ-017": 1,
+      "GQ-018": 12,
+      "GQ-019": 1,
+      "GQ-020": 18,
+      "GQ-021": 1,
+      "GQ-022": 1,
+      "GQ-023": 3,
+      "GQ-024": 4,
+      "GQ-025": 1,
+      "GQ-026": 1,
+      "GQ-027": 1,
+      "GQ-028": 1,
+      "GQ-029": 47,
+      "GQ-030": 24,
+      "GQ-031": 12,
+      "GQ-032": 2,
+      "GQ-033": 14,
+      "GQ-034": 1,
+      "GQ-035": 14,
+      "GQ-036": 4,
+      "GQ-037": 1
+    },
+    "zeroQueries": 15,
+    "zeroCorrectCount": 0,
+    "zeroCorrectRate": 0,
+    "byClass": {
+      "keyword": {
+        "total": 7,
+        "hitAt5": 5,
+        "rankPrecisionHit": 5,
+        "zeroCorrect": 0
+      },
+      "natural": {
+        "total": 19,
+        "hitAt5": 15,
+        "rankPrecisionHit": 15,
+        "zeroCorrect": 0
+      },
+      "cross-project": {
+        "total": 14,
+        "hitAt5": 7,
+        "rankPrecisionHit": 7,
+        "zeroCorrect": 0
+      },
+      "state-probe": {
+        "total": 12,
+        "hitAt5": 0,
+        "rankPrecisionHit": 0,
+        "zeroCorrect": 0
+      }
+    }
+  },
+  "integrity": {
+    "check": "eval-run-integrity",
+    "result": "PASS",
+    "measured": {
+      "golden": 52,
+      "processed": 52,
+      "failed": 0
+    },
+    "threshold": {
+      "failedMax": 0,
+      "processedMustEqualGolden": true
+    }
+  },
+  "goldenSha256": "c36b5ce3f8235b1d6545cf584fa9db5c691aec877e08fd6c024638c1c5314426",
+  "snapshotSha256": "3b382c5ab5df13a28932e8d405b80a2ac0184085fddd7cecae535c693f69c95c",
+  "generatedAt": "2026-07-19T16:36:56.119Z"
+}

@@ -539,4 +539,101 @@ describe("SQLiteStorage - searchHybridの時間減衰（業務意図: 同程度�
     // 例外を外すと減衰0.5^(400/90)≈0.046で古が沈み、decoyが上位に来てこのアサーションは落ちる。
     expect(ids.indexOf(oldEntry.id)).toBeLessThan(ids.indexOf(decoy.id));
   });
+
+  // ----------------------------------------------------------
+  // 順序検証テスト T1/T2/T3b（design-b2-b4-ranking.md §2.1）。
+  // すべて本番 searchHybrid(...).results の実順位に対して断定する（I1）。
+  // 現行の本番係数（RRF_K=60・半減期90日）のまま PASS し、現在の挙動をピン留めする（I4）。
+  // ----------------------------------------------------------
+
+  it("T1 業務意図: 関連度が同点（同一ベクトル）なら、新しい記憶が時間減衰により上位に来る", () => {
+    // 既存L469は「ベクトル僅差」ケース。T1は同一ベクトル＝関連度完全同点にして、
+    // 純粋に時間減衰だけが順位を分けることをピンする。
+    const db = (storage as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } } }).db;
+    const sameVec = makeVector({ 0: 1.0 });
+
+    // 古い方を先に保存（同一距離の候補列で古い方がベクトル順位上位＝RRF基底で不利にならない側に
+    // なるよう構成し、減衰が無ければ古い方が勝つ＝減衰の効きをピンする関係にする）。
+    const oldEntry = storage.save({ category: "config", title: "同点・古い", content: "T1関連度同点の古い側の合成本文" });
+    storage.upsertVector(oldEntry.id, sameVec);
+    const newEntry = storage.save({ category: "config", title: "同点・新しい", content: "T1関連度同点の新しい側の合成本文" });
+    storage.upsertVector(newEntry.id, sameVec);
+
+    const oldTs = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString();
+    const newTs = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare("UPDATE memories SET timestamp = ? WHERE id = ?").run(oldTs, oldEntry.id);
+    db.prepare("UPDATE memories SET timestamp = ? WHERE id = ?").run(newTs, newEntry.id);
+
+    // FTSに一切当たらない語でRRF寄与をベクトルのみにする。
+    const result = storage.searchHybrid({ query: "zzqqxx7", limit: 10 }, sameVec);
+    const ids = result.results.map((r) => r.id);
+
+    // 関連度が同点でも、180日 vs 1日の減衰差で新しい方が上位（timeDecayを1.0固定に改悪すると崩れる）。
+    expect(ids.indexOf(newEntry.id)).toBeLessThan(ids.indexOf(oldEntry.id));
+  });
+
+  it("T2 業務意図: 半減期(90日)境界を挟んで、二段一致の古い記憶と単段の新しい記憶の順位が入れ替わる", () => {
+    // 古い方に「FTS+ベクトルの二段一致」でRRF基底の2倍優位(2/60)を与え、新しい方は
+    // 「ベクトル単段」(1/61)にする。古い方のageを境界(≈93日)の両側に振ると順位が反転する
+    // ＝半減期Hが順位交差の位置を実際に決めていることをピンする（減衰を無効化すると常に古が勝つ）。
+    const FTS_ANCHOR = "crossoveranchor";
+    const QUERY_VEC = makeVector({ 0: 1.0 });
+    const V_CLOSE = makeVector({ 0: 1.0 });      // ベクトル順位0
+    const V_MID = makeVector({ 0: 0.8, 1: 0.6 }); // ベクトル順位1
+
+    // 指定ageで1シナリオを組み、二段一致の古い記憶が単段の新しい記憶より上位かを返す。
+    function oldOnTopAtAge(oldAgeDays: number): boolean {
+      const dir = mkdtempSync(join(tmpdir(), "wasurenagusa-t2-"));
+      const s = new SQLiteStorage(join(dir, "test.db"));
+      s.initialize();
+      try {
+        const db = (s as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } } }).db;
+        const oldEntry = s.save({ category: "config", title: "二段一致の古い記憶", content: `T2境界検証の二段一致本文 ${FTS_ANCHOR} を含む` });
+        s.upsertVector(oldEntry.id, V_CLOSE);
+        const newEntry = s.save({ category: "config", title: "単段の新しい記憶", content: "T2境界検証の単段ベクトルのみ本文" });
+        s.upsertVector(newEntry.id, V_MID);
+
+        const oldTs = new Date(Date.now() - oldAgeDays * 24 * 60 * 60 * 1000).toISOString();
+        const newTs = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString();
+        db.prepare("UPDATE memories SET timestamp = ? WHERE id = ?").run(oldTs, oldEntry.id);
+        db.prepare("UPDATE memories SET timestamp = ? WHERE id = ?").run(newTs, newEntry.id);
+
+        const ids = s.searchHybrid({ query: FTS_ANCHOR, limit: 10 }, QUERY_VEC).results.map((r) => r.id);
+        return ids.indexOf(oldEntry.id) < ids.indexOf(newEntry.id);
+      } finally {
+        s.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    // 交差は約93日。境界の下（60日）では二段一致の古い記憶が勝ち、上（120日）では新しい記憶が勝つ。
+    expect(oldOnTopAtAge(60)).toBe(true);
+    expect(oldOnTopAtAge(120)).toBe(false);
+  });
+
+  it("T3b 業務意図: クエリが本文と末尾1トークンだけ違うと自己検索例外(=1.0)は発火せず、減衰が効いて古い記憶が沈む", () => {
+    // L506（完全一致で例外が効く）の鏡像。完全一致条件 content.trim()===normalizedQuery が
+    // falseになる最小差分（末尾に別トークンを付す）では例外が発火せず、400日減衰で古が沈むことを
+    // ピンする。例外を startsWith/部分一致に緩めると古が沈まずこのアサーションが落ちる＝スコープ拡大の抑止。
+    const db = (storage as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } } }).db;
+    const selfContent = "selfmatch scope boundary anchor body";
+
+    const oldEntry = storage.save({ category: "config", title: "古い自己検索対象", content: selfContent });
+    storage.upsertVector(oldEntry.id, makeVector({ 0: 1.0 }));
+
+    const decoy = storage.save({ category: "config", title: "新しい別内容の競合", content: "自己検索例外スコープ検証の非一致な新しい合成本文" });
+    storage.upsertVector(decoy.id, makeVector({ 0: 0.8, 1: 0.6 }));
+
+    const oldTs = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000).toISOString();
+    const newTs = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare("UPDATE memories SET timestamp = ? WHERE id = ?").run(oldTs, oldEntry.id);
+    db.prepare("UPDATE memories SET timestamp = ? WHERE id = ?").run(newTs, decoy.id);
+
+    // クエリ = 本文 + 末尾に別トークン。完全一致でないため自己検索例外は発火しない。
+    const result = storage.searchHybrid({ query: `${selfContent} suffix`, limit: 10 }, makeVector({ 0: 1.0 }));
+    const ids = result.results.map((r) => r.id);
+
+    // 例外が効かないので400日減衰(0.5^(400/90)≈0.046)で古が沈み、1日物のdecoyが上位に来る。
+    expect(ids.indexOf(decoy.id)).toBeLessThan(ids.indexOf(oldEntry.id));
+  });
 });

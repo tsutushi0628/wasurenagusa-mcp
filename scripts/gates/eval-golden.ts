@@ -45,6 +45,13 @@ import { SearchScorer } from "../../src/vector/search-scorer.js";
 import { parseWeightedTags } from "../../src/vector/weighted-tag.js";
 import { config, getModelsDir } from "../../src/config.js";
 import type { MemoryIndexEntry } from "../../src/types.js";
+// 順序メトリクス（rankPrecision/MRR）は本番順序 searchHybrid().results から算出する（不変条件I1）。
+// legacy rankLikeProduction 再ソートには載せない。純関数は葉モジュール eval-shared.ts から再利用し
+// 複製しない（eval-order.ts との相互import＝循環を断つため、共有純関数は eval-shared に集約）。
+import { bestExpectedRank, evaluateOrderOutcome, summarizeOrder, type OrderOutcome, type GoldenQuery } from "./eval-shared.js";
+// GoldenQuery / bestExpectedRank は eval-shared.ts が正本。既存の import 元（本ファイル）を保つため再輸出する。
+export type { GoldenQuery };
+export { bestExpectedRank } from "./eval-shared.js";
 
 /** 評価実行のlimit（recall@10まで読むため）。この値の変更は評価定義の変更＝比較原点の無効化。 */
 export const EVAL_LIMIT = 10;
@@ -52,17 +59,6 @@ export const EVAL_LIMIT = 10;
 // ============================================================
 // ゴールデンセットの型と読み込み
 // ============================================================
-
-export interface GoldenQuery {
-  id: string;
-  query: string;
-  queryClass: string;
-  expect: "hit" | "correct-zero";
-  expectedIds: string[];
-  expectedRankMax?: number;
-  sourceNote?: string;
-  validityNote?: string;
-}
 
 /**
  * golden-queries.jsonl を読み込み、形式検証する。不正行は黙ってスキップせず即throwする
@@ -193,15 +189,6 @@ export interface QueryOutcome {
   zeroCorrect: boolean | null;
 }
 
-/** rankedIds中でexpectedIdsのいずれかが最初に現れる順位（1始まり）。現れなければnull。 */
-export function bestExpectedRank(rankedIds: string[], expectedIds: string[]): number | null {
-  const expected = new Set(expectedIds);
-  for (let i = 0; i < rankedIds.length; i++) {
-    if (expected.has(rankedIds[i])) return i + 1;
-  }
-  return null;
-}
-
 export function evaluateQueryOutcome(q: GoldenQuery, rankedIds: string[]): QueryOutcome {
   if (q.expect === "correct-zero") {
     return {
@@ -239,10 +226,18 @@ export interface EvalSummary {
   zeroCorrectCount: number;
   zeroCorrectRate: number;
   byClass: Record<string, { total: number; hitAt5: number; zeroCorrect: number }>;
+  /** 本番順序（searchHybrid().results）から算出した記録メトリクス（合否ゲートでない・不変条件I4）。
+   *  orderOutcomes を渡したときのみ埋まる。省略時はundefined（従来呼び出しと後方互換）。 */
+  rankPrecision?: number;
+  mrr?: number;
 }
 
-/** recall@k = ヒット期待クエリのうちexpectedIdが上位k件に入った割合。正ゼロ率は別軸で数える。 */
-export function summarizeOutcomes(outcomes: QueryOutcome[]): EvalSummary {
+/**
+ * recall@k = ヒット期待クエリのうちexpectedIdが上位k件に入った割合。正ゼロ率は別軸で数える。
+ * orderOutcomes（本番順序から算出したOrderOutcome）を渡すと rankPrecision/MRR を記録層として併記する
+ * （recall@kは従来どおり legacy ranked 由来のQueryOutcomeから算出し、比較原点を変えない）。
+ */
+export function summarizeOutcomes(outcomes: QueryOutcome[], orderOutcomes?: OrderOutcome[]): EvalSummary {
   const hits = outcomes.filter((o) => o.expect === "hit");
   const zeros = outcomes.filter((o) => o.expect === "correct-zero");
   const ratio = (n: number, d: number): number => (d === 0 ? 0 : Math.round((n / d) * 1000) / 1000);
@@ -255,6 +250,8 @@ export function summarizeOutcomes(outcomes: QueryOutcome[]): EvalSummary {
     if (o.zeroCorrect === true) byClass[o.queryClass].zeroCorrect += 1;
   }
 
+  const order = orderOutcomes ? summarizeOrder(orderOutcomes) : undefined;
+
   return {
     hitQueries: hits.length,
     recallAt1: ratio(hits.filter((o) => o.hitAt1).length, hits.length),
@@ -264,6 +261,7 @@ export function summarizeOutcomes(outcomes: QueryOutcome[]): EvalSummary {
     zeroCorrectCount: zeros.filter((o) => o.zeroCorrect === true).length,
     zeroCorrectRate: ratio(zeros.filter((o) => o.zeroCorrect === true).length, zeros.length),
     byClass,
+    ...(order ? { rankPrecision: order.rankPrecision, mrr: order.mrr } : {}),
   };
 }
 
@@ -294,6 +292,9 @@ export function sanitizeErrorMessage(message: string, queryText: string): string
 
 export interface RunResult {
   outcomes: QueryOutcome[];
+  /** 本番順序（searchHybrid().results）から算出した順序メトリクス（記録層・不変条件I1/I4）。
+   *  legacy ranked（rankLikeProduction）とは別に、同じクエリの本番返却順を素で評価したもの。 */
+  orderOutcomes: OrderOutcome[];
   failures: { golden: string; error: string }[];
 }
 
@@ -317,6 +318,7 @@ export async function runGoldenEval(storePath: string, goldenPath: string): Prom
     }
 
     const outcomes: QueryOutcome[] = [];
+    const orderOutcomes: OrderOutcome[] = [];
     const failures: { golden: string; error: string }[] = [];
 
     for (const q of goldenQueries) {
@@ -328,6 +330,9 @@ export async function runGoldenEval(storePath: string, goldenPath: string): Prom
           { query: q.query, category: "all", limit: EVAL_LIMIT },
           queryEmbedding,
         );
+
+        // 記録層: 本番順序（result.results そのもの・再ソートなし）から順序メトリクスを算出（不変条件I1）。
+        orderOutcomes.push(evaluateOrderOutcome(q, result.results.map((r) => r.id)));
 
         // 本番と同源: searchVectorsのdistanceマップ（src/tools/search.ts:116-119）
         const vectorDistanceMap = new Map<string, number>();
@@ -351,7 +356,7 @@ export async function runGoldenEval(storePath: string, goldenPath: string): Prom
       }
     }
 
-    return { outcomes, failures };
+    return { outcomes, orderOutcomes, failures };
   } finally {
     storage.close();
   }
@@ -367,7 +372,7 @@ export async function runGoldenEval(storePath: string, goldenPath: string): Prom
  *  models/(埋め込みモデル実体)はシンボリックリンクで原本参照し複製ゼロにする。
  *  G2内部呼び出しは runGoldenEval を直接importし、既にコピー済みstoreDirを渡すため本コピーは
  *  かからない(二重コピー回避)。 */
-function freezeSafeCopy(storePath: string): { dir: string; storeDir: string } {
+export function freezeSafeCopy(storePath: string): { dir: string; storeDir: string } {
   const dir = mkdtempSync(join(tmpdir(), "eval-golden-"));
   const storeDir = join(dir, ".wasurenagusa");
   cpSync(storePath, storeDir, {
@@ -400,9 +405,10 @@ async function main(): Promise<void> {
   // 凍結原本を直接開かず使い捨てコピー上で評価する(凍結アンカー保護)。評価データは同一。
   const { dir: copyDir, storeDir } = freezeSafeCopy(storeArg);
   let outcomes: RunResult["outcomes"];
+  let orderOutcomes: RunResult["orderOutcomes"];
   let failures: RunResult["failures"];
   try {
-    ({ outcomes, failures } = await runGoldenEval(storeDir, goldenArg));
+    ({ outcomes, orderOutcomes, failures } = await runGoldenEval(storeDir, goldenArg));
   } finally {
     rmSync(copyDir, { recursive: true, force: true });
   }
@@ -414,7 +420,7 @@ async function main(): Promise<void> {
     console.log(JSON.stringify({ golden: f.golden, result: "ERROR", error: f.error }));
   }
 
-  const summary = summarizeOutcomes(outcomes);
+  const summary = summarizeOutcomes(outcomes, orderOutcomes);
   const integrity = evaluateRunIntegrity(goldenCount, outcomes.length, failures.length);
   console.log(JSON.stringify({ metric: "baseline-summary", measured: summary }));
   console.log(JSON.stringify(integrity));
@@ -422,6 +428,7 @@ async function main(): Promise<void> {
   console.log(
     `\n== eval-golden ベースライン: recall@1=${summary.recallAt1} recall@5=${summary.recallAt5} ` +
       `recall@10=${summary.recallAt10} 正ゼロ=${summary.zeroCorrectCount}/${summary.zeroQueries} ` +
+      `| 記録層(本番順序): rankPrecision=${summary.rankPrecision} MRR=${summary.mrr} ` +
       `(golden=${goldenCount}, processed=${outcomes.length}, failed=${failures.length}) ==`,
   );
   process.exitCode = integrity.result === "PASS" ? 0 : 1;

@@ -45,9 +45,20 @@ product.mdの課題9「コンテキスト注入の無駄 - セッション開始
 
 ### REQ-3: 検索ランキングにfreshness係数を導入
 
+> **【SUPERSEDED — 2026-07-20】機構の一本化（順序の意図は継承・実現手段のみ差し替え）**
+>
+> 下記 AC1〜AC3 が規定する freshness 機構（`freshness = max(0.7, e^(-0.693 * daysSinceLastAccess / HALF_LIFE_DAYS))`、HALF_LIFE_DAYS=14、アクセスによる係数リセット＝再浮上）は、**memory-redesign の time-decay に一本化されたため廃止**する。
+>
+> - **正本**: `memory-redesign/design.md`（time-decay: 半減期90日・floor無し・アクセスによるreset無し。`finalScore = rrfScore × 0.5^(ageDays/H)`, H=90）。二重減衰の禁止（PdM裁定）と実装済み挙動に整合する。
+> - **継承する意図**: User Story（下記）の「時間経過を考慮した順序で返す／最近が上位・古くても的確なら十分なランク」という**順序要求は保持**する。差し替わったのは実現手段（式・半減期・reset有無）のみ。
+> - **廃止の理由**: 本 REQ-3 は実装から独立して取り残された旧仕様で、別式・半減期14・access-reset を要求しており、実装済みの time-decay（半減期90・floor無・reset無）と真っ向から矛盾する。減衰係数を触る前提として、正本を memory-redesign に確定する。
+> - **AC4 の扱い**: 「古い記憶でも関連度が非常に高ければ上位に出うる（減衰は掛け算の1要素で絶対的足切りではない）」という性質は time-decay 機構でも成立するため、意図として引き続き有効。
+>
+> 以下の AC1〜AC4 の原文は歴史的記録として削除せず残す（superseded マーク）。
+
 **User Story:** wasurenagusaの利用者として、memory_searchの結果が時間経過を考慮した順序で返されてほしい。最近の記憶が上位に来つつ、古くても的確な記憶は十分なランクで返ること。
 
-#### Acceptance Criteria
+#### Acceptance Criteria（AC1〜AC3 は SUPERSEDED・上記バナー参照）
 
 1. WHEN memory_searchが実行される THEN 各エントリに対してfreshness係数（0.7〜1.0）が計算されること
 2. WHEN freshness係数を計算 THEN `freshness = max(0.7, e^(-0.693 * daysSinceLastAccess / HALF_LIFE_DAYS))` の式で算出すること（HALF_LIFE_DAYS初期値: 14）
