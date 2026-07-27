@@ -28,7 +28,8 @@
     "start": "node dist/index.js",
     "dev": "npx ts-node --esm src/index.ts",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "preinstall": "node -e \"if(!/pnpm/.test(process.env.npm_config_user_agent||'')){console.error('[pnpm-guard] pnpm 専用プロジェクト。npm/yarn install ではなく pnpm install を使うこと');process.exit(1)}\""
   },
   "keywords": [
     "mcp",
@@ -79,5 +80,6 @@
     "ts-node": "^10.9.0",
     "typescript": "^5.0.0",
     "vitest": "^4.0.18"
-  }
+  },
+  "packageManager": "pnpm@9.15.0"
 }
