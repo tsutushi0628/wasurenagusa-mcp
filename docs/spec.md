@@ -64,7 +64,7 @@ Layer 2: memory_get_detail（フル詳細）
 - MCP SDK: @modelcontextprotocol/sdk
 - トランスポート: STDIO（ローカル実行）
 - ストレージ: Markdownファイル
-- 外部API: Google Gemini API（gemini-3-flash-preview）
+- 外部API: Google Gemini API（gemini-3.8-flash）
 
 ---
 
@@ -324,7 +324,7 @@ dotenvConfig();
 export const config = {
   // Gemini API設定
   geminiApiKey: process.env.GEMINI_API_KEY || "",
-  geminiModel: "gemini-3-flash-preview",
+  geminiModel: "gemini-3.8-flash",
   
   // メモリディレクトリ（プロジェクトルートからの相対パス）
   memoryDir: process.env.MEMORY_DIR || ".wasurenagusa",
