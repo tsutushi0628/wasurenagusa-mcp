@@ -26,7 +26,7 @@ import { findProjectRoot } from "../utils/projectRoot.js";
 import { SQLiteStorage } from "../storage/index.js";
 import { getMemoryPath, config } from "../config.js";
 
-import { loadOwnerProfile, getOwnerProfilePath } from "../utils/owner-profile.js";
+import { loadOwnerProfile } from "../utils/owner-profile.js";
 import { EmbeddingService } from "../vector/embedding-service.js";
 import { increment } from "../observability/counters.js";
 import { buildInjection, BENIGN_SKIP_LABELS } from "../injection/builder.js";
@@ -241,10 +241,6 @@ export async function main() {
   if (ownerProfile) {
     output.push("### オーナー判断基準");
     output.push(ownerProfile);
-    output.push("");
-  } else {
-    const profilePath = getOwnerProfilePath(memoryPath);
-    output.push(`（owner-profile.md が未記入です。お時間のある時に記入してください: ${profilePath}）`);
     output.push("");
   }
 
