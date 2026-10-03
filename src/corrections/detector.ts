@@ -185,6 +185,7 @@ function requiredValues(
       const audience = sentence.match(/((?:社外|社内|ユーザー|オーナー|外部|内部)向け)?文案/u)?.[1] ?? "";
       documentKind = `${audience}文案・報告`;
     }
+    if (!documentKind && topic.actionKey === "present_full") documentKind = "文章";
     if (documentKind) values.documentKind = documentKind;
     const range = sentence.match(/(?:冒頭|末尾|指定範囲|指定した範囲)[^、。！？!?]*/u)?.[0];
     if (range) values.range = range;
@@ -559,7 +560,8 @@ function detectSentence(
   const ruleConditionKnown = condition.conditionKnown && !event.hasSensitiveValue && !event.isPasteCandidate;
   const looksLikeQuestion = /[?？]|(?:ですか|でしょうか|べきか|相談|どう思う|したい)/u.test(sentence);
   const normalizedCommand = sentence.normalize("NFKC").replace(/\s+/gu, " ").trim();
-  const directive = (EXPLICIT_COMMAND_ENDING.test(sentence) && hasCorrectionPredicate(sentence)
+  const hasCorrectionMark = scored.hasCorrectionSignal || NEGATIVE_ACTION.test(sentence) || scored.hasContinuingCommand;
+  const directive = (hasCorrectionMark && EXPLICIT_COMMAND_ENDING.test(sentence) && hasCorrectionPredicate(sentence)
     && !isConsultationQuestion(normalizedCommand) && tonePolarity !== null) || specialTone;
   let commandText = "";
   if (!event.hasSensitiveValue && !event.isPasteCandidate && Array.from(normalizedCommand).length <= 240) {

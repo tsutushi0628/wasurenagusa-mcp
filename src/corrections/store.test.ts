@@ -271,7 +271,7 @@ describe("correction evidence store", () => {
     ]);
   });
 
-  it("同じ未型付け命令文は正規化後に別sessionで反復すると確定する", () => {
+  it("訂正印のない全文依頼は別sessionで反復しても本文なし候補に留まる", () => {
     const firstAt = iso(0);
     const firstInput = detectedObservation("全文　出して", "session-one", "event-command-one", firstAt);
     addEvent(firstInput.eventId, "session-one", firstAt);
@@ -284,9 +284,9 @@ describe("correction evidence store", () => {
     expect(secondInput.bundleKey).toBe(firstInput.bundleKey);
     const second = apply(secondInput);
 
-    expect(second).toMatchObject({ status: "confirmed", occurrenceCount: 2, sessionCount: 2 });
-    expect(readBundle(second.bundleKey).bundle).toMatchObject({ rule_text: "全文 出して" });
-    expect(readBundle(second.bundleKey).memories).toMatchObject([{ content: "全文 出して", state: "active" }]);
+    expect(second).toMatchObject({ status: "candidate", occurrenceCount: 2, sessionCount: 2, memoryId: null });
+    expect(readBundle(second.bundleKey).bundle).toMatchObject({ rule_text: "" });
+    expect(readBundle(second.bundleKey).memories).toEqual([]);
   });
 
   it("旧束キーは異なる言い回しを別候補にする", () => {
@@ -302,7 +302,7 @@ describe("correction evidence store", () => {
     const second = apply(secondInput);
 
     expect(second).toMatchObject({ status: "candidate", occurrenceCount: 1, sessionCount: 1, memoryId: null });
-    expect(readBundle(second.bundleKey).bundle).toMatchObject({ rule_text: "要約を100字以内にまとめる" });
+    expect(readBundle(second.bundleKey).bundle).toMatchObject({ rule_text: "" });
   });
 
   it("相談文と述語のないunknown反復は別sessionでも確定しない", () => {
@@ -568,7 +568,7 @@ describe("correction evidence store", () => {
     expect(first.bundleKey).toBe(second.bundleKey);
     expect(secondResult).toMatchObject({ status: "confirmed", occurrenceCount: 2, sessionCount: 2, version: 2 });
     expect(readBundle(secondResult.bundleKey).bundle).toMatchObject({
-      rule_text: "報告作成時または文案作成時は毎回、合成文書は全文を表示する",
+      rule_text: "報告作成時または文案作成時は合成文書は毎回全文を表示する",
       status: "confirmed",
     });
     const state = readBundle(secondResult.bundleKey);
@@ -578,7 +578,7 @@ describe("correction evidence store", () => {
     ]);
     expect(JSON.parse((state.versions[1] as { conditions: string }).conditions).conditions)
       .toEqual(["報告作成時", "文案作成時"]);
-    expect(state.memories).toMatchObject([{ content: "報告作成時または文案作成時は毎回、合成文書は全文を表示する" }]);
+    expect(state.memories).toMatchObject([{ content: "報告作成時または文案作成時は合成文書は毎回全文を表示する" }]);
   });
 
   it("質問だけの根拠は2回反復と規則ID確定でもmemoryへ昇格しない", () => {

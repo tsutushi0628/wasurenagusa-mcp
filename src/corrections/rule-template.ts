@@ -78,10 +78,24 @@ const FORBIDDEN_VALUE = /[\u0000-\u001f\u007f]/u;
 const CONSULTATION_QUESTION = /(?:べきか|でしょうか|ですか|相談|どう思う|したい|してよいか|していいか)/u;
 const SUMMARY_ACTION = /(?:要約|要点|概要)[^、。！？!?]{0,12}(?:しないで|しない|するな|しなくて|して|する)/u;
 const FULL_DOCUMENT_ACTION = /(?:全文|本文|全体)[^、。！？!?]{0,12}(?:出(?:して|す|さないで|さない|すな)|示(?:して|す|さないで|さない|すな)|提示(?:して|する|しないで)|表示(?:して|する|しないで)|見せ(?:て|る|ない))/u;
+const PAST_CORRECTION_REFERENCE = /(?:前回|前(?:にも|も|に)|以前(?:にも|も|に))[^、。！？!?]{0,10}(?:言った|言いました|言っていた|伝えた|伝えました|指示した|指示しました)(?:よね|でしょう|けれど|けど|が|のに|んだ)?/gu;
+const REPRIMAND_MARKER = /(?:もう)?(?:何回|何度)(?:も)?(?:言わせる|言わす|言ったら|言った|伝えさせる)(?:(?:んだ|の)?(?:よね|よ|でしょう|かな)?)/gu;
+const REPEAT_ADVERB = /(?:再度|再び|繰り返し)/gu;
+const ALSO_CUE = /(^|[、,\s])また(?=$|[、,\s]|[\p{Script=Han}\p{Script=Katakana}])/gu;
 const CORRECTIVE_COMMAND_PREDICATE = /(?:するな|やめ(?:て|ろ)|しないで|答え(?:て|ろ)(?:ください)?|示(?:して|せ)(?:ください)?|出(?:して|せ)(?:ください)?|止(?:めて|まれ)(?:ください)?|確認(?:して|しろ)(?:ください)?|使(?:って|え|うな?)(?:ください)?|維持(?:して|しろ)(?:ください)?|変更(?:して|しろ)(?:ください)?|説明(?:して|しろ)(?:ください)?|省(?:いて|け)|除外(?:して|しろ)|照合(?:して|しろ)(?:ください)?|提示(?:して|しろ)(?:ください)?|表示(?:して|しろ)(?:ください)?|見せ(?:て|ないで|るな)(?:ください)?|(?:出|示|提示|表示|使|説明|省)(?:さないで|しないで|わないで|さない|しない)|(?:文字|字|件|行|項目)(?:以内|以下|未満|程度)?[^、。！？!?]{0,8}にして|まとめて|短くして|制限して|解除して|避けて|控えて|再利用して|保存して|配置して|保持して|保管して|担当して|任せて|委譲して|割り当てて|実行して|設計(?:して|する)|実装(?:して|する)|検証(?:して|する)|分析(?:して|する)|レビュー(?:して|する)|テスト(?:して|する)|付けて|書いて|作成して|変えて|禁止)/u;
 
 function normalizeText(value: string): string {
   return value.normalize("NFKC").replace(/\s+/gu, " ").trim();
+}
+
+function removeCorrectionMarkers(value: string): string {
+  const normalized = normalizeText(value.normalize("NFKC")
+    .replace(PAST_CORRECTION_REFERENCE, " ")
+    .replace(REPRIMAND_MARKER, " ")
+    .replace(REPEAT_ADVERB, " ")
+    .replace(ALSO_CUE, "$1 ")
+    .replace(/って(?=[、,])/gu, ""));
+  return normalized.replace(/^[、,]+|[、,]+$/gu, "").trim();
 }
 
 export function hasCorrectionPredicate(value: string): boolean {
@@ -199,13 +213,14 @@ function topicRule(input: CorrectionRuleInput): string {
 
   if (input.topicKey === "document_delivery") {
     if (!hasValues(input, ["documentKind"])) return "";
+    const continuation = input.lifetimeKind === "explicit_continuing" ? "毎回" : "";
     if (input.actionKey === "present_full") {
       const verb = input.polarity === "negative" ? "全文を表示しない" : "全文を表示する";
-      return `${values.documentKind}は${verb}`;
+      return `${values.documentKind}は${continuation}${verb}`;
     }
     if (input.actionKey === "present" && hasValues(input, ["range"])) {
       const verb = input.polarity === "negative" ? "を表示しない" : "を表示する";
-      return `${values.documentKind}は${values.range}${verb}`;
+      return `${values.documentKind}は${continuation}${values.range}${verb}`;
     }
     return "";
   }
@@ -304,7 +319,8 @@ export function renderTypedCorrectionRule(input: CorrectionRuleInput): string {
   const statement = topicRule(canonical);
   if (!statement) return "";
   const taskScope = canonical.boundaryKey.match(/(?:^|;)task:(今回だけ|この作業だけ|今日だけ|一時的)(?:;|$)/u)?.[1];
-  const continued = canonical.lifetimeKind === "explicit_continuing" && canonical.topicKey !== "tone";
+  const continued = canonical.lifetimeKind === "explicit_continuing"
+    && canonical.topicKey !== "tone" && canonical.topicKey !== "document_delivery";
   const body = continued ? `毎回、${statement}` : statement;
   let result = body;
   if (canonical.conditions.length > 0) result = `${canonical.conditions.join("または")}は${body}`;
@@ -319,8 +335,9 @@ export function renderCorrectionRule(input: CorrectionRuleInput): string {
   const canonical = canonicalInput(input);
   if (!validInput(canonical) || (!canonical.directive && !canonical.toneException) || !canonical.commandText) return "";
   if (questionGuardApplies(canonical) || hasUnrepresentedRuleMeaning(canonical)) return "";
-  if (!hasCorrectionPredicate(canonical.commandText)) return "";
-  return canonical.commandText;
+  const cleanedCommand = removeCorrectionMarkers(canonical.commandText);
+  if (!hasCorrectionPredicate(cleanedCommand)) return "";
+  return cleanedCommand;
 }
 
 export function serializeCorrectionRuleInput(input: CorrectionRuleInput): string {

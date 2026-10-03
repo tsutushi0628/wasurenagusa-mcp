@@ -53,12 +53,12 @@ describe("detectOwnerCorrections", () => {
     expect(scopedDocument).toMatchObject({
       status: "confirmed",
       topicKey: "document_delivery",
-      ruleText: "毎回、社外向け文書は全文を表示する",
+      ruleText: "社外向け文書は毎回全文を表示する",
     });
     expect(explicitDocumentNegation).toMatchObject({
       status: "confirmed",
       polarity: "negative",
-      ruleText: "毎回、文書は全文を表示しない",
+      ruleText: "文書は毎回全文を表示しない",
     });
   });
 
@@ -81,6 +81,33 @@ describe("detectOwnerCorrections", () => {
     expect(repeated[0]).toMatchObject({ score: 5, status: "candidate", topicKey: "response_policy" });
     expect(continuing[0]).toMatchObject({ score: 4, status: "confirmed", lifetimeKind: "explicit_continuing" });
     expect(request[0]).toMatchObject({ score: 2, status: "candidate", source: "request_repeat" });
+  });
+
+  it("keeps ordinary typed and unknown requests as bodyless candidates", () => {
+    const typedRequest = detect("質問に答えてください")[0];
+    const unknownRequest = detect("記事の下書きを書いて")[0];
+
+    expect(typedRequest).toMatchObject({ status: "candidate", ruleText: "", ruleInput: { directive: false } });
+    expect(unknownRequest).toMatchObject({ topicKey: "unknown", status: "candidate", ruleText: "", ruleInput: { directive: false } });
+  });
+
+  it("renders full-document corrections as typed rules without reprimand markers", () => {
+    const generic = detect("全文出してって前も言ったよね、毎回全文出して")[0];
+    const scopedNegative = detect("前も言ったよね、毎回、社外向け文書の全文を出さないで")[0];
+
+    expect(generic).toMatchObject({
+      topicKey: "document_delivery",
+      polarity: "positive",
+      status: "confirmed",
+      ruleText: "文章は毎回全文を表示する",
+    });
+    expect(scopedNegative).toMatchObject({
+      topicKey: "document_delivery",
+      polarity: "negative",
+      status: "confirmed",
+      ruleText: "社外向け文書は毎回全文を表示しない",
+    });
+    expect(`${generic?.ruleText} ${scopedNegative?.ruleText}`).not.toMatch(/前も言ったよね|何回言わせる/u);
   });
 
   it("adds the prior-action match only for the same finite target", () => {
@@ -222,7 +249,7 @@ describe("detectOwnerCorrections", () => {
     expect(command).toMatchObject({
       topicKey: "unknown",
       status: "confirmed",
-      ruleText: "以前にも言ったが、今後はID用の印を変更して",
+      ruleText: "今後はID用の印を変更して",
     });
     expect(vagueCommand).toMatchObject({ status: "candidate", ruleText: "" });
   });
@@ -292,7 +319,7 @@ describe("detectOwnerCorrections", () => {
       status: "candidate",
       conditionKnown: false,
       lifetimeKind: "task",
-      ruleText: "今回だけは特別な条件の場合だけ質問に答えて",
+      ruleText: "",
     });
   });
 
@@ -308,7 +335,7 @@ describe("detectOwnerCorrections", () => {
 
     expect(taskLimited).toMatchObject({ status: "candidate", lifetimeKind: "task" });
     expect(taskLimited?.conditionKey).toContain("task:今回だけ");
-    expect(taskLimited?.ruleText).toContain("今回だけ");
+    expect(taskLimited?.ruleText).toBe("");
     expect(unresolved).toMatchObject({ status: "confirmed", conditionKnown: false });
     expect(longEvent?.segments).toHaveLength(1);
     expect(longEvent ? detectOwnerCorrections(longEvent) : []).toEqual([]);
@@ -389,7 +416,7 @@ describe("detectOwnerCorrections", () => {
     expect(detect("今後は文書の全文を出す")[0]).toMatchObject({ status: "candidate" });
     expect(detect("今後は文書の全文を出して")[0]).toMatchObject({
       status: "confirmed",
-      ruleText: "毎回、文書は全文を表示する",
+      ruleText: "文書は毎回全文を表示する",
       lifetimeKind: "explicit_continuing",
     });
     expect(detect("今後は予定表を確認して")[0]).toMatchObject({

@@ -173,7 +173,9 @@ function hermeticEnv(): NodeJS.ProcessEnv {
   env.GEMINI_API_KEY = "";
   env.OPENAI_API_KEY = "";
   env.ANTHROPIC_API_KEY = "";
-  delete env.MEMORY_DIR;
+  // 未設定にするとパッケージ直下 .env の MEMORY_DIR（手元では中央ストアの絶対パス）が効いて
+  // スクラッチではなく実ストアを読むため、公開既定の相対値を明示してスクラッチに閉じ込める
+  env.MEMORY_DIR = ".wasurenagusa";
   delete env.WASURENAGUSA_INJECTION_TOKEN_BUDGET;
   return env;
 }

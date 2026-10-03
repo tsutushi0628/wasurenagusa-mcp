@@ -420,7 +420,7 @@ describe("analyze Stop correction recovery", () => {
 
     try {
       const context = await import("./context.js");
-      const prompt = "質問に答えてください";
+      const prompt = "前回も言ったけれど、質問に答えてください";
       const turns = [
         { sessionId: "first-correction-session", uuid: "first-correction", timestamp: "2026-10-03T00:00:02.000Z" },
         { sessionId: "second-correction-session", uuid: "second-correction", timestamp: "2026-10-03T00:01:02.000Z" },
@@ -463,6 +463,86 @@ describe("analyze Stop correction recovery", () => {
       expect(await context.main()).toBe("emitted");
       expect(stdoutChunks.join("")).toContain("### オーナーからの確認済み規則");
       expect(stdoutChunks.join("")).toContain("質問に回答する");
+    } finally {
+      stdoutWriteSpy.mockRestore();
+    }
+  });
+
+  it("普通の依頼は二つのSessionで反復しても本文なし候補に留まり、全文訂正は型文で注入する", async () => {
+    process.env.WASURENAGUSA_CORRECTION_LOOP = "on";
+    process.env.WASURENAGUSA_CORRECTION_INJECT = "on";
+    const stdoutChunks: string[] = [];
+    const stdoutWriteSpy = vi.spyOn(process.stdout, "write").mockImplementation(((
+      chunk: string | Uint8Array,
+      ...args: unknown[]
+    ): boolean => {
+      stdoutChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+      const callback = args.find((argument) => typeof argument === "function") as ((error?: Error | null) => void) | undefined;
+      callback?.();
+      return true;
+    }) as typeof process.stdout.write);
+
+    try {
+      const context = await import("./context.js");
+      const requestPrompt = "記事の下書きを書いて";
+      const correctionPrompt = "全文出してって前も言ったよね、毎回全文出して";
+      const sessions = ["ordinary-request-session-one", "ordinary-request-session-two"];
+
+      for (const [index, sessionId] of sessions.entries()) {
+        const requestUuid = `${sessionId}-request`;
+        const correctionUuid = `${sessionId}-correction`;
+        const requestTranscript = writeTranscript([]);
+        attachContextStdin(requestTranscript, sessionId, "UserPromptSubmit", {
+          uuid: requestUuid,
+          prompt: requestPrompt,
+        });
+        expect(await context.main()).toBe("emitted");
+
+        const afterRequest = [
+          user(requestUuid, requestPrompt, `2026-10-03T00:0${index}:01.000Z`, sessionId),
+          assistant(`${sessionId}-draft`, "記事の下書きを作成しました。", `2026-10-03T00:0${index}:02.000Z`, sessionId),
+        ];
+        attachStdin(writeTranscript(afterRequest), { session_id: sessionId });
+        await runMain();
+
+        attachContextStdin(writeTranscript(afterRequest), sessionId, "UserPromptSubmit", {
+          uuid: correctionUuid,
+          prompt: correctionPrompt,
+        });
+        expect(await context.main()).toBe("emitted");
+
+        const completeTranscript = writeTranscript([
+          ...afterRequest,
+          user(correctionUuid, correctionPrompt, `2026-10-03T00:0${index}:03.000Z`, sessionId),
+          assistant(`${sessionId}-correction-response`, "全文を表示します。", `2026-10-03T00:0${index}:04.000Z`, sessionId),
+        ]);
+        attachStdin(completeTranscript, { session_id: sessionId });
+        await runMain();
+      }
+
+      const state = readCorrectionState();
+      const ordinaryBundle = state.bundles.find((bundle) => bundle.topic_key === "unknown");
+      const documentBundle = state.bundles.find((bundle) => bundle.topic_key === "document_delivery");
+
+      expect(ordinaryBundle).toMatchObject({
+        rule_text: "",
+        status: "candidate",
+        occurrence_count: 2,
+        session_count: 2,
+      });
+      expect(documentBundle).toMatchObject({
+        rule_text: "文章は毎回全文を表示する",
+        status: "confirmed",
+        occurrence_count: 2,
+        session_count: 2,
+      });
+      expect(state.memories).toEqual([{ id: expect.any(String), content: "文章は毎回全文を表示する", state: "active" }]);
+
+      attachContextStdin(writeTranscript([]), "ordinary-request-next-session", "SessionStart", { source: "startup" });
+      expect(await context.main()).toBe("emitted");
+      expect(stdoutChunks.join("")).toContain("文章は毎回全文を表示する");
+      expect(stdoutChunks.join("")).not.toContain("記事の下書きを書いて");
+      expect(stdoutChunks.join("")).not.toMatch(/前も言ったよね|何回言わせる/u);
     } finally {
       stdoutWriteSpy.mockRestore();
     }

@@ -43,7 +43,7 @@ describe("owner correction rule templates", () => {
     expect(inputs.map(renderCorrectionRule)).toEqual([
       "オーナーへの応答は毎回常体で書く",
       "毎回、質問に回答する",
-      "毎回、文案・報告は全文を表示する",
+      "文案・報告は毎回全文を表示する",
       "毎回、略語を説明する",
       "毎回、要約を100文字以内にまとめる",
       "毎回、CSS部品を維持する",
@@ -131,6 +131,34 @@ describe("owner correction rule templates", () => {
       .toEqual(["", "", "", ""]);
   });
 
+  it("removes repetition and reprimand markers from fallback rule text", () => {
+    const previousInstruction = rule({
+      topicKey: "unknown",
+      actionKey: "unknown",
+      requiredValues: {},
+      conditionKnown: false,
+      commandText: "以前にも言ったが、今後はＩＤ用の印を変更して",
+    });
+    const reprimand = rule({
+      topicKey: "unknown",
+      actionKey: "unknown",
+      requiredValues: {},
+      conditionKnown: false,
+      commandText: "何回言わせるんだよ、また全文を出さないで",
+    });
+    const targetCondition = rule({
+      topicKey: "unknown",
+      actionKey: "unknown",
+      requiredValues: {},
+      conditionKnown: false,
+      commandText: "前回の操作をまたいで設定を変更して",
+    });
+
+    expect(renderCorrectionRule(previousInstruction)).toBe("今後はID用の印を変更して");
+    expect(renderCorrectionRule(reprimand)).toBe("全文を出さないで");
+    expect(renderCorrectionRule(targetCondition)).toBe("前回の操作をまたいで設定を変更して");
+  });
+
   it("does not flatten an unrepresented negated document action into a full-text rule", () => {
     const mixedActions = rule({
       topicKey: "document_delivery",
@@ -164,7 +192,7 @@ describe("owner correction rule templates", () => {
     expect(storedMixedActions).not.toBeNull();
     if (!storedMixedActions) throw new Error("synthetic mixed action did not survive serialization");
     expect(renderCorrectionRule(storedMixedActions)).toBe("");
-    expect(renderCorrectionRule(scopedDocument)).toBe("毎回、社外向け文書は全文を表示する");
+    expect(renderCorrectionRule(scopedDocument)).toBe("社外向け文書は毎回全文を表示する");
     expect(renderCorrectionRule(unscopedDocument)).toBe("");
     expect(renderCorrectionRule(mismatchedTone)).toBe("");
   });
@@ -198,13 +226,13 @@ describe("owner correction rule templates", () => {
 
     expect(merged?.conditions).toEqual(["報告作成時", "文案作成時"]);
     expect(renderCorrectionRule(merged as CorrectionRuleInput))
-      .toBe("報告作成時または文案作成時は毎回、文案・報告は全文を表示する");
+      .toBe("報告作成時または文案作成時は文案・報告は毎回全文を表示する");
     expect(mergeCorrectionRuleInputs([proposal, { ...report, requiredValues: { documentKind: "回答" } }]))
       .toBeNull();
     const general = mergeCorrectionRuleInputs([proposal, { ...proposal, conditions: [] }]);
     expect(general?.conditions).toEqual([]);
     expect(renderCorrectionRule(general as CorrectionRuleInput))
-      .toBe("毎回、文案・報告は全文を表示する");
+      .toBe("文案・報告は毎回全文を表示する");
   });
 
   it("serializes and parses only the v2 typed input", () => {
