@@ -6,6 +6,7 @@ import { parseMarkdown } from "./parser.js";
 import { getSchemaVersion, LINEAGE_DDL, PRINCIPLES_DDL, GUARDS_DDL } from "./schema.js";
 import { DEFAULT_MODEL } from "../vector/local-embedding.js";
 import { computeContentHash } from "./content-hash.js";
+import { initializeCorrectionSchema } from "./correction-schema.js";
 
 interface MigrationResult {
   entriesCount: number;
@@ -602,6 +603,10 @@ export function migrateV9ToV10(db: Database.Database, memoryPath: string): void 
   });
 
   transaction();
+}
+
+export function migrateV10ToV11(db: Database.Database): void {
+  initializeCorrectionSchema(db);
 }
 
 /**

@@ -23,10 +23,11 @@ import {
 } from "../types.js";
 import { config } from "../config.js";
 import { initializeSchema, initializeVectors, getSchemaVersion, CURRENT_SCHEMA_VERSION } from "./schema.js";
+import { CORRECTION_SCHEMA_VERSION } from "./correction-schema.js";
 import { migrateV1ToV2, migrateV1ToV2_categoryAndKnowledgeGap, migrateV2ToV3, migrateV3ToV4, migrateV4ToV5, migrateV5ToV6, migrateV6ToV7, migrateV7ToV8, migrateV8ToV9, migrateV9ToV10 } from "./migration.js";
 import { computeContentHash } from "./content-hash.js";
 import { asL2Distance, l2ToCosineSim, meetsSimilarity, type CosineSimilarity, type Threshold } from "../vector/distance-types.js";
-import { existsSync } from "fs";
+import { existsSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { formatEntry } from "./formatter.js";
 import { buildSearchHint } from "./search-hint.js";
@@ -37,6 +38,74 @@ export interface VectorSearchResult {
   id: string;
   distance: number;
 }
+
+type SQLiteStorageConnectionOptions = {
+  fileMustExist?: boolean;
+  readonly?: boolean;
+};
+
+type CorrectionSearchBoundary =
+  | { visibility: "project"; project: string }
+  | { visibility: "owner" };
+
+type CorrectionMemoryImportRow = {
+  id: string;
+  timestamp: string;
+  category: MemoryCategory;
+  title: string;
+  content: string;
+  tags: string;
+  project: string | null;
+  scope: string | null;
+  intensity: number | null;
+  knowledge_gap: string | null;
+  positive_action: string | null;
+  scenario: string | null;
+  why_core: string | null;
+  predicted_factors: string | null;
+  actual_factors: string | null;
+  prediction_error: number | null;
+  prediction_delta: string | null;
+  deleted_at: string | null;
+  state: "active" | "archived" | "deleted";
+  project_confidence: "confirmed" | "inferred" | "unknown";
+  content_hash: string | null;
+  last_read_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type CorrectionMemoryImportParams = {
+  sourceStoreHash: string;
+  sourceMemoryId: string;
+  importedAt: string;
+  sourceContentHash: string;
+  memory: CorrectionMemoryImportRow;
+};
+
+type CorrectionMemoryImportResult = {
+  targetMemoryId: string;
+  inserted: boolean;
+};
+
+type CorrectionTransactionDatabase = Pick<Database.Database, "inTransaction" | "prepare">;
+
+type CorrectionTransactionContext = {
+  db: CorrectionTransactionDatabase;
+  save: (params: SaveParams) => SaveResult;
+  importMemory: (params: CorrectionMemoryImportParams) => CorrectionMemoryImportResult;
+};
+
+const HOOK_CORRECTION_TABLES = [
+  "owner_correction_events",
+  "owner_correction_evidence",
+  "owner_correction_pending",
+  "owner_correction_bundles",
+  "owner_correction_versions",
+  "owner_correction_sessions",
+  "owner_correction_injections",
+  "owner_correction_imports",
+];
 
 // 世界モデルブロック（getContext）の閾値・件数（マジックナンバー禁止）
 const WORLD_MODEL_MIN_ERROR = 0.5; // この予測誤差以上を「学ぶべき外れ」として surface
@@ -310,10 +379,63 @@ export class SQLiteStorage {
   private db: Database.Database;
   private vecLoaded = false;
   private readonly dbPath: string;
+  private readonly readonlyConnection: boolean;
+  private correctionHookSupported = false;
 
-  constructor(dbPath: string) {
-    this.db = new Database(dbPath);
+  constructor(dbPath: string, options: SQLiteStorageConnectionOptions = {}) {
+    if (dbPath !== ":memory:" && dbPath !== "" && !options.fileMustExist) {
+      mkdirSync(dirname(dbPath), { recursive: true });
+    }
+    this.db = new Database(dbPath, options);
     this.dbPath = dbPath;
+    this.readonlyConnection = options.readonly ?? false;
+  }
+
+  static openExistingForHook(
+    dbPath: string,
+    options: { mode?: "correction" | "index" | "auto" } = {},
+  ): SQLiteStorage {
+    const mode = options.mode ?? "correction";
+    if (mode === "auto") {
+      const probe = new SQLiteStorage(dbPath, { fileMustExist: true, readonly: true });
+      let schemaVersion: number;
+      try {
+        probe.db.pragma("busy_timeout = 100");
+        schemaVersion = getSchemaVersion(probe.db);
+      } finally {
+        probe.close();
+      }
+      return SQLiteStorage.openExistingForHook(dbPath, {
+        mode: schemaVersion >= CORRECTION_SCHEMA_VERSION ? "correction" : "index",
+      });
+    }
+
+    const indexOnly = mode === "index";
+    const storage = new SQLiteStorage(dbPath, { fileMustExist: true, readonly: indexOnly });
+    try {
+      storage.db.pragma("busy_timeout = 100");
+      storage.validateHookSchema(indexOnly);
+      storage.correctionHookSupported = !indexOnly;
+      return storage;
+    } catch (error) {
+      storage.close();
+      throw error;
+    }
+  }
+
+  private validateHookSchema(indexOnly: boolean): void {
+    const schemaVersion = getSchemaVersion(this.db);
+    const minimumSchemaVersion = indexOnly ? CURRENT_SCHEMA_VERSION : CORRECTION_SCHEMA_VERSION;
+    if (schemaVersion < minimumSchemaVersion) {
+      throw new Error(`hook connection requires schema version ${minimumSchemaVersion} or newer; found ${schemaVersion}`);
+    }
+
+    this.db.prepare("SELECT id, title, category, state, last_read_at FROM memories LIMIT 0").all();
+    if (indexOnly) return;
+
+    for (const tableName of HOOK_CORRECTION_TABLES) {
+      this.db.prepare(`SELECT * FROM ${tableName} LIMIT 0`).all();
+    }
   }
 
   initialize(memoryPath?: string): void {
@@ -481,6 +603,27 @@ export class SQLiteStorage {
     });
   }
 
+  private correctionSearchBoundaryClause(
+    boundary: CorrectionSearchBoundary,
+    memoryIdExpression: string,
+  ): { clause: string; params: string[] } {
+    const conditions = [
+      `b.memory_id = ${memoryIdExpression}`,
+      "b.status = 'confirmed'",
+      "(b.expires_at IS NULL OR datetime(b.expires_at) > datetime('now'))",
+      "b.visibility = ?",
+    ];
+    const params: string[] = [boundary.visibility];
+    if (boundary.visibility === "project") {
+      conditions.push("b.project = ?");
+      params.push(boundary.project);
+    }
+    return {
+      clause: ` AND EXISTS (SELECT 1 FROM owner_correction_bundles b WHERE ${conditions.join(" AND ")})`,
+      params,
+    };
+  }
+
   /**
    * FTS段階フォールバック（search()用）。同一のcategory/project/scopeフィルタを各段に適用したうえで
    * 実行し、最初にヒットした段のSELECT結果とCOUNT結果を、発火した段（全段0件ならnull）とともに返す。
@@ -489,7 +632,8 @@ export class SQLiteStorage {
   private searchFtsStaged(
     trimmedQuery: string,
     params: SearchParams,
-    limit: number
+    limit: number,
+    correctionBoundary?: CorrectionSearchBoundary,
   ): { rows: MemoryRow[]; countRow: { count: number }; stage: FtsFallbackStage | null } {
     let filterClause = "";
     const filterParams: (string | number)[] = [];
@@ -504,6 +648,11 @@ export class SQLiteStorage {
     if (params.scope) {
       filterClause += " AND (m.scope IS NULL OR m.scope = 'general' OR m.scope = ?)";
       filterParams.push(params.scope);
+    }
+    if (correctionBoundary) {
+      const boundary = this.correctionSearchBoundaryClause(correctionBoundary, "m.id");
+      filterClause += boundary.clause;
+      filterParams.push(...boundary.params);
     }
 
     const { result, stage } = this.tryFtsFallbackStages(
@@ -524,7 +673,9 @@ export class SQLiteStorage {
       (r) => r.rows.length > 0
     );
 
-    this.recordFtsFallbackStage(stage);
+    if (!correctionBoundary) {
+      this.recordFtsFallbackStage(stage);
+    }
     return { ...result, stage };
   }
 
@@ -577,7 +728,8 @@ export class SQLiteStorage {
    */
   private buildShortTokenLikeWhere(
     shortTokens: string[],
-    params: SearchParams
+    params: SearchParams,
+    correctionBoundary?: CorrectionSearchBoundary,
   ): { where: string; sqlParams: (string | number)[] } {
     const perToken = shortTokens
       .map(() => "(title LIKE ? OR content LIKE ? OR tags LIKE ?)")
@@ -600,6 +752,11 @@ export class SQLiteStorage {
       where += " AND (scope IS NULL OR scope = 'general' OR scope = ?)";
       sqlParams.push(params.scope);
     }
+    if (correctionBoundary) {
+      const boundary = this.correctionSearchBoundaryClause(correctionBoundary, "memories.id");
+      where += boundary.clause;
+      sqlParams.push(...boundary.params);
+    }
     return { where, sqlParams };
   }
 
@@ -610,9 +767,10 @@ export class SQLiteStorage {
   private searchShortTokenLike(
     shortTokens: string[],
     params: SearchParams,
-    limit: number
+    limit: number,
+    correctionBoundary?: CorrectionSearchBoundary,
   ): { rows: MemoryRow[]; countRow: { count: number } } {
-    const { where, sqlParams } = this.buildShortTokenLikeWhere(shortTokens, params);
+    const { where, sqlParams } = this.buildShortTokenLikeWhere(shortTokens, params, correctionBoundary);
     const rows = this.db
       .prepare(`SELECT * FROM memories WHERE ${where} ORDER BY timestamp DESC LIMIT ?`)
       .all(...sqlParams, limit) as MemoryRow[];
@@ -784,6 +942,222 @@ export class SQLiteStorage {
       path: "sqlite",
       message: `Saved to ${params.category} (id: ${id})`,
     };
+  }
+
+  runCorrectionTransaction<TCallback extends (context: CorrectionTransactionContext) => unknown>(
+    callback: TCallback & (Extract<ReturnType<TCallback>, PromiseLike<unknown>> extends never ? unknown : never),
+  ): ReturnType<TCallback> {
+    if (Object.prototype.toString.call(callback) === "[object AsyncFunction]") {
+      throw new Error("correction transaction callback must be synchronous");
+    }
+    if (this.readonlyConnection) {
+      throw new Error("correction transaction requires a writable connection");
+    }
+    this.validateHookSchema(false);
+
+    let transactionActive = false;
+    const assertTransactionActive = (): void => {
+      if (!transactionActive || !this.db.inTransaction) {
+        throw new Error("correction transaction access outside active transaction");
+      }
+    };
+    let transactionDatabase: CorrectionTransactionDatabase;
+    const guardIterator = (iterator: IterableIterator<unknown>): IterableIterator<unknown> => {
+      let guardedIterator: IterableIterator<unknown>;
+      guardedIterator = new Proxy(iterator, {
+        get: (target, property) => {
+          assertTransactionActive();
+          if (property === Symbol.iterator) {
+            return () => guardedIterator;
+          }
+          const value = Reflect.get(target, property, target);
+          if (typeof value !== "function") {
+            return value;
+          }
+          return (...args: unknown[]) => {
+            assertTransactionActive();
+            const result = Reflect.apply(value, target, args);
+            if (result === target) {
+              return guardedIterator;
+            }
+            return result;
+          };
+        },
+        set: () => {
+          throw new Error("correction transaction iterator is readonly");
+        },
+      });
+      return guardedIterator;
+    };
+    const guardStatement = (statement: ReturnType<Database.Database["prepare"]>): ReturnType<Database.Database["prepare"]> => {
+      let guardedStatement: ReturnType<Database.Database["prepare"]>;
+      guardedStatement = new Proxy(statement, {
+        get: (target, property) => {
+          assertTransactionActive();
+          if (property === "database") {
+            return transactionDatabase;
+          }
+          const value = Reflect.get(target, property, target);
+          if (typeof value !== "function") {
+            return value;
+          }
+          return (...args: unknown[]) => {
+            assertTransactionActive();
+            const result = Reflect.apply(value, target, args);
+            if (property === "iterate") {
+              return guardIterator(result as IterableIterator<unknown>);
+            }
+            if (result === target) {
+              return guardedStatement;
+            }
+            return result;
+          };
+        },
+        set: () => {
+          throw new Error("correction transaction statement is readonly");
+        },
+      });
+      return guardedStatement;
+    };
+    transactionDatabase = new Proxy(this.db, {
+      get: (target, property) => {
+        if (property === "inTransaction") {
+          return target.inTransaction;
+        }
+        if (property !== "prepare") {
+          throw new Error("correction transaction exposes only the active database query interface");
+        }
+        assertTransactionActive();
+        return (source: string) => {
+          assertTransactionActive();
+          return guardStatement(target.prepare(source));
+        };
+      },
+      set: () => {
+        throw new Error("correction transaction database is readonly");
+      },
+    });
+    const context: CorrectionTransactionContext = {
+      db: transactionDatabase,
+      save: (params) => {
+        assertTransactionActive();
+        return this.saveInternal(params);
+      },
+      importMemory: (params) => {
+        assertTransactionActive();
+        return this.importCorrectionMemory(params);
+      },
+    };
+    const transaction = this.db.transaction(() => {
+      transactionActive = true;
+      try {
+        const result = callback(context);
+        if (result !== null && (typeof result === "object" || typeof result === "function") && "then" in result && typeof result.then === "function") {
+          throw new Error("correction transaction callback must be synchronous");
+        }
+        return result;
+      } finally {
+        transactionActive = false;
+      }
+    });
+    return transaction() as ReturnType<TCallback>;
+  }
+
+  private importCorrectionMemory(params: CorrectionMemoryImportParams): CorrectionMemoryImportResult {
+    const priorImport = this.db.prepare(`
+      SELECT target_memory_id, source_content_hash
+      FROM owner_correction_imports
+      WHERE source_store_hash = ? AND source_memory_id = ?
+    `).get(params.sourceStoreHash, params.sourceMemoryId) as {
+      target_memory_id: string;
+      source_content_hash: string;
+    } | undefined;
+    if (priorImport) {
+      if (priorImport.source_content_hash !== params.sourceContentHash) {
+        throw new Error("imported source content changed");
+      }
+      return { targetMemoryId: priorImport.target_memory_id, inserted: false };
+    }
+
+    const contentHash = params.memory.content_hash ?? computeContentHash({
+      project: params.memory.project ?? undefined,
+      scope: params.memory.scope ?? undefined,
+      category: params.memory.category,
+      title: params.memory.title,
+      content: params.memory.content,
+    });
+    const duplicate = this.db.prepare(`
+      SELECT id FROM memories
+      WHERE state = 'active' AND category = ? AND content_hash = ?
+        AND project IS ? AND scope IS ?
+      LIMIT 1
+    `).get(
+      params.memory.category,
+      contentHash,
+      params.memory.project,
+      params.memory.scope,
+    ) as { id: string } | undefined;
+
+    let targetMemoryId: string;
+    let inserted = false;
+    if (duplicate) {
+      targetMemoryId = duplicate.id;
+    } else {
+      targetMemoryId = params.memory.id;
+      let idExists = this.db.prepare("SELECT id FROM memories WHERE id = ?").get(targetMemoryId) !== undefined;
+      while (idExists) {
+        targetMemoryId = this.generateId();
+        idExists = this.db.prepare("SELECT id FROM memories WHERE id = ?").get(targetMemoryId) !== undefined;
+      }
+      this.db.prepare(`
+        INSERT INTO memories (
+          id, timestamp, category, title, content, tags, project, scope, intensity, knowledge_gap,
+          positive_action, scenario, why_core, predicted_factors, actual_factors, prediction_error,
+          prediction_delta, deleted_at, state, project_confidence, content_hash, last_read_at,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        targetMemoryId,
+        params.memory.timestamp,
+        params.memory.category,
+        params.memory.title,
+        params.memory.content,
+        params.memory.tags,
+        params.memory.project,
+        params.memory.scope,
+        params.memory.intensity,
+        params.memory.knowledge_gap,
+        params.memory.positive_action,
+        params.memory.scenario,
+        params.memory.why_core,
+        params.memory.predicted_factors,
+        params.memory.actual_factors,
+        params.memory.prediction_error,
+        params.memory.prediction_delta,
+        params.memory.deleted_at,
+        params.memory.state,
+        params.memory.project_confidence,
+        contentHash,
+        params.memory.last_read_at,
+        params.memory.created_at,
+        params.memory.updated_at,
+      );
+      inserted = true;
+    }
+
+    this.db.prepare(`
+      INSERT INTO owner_correction_imports (
+        source_store_hash, source_memory_id, target_memory_id, imported_at, source_timestamp, source_content_hash
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      params.sourceStoreHash,
+      params.sourceMemoryId,
+      targetMemoryId,
+      params.importedAt,
+      params.memory.timestamp,
+      params.sourceContentHash,
+    );
+    return { targetMemoryId, inserted };
   }
 
   getDetail(params: GetDetailParams): GetDetailResult {
@@ -1039,6 +1413,71 @@ export class SQLiteStorage {
       results: indexEntries,
       totalCount: countRow.count,
       hint: buildSearchHint(indexEntries.length, fallbackStage),
+      fallbackStage: fallbackStage ?? undefined,
+    };
+  }
+
+  searchCorrectionCandidates(params: { query: string; project: string }): SearchResult {
+    this.validateHookSchema(false);
+    const query = params.query.trim();
+    if (query.length === 0) {
+      return {
+        results: [],
+        totalCount: 0,
+        hint: buildSearchHint(0),
+      };
+    }
+
+    const searchParams: SearchParams = { query, category: "dont" };
+    const boundaries: CorrectionSearchBoundary[] = [
+      { visibility: "project", project: params.project },
+      { visibility: "owner" },
+    ];
+    const rows: MemoryRow[] = [];
+    let totalCount = 0;
+    let fallbackStage: FtsFallbackStage | null = null;
+
+    for (const boundary of boundaries) {
+      let branchRows: MemoryRow[];
+      let branchCount: number;
+      if (query.length >= 3) {
+        const staged = this.searchFtsStaged(query, searchParams, 20, boundary);
+        branchRows = staged.rows;
+        branchCount = staged.countRow.count;
+        fallbackStage = fallbackStage ?? staged.stage;
+        if (branchRows.length === 0) {
+          const shortTokens = extractShortCjkTokens(query);
+          if (shortTokens.length > 0) {
+            const rescued = this.searchShortTokenLike(shortTokens, searchParams, 20, boundary);
+            branchRows = rescued.rows;
+            branchCount = rescued.countRow.count;
+          }
+        }
+      } else {
+        const matched = this.searchShortTokenLike([query], searchParams, 20, boundary);
+        branchRows = matched.rows;
+        branchCount = matched.countRow.count;
+      }
+      rows.push(...branchRows);
+      totalCount += branchCount;
+    }
+
+    const uniqueRows = Array.from(new Map(rows.map((row) => [row.id, row])).values()).slice(0, 40);
+    const results: MemoryIndexEntry[] = uniqueRows.map((row) => ({
+      id: row.id,
+      timestamp: row.timestamp,
+      category: row.category as MemoryCategory,
+      title: row.title,
+      tags: JSON.parse(row.tags),
+      project: row.project ?? undefined,
+      scope: row.scope ?? undefined,
+      intensity: row.intensity ?? undefined,
+    }));
+
+    return {
+      results,
+      totalCount,
+      hint: buildSearchHint(results.length, fallbackStage),
       fallbackStage: fallbackStage ?? undefined,
     };
   }
@@ -1489,6 +1928,10 @@ export class SQLiteStorage {
    */
   get connection(): Database.Database {
     return this.db;
+  }
+
+  get supportsCorrectionHooks(): boolean {
+    return this.correctionHookSupported;
   }
 
   /**

@@ -1,17 +1,28 @@
-import { config as dotenvConfig } from "dotenv";
+import { config as dotenvConfig, type DotenvPopulateInput } from "dotenv";
 import { dirname, resolve, join } from "path";
 import { homedir } from "os";
 import { fileURLToPath } from "url";
 import { validateWebhookUrl } from "./utils/validate-webhook-url.js";
 import { DEFAULT_NIGHTLY_CAP } from "./consolidator/batch-cap.js";
+import { resolveHookStore } from "./storage/resolve-store.js";
+
+const startupMemoryDir = process.env.MEMORY_DIR;
+const dotenvProcessEnv = new Proxy(process.env as unknown as DotenvPopulateInput, {
+  set(target, property, value) {
+    if (property === "MEMORY_DIR") {
+      return true;
+    }
+    return Reflect.set(target, property, value);
+  },
+});
 
 // __dirnameベースで.envを探す（CWDに依存しない）
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // プロジェクトローカルの.envを優先、なければグローバルの~/.wasurenagusa/.envをフォールバック
-dotenvConfig({ path: resolve(__dirname, "../.env") });
-dotenvConfig({ path: join(homedir(), ".wasurenagusa", ".env") });
+dotenvConfig({ path: resolve(__dirname, "../.env"), processEnv: dotenvProcessEnv });
+dotenvConfig({ path: join(homedir(), ".wasurenagusa", ".env"), processEnv: dotenvProcessEnv });
 
 /**
  * env から「窓の日数」を読む（Number.isFinite ガード付き）。
@@ -82,7 +93,7 @@ export const config = {
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || "",
 
   // メモリディレクトリ（プロジェクトルートからの相対パス）
-  memoryDir: process.env.MEMORY_DIR || ".wasurenagusa",
+  memoryDir: startupMemoryDir === undefined || startupMemoryDir === "" ? ".wasurenagusa" : startupMemoryDir,
 
   // 検索デフォルト
   defaultSearchLimit: 5,
@@ -154,8 +165,8 @@ export const config = {
   stashDefaultTtlHours: 24,
 };
 
-export function getMemoryPath(projectRoot: string): string {
-  return resolve(projectRoot, config.memoryDir);
+export function getMemoryPath(projectRoot: string, homeDir: string = homedir()): string {
+  return resolveHookStore(projectRoot, import.meta.url, startupMemoryDir, homeDir);
 }
 
 /**

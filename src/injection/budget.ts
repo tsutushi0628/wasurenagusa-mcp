@@ -31,6 +31,53 @@ export function estimateTokens(text: string): number {
   return Math.max(charEstimate, byteEstimate);
 }
 
+export interface WholeItemBudgetResult<T> {
+  included: T[];
+  omitted: T[];
+  text: string;
+  tokenCount: number;
+}
+
+/** 完全な項目だけを優先順に出力し、最初に収まらない項目と後続を除外する。 */
+export function enforceWholeItemBudget<T>(
+  items: readonly T[],
+  budgetTokens: number,
+  renderItems: (included: readonly T[]) => string,
+): WholeItemBudgetResult<T> {
+  let normalizedBudget: number;
+  if (Number.isFinite(budgetTokens)) {
+    normalizedBudget = Math.max(0, Math.floor(budgetTokens));
+  } else if (budgetTokens > 0) {
+    normalizedBudget = Number.POSITIVE_INFINITY;
+  } else {
+    normalizedBudget = 0;
+  }
+  const included: T[] = [];
+
+  for (const item of items) {
+    const candidate = [...included, item];
+    if (estimateTokens(renderItems(candidate)) > normalizedBudget) break;
+    included.push(item);
+  }
+
+  if (included.length === 0) {
+    return {
+      included,
+      omitted: [...items],
+      text: "",
+      tokenCount: 0,
+    };
+  }
+
+  const text = renderItems(included);
+  return {
+    included,
+    omitted: items.slice(included.length),
+    text,
+    tokenCount: estimateTokens(text),
+  };
+}
+
 /**
  * 注入文字列にトークンバジェット上限を適用する。
  * 上限内なら素通し。超過時は行境界で末尾から切り詰め、可視マーカー行を残す。

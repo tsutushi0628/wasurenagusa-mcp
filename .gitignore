@@ -11,6 +11,9 @@ dist/
 # Logs
 *.log
 
+# 一時物・Codex作業域
+.tmp/
+
 # OS
 .DS_Store
 

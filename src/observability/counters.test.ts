@@ -10,6 +10,7 @@ import {
   resetCounterWriteFailureCountForTest,
   DEFAULT_THRESHOLDS,
 } from "./counters.js";
+import type { MetricName } from "./counters.js";
 
 /**
  * 可観測性カウンタ5指標と閾値警報（タスク0.9、R-M1）。
@@ -123,8 +124,15 @@ describe("observability/counters: 5指標の計測と閾値警報", () => {
     chmodSync(join(tmpDir, "no-such-parent"), 0o444);
 
     const before = getCounterWriteFailureCount();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
-    await expect(increment(unwritableMemoryPath, "guard_block_count", 1)).resolves.toBeUndefined();
+    try {
+      await expect(increment(unwritableMemoryPath, "guard_block_count", 1)).resolves.toBeUndefined();
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(unwritableMemoryPath);
+    } finally {
+      errorSpy.mockRestore();
+    }
 
     expect(getCounterWriteFailureCount()).toBe(before + 1);
 
@@ -196,6 +204,44 @@ describe("observability/counters: 5指標の計測と閾値警報", () => {
 
     expect(result.guardBlockCount.total).toBe(2);
     expect(result.corruptLineCount).toBe(1);
+  });
+
+  it("訂正ループのcounter名も既存JSONLの3フィールド形式で記録される", async () => {
+    const correctionCounters: MetricName[] = [
+      "correction_input_total",
+      "correction_queued_total",
+      "correction_candidate",
+      "correction_confirmed",
+      "correction_dedup",
+      "correction_rejected",
+      "correction_conflict",
+      "correction_store_error",
+      "correction_backlog",
+      "correction_injected",
+      "correction_cooldown_skip",
+      "correction_budget_skip",
+      "correction_hook_timeout",
+      "correction_hook_ms",
+      "correction_tokens",
+      "correction_llm_call",
+    ];
+
+    for (const metric of correctionCounters) {
+      await increment(memoryPath, metric, 0);
+    }
+
+    const today = new Date();
+    const jst = new Date(today.getTime() + 9 * 60 * 60 * 1000);
+    const datePart = jst.toISOString().slice(0, 10);
+    const logPath = join(memoryPath, "logs", `counters-${datePart}.jsonl`);
+    const entries = readFileSync(logPath, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+
+    expect(entries).toHaveLength(correctionCounters.length);
+    expect(entries.map((entry) => entry.metric)).toEqual(correctionCounters);
+    for (const entry of entries) {
+      expect(Object.keys(entry).sort()).toEqual(["metric", "ts", "value"]);
+      expect(entry.value).toBe(0);
+    }
   });
 
   it("既存カウンタファイルの読込自体が失敗したらsnapshot()はthrowする（fail-loud、既存ファイル無しの正常系とは区別する）", async () => {

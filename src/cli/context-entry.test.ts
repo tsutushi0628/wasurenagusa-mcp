@@ -1,85 +1,373 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, writeFileSync, symlinkSync, rmSync } from "fs";
-import { join } from "path";
-import { tmpdir } from "os";
-import { pathToFileURL } from "url";
+import Database from "better-sqlite3";
+import { Writable } from "node:stream";
+import { describe, it, expect, vi } from "vitest";
 
 import {
-  isDirectRun,
+  isDirectRun as contextIsDirectRun,
+  parseContextHookInput,
+  getContextInjectionPlan,
+  emitContextOutput,
+  writeStdoutOnce,
+  detectPendingCorrectionCandidates,
+  addUserPromptPendingReceipt,
   estimateTokens,
   enforceInjectionTokenBudget,
   logInjectionBudgetWarning,
   DEFAULT_INJECTION_TOKEN_BUDGET,
 } from "./context.js";
+import { isDirectRun as sharedIsDirectRun } from "../utils/cli-entry.js";
+import { renderCorrectionRules } from "../corrections/render.js";
+import { hashRawText, hashSessionId } from "../corrections/session-store.js";
+import { initializeCorrectionSchema } from "../storage/correction-schema.js";
 
-/**
- * CLIエントリ判定（isDirectRun）と注入トークンバジェット強制の業務挙動を検証する。
- *
- * 背景: npmグローバルbin（symlink）経由の起動だと、生パス一致判定
- * （process.argv[1] === fileURLToPath(import.meta.url)）が不一致になり main() が
- * 呼ばれず、記憶ストアのコンテキスト注入が無言で0バイトになっていた。
- * realpath解決による同一性判定でsymlink経由の起動も検知できることを検証する。
- *
- * あわせて、注入の暴走（無制限の全文注入）を防ぐトークンバジェット強制が
- * 「上限内は素通し・超過時は行境界で切り詰め・欠損は必ず可視化する
- * （無言で切らない・全文フォールバック経路を作らない）」という業務要件を
- * 満たすことを検証する。
- */
-describe("context.ts: isDirectRun (CLIエントリ判定・symlink経由の起動検知)", () => {
-  let tmpDir: string;
-  let realFile: string;
+describe("context.ts: isDirectRun export compatibility", () => {
+  it("shares the implementation exported by cli-entry.ts", () => {
+    expect(contextIsDirectRun).toBe(sharedIsDirectRun);
+  });
+});
 
-  beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), "wasurenagusa-isdirectrun-test-"));
-    realFile = join(tmpDir, "context.js");
-    writeFileSync(realFile, "// dummy module file\n");
+describe("context.ts: hook input contract", () => {
+  it("accepts a valid event at the 1 MiB stdin limit", () => {
+    const prefix = JSON.stringify({
+      session_id: "synthetic-session",
+      cwd: "/synthetic/project",
+      hook_event_name: "UserPromptSubmit",
+      prompt: "合成入力",
+    }).slice(0, -1);
+    const input = `${prefix},"padding":"${"x".repeat(1024 * 1024 - Buffer.byteLength(prefix) - 14)}"}`;
+
+    expect(Buffer.byteLength(input)).toBe(1024 * 1024);
+    expect(parseContextHookInput(input).hook_event_name).toBe("UserPromptSubmit");
   });
 
-  afterEach(() => {
-    rmSync(tmpDir, { recursive: true, force: true });
+  it("rejects an input over 1 MiB and an unknown hook event", () => {
+    const oversized = JSON.stringify({
+      session_id: "synthetic-session",
+      cwd: "/synthetic/project",
+      hook_event_name: "SessionStart",
+      padding: "x".repeat(1024 * 1024),
+    });
+    const unknownEvent = JSON.stringify({
+      session_id: "synthetic-session",
+      cwd: "/synthetic/project",
+      hook_event_name: "OtherEvent",
+    });
+
+    expect(() => parseContextHookInput(oversized)).toThrow();
+    expect(() => parseContextHookInput(unknownEvent)).toThrow();
+  });
+});
+
+describe("context.ts: event injection route", () => {
+  it("starts refresh at human turn 31 and keeps turn 30 on the prompt path", () => {
+    const input = {
+      session_id: "synthetic-session",
+      cwd: "/synthetic/project",
+      hook_event_name: "UserPromptSubmit" as const,
+      prompt: "合成の質問",
+    };
+
+    expect(getContextInjectionPlan(input, 30, 2000)).toEqual({
+      requestTrigger: "prompt",
+      renderTrigger: "prompt",
+      ledgerTrigger: "prompt",
+      budgetTokens: 800,
+    });
+    expect(getContextInjectionPlan(input, 31, 2000)).toEqual({
+      requestTrigger: "refresh",
+      renderTrigger: "refresh",
+      ledgerTrigger: "refresh",
+      budgetTokens: 800,
+    });
   });
 
-  it("npmグローバルbinのsymlink経由で起動されても、実体パス解決で本人の起動と検知する", () => {
-    const symlinkPath = join(tmpDir, "wasurenagusa-context-bin");
-    symlinkSync(realFile, symlinkPath);
-    const moduleUrl = pathToFileURL(realFile).href;
+  it("uses the compact frame for PreCompact and a fresh start frame after compact", () => {
+    const compactInput = {
+      session_id: "synthetic-session",
+      cwd: "/synthetic/project",
+      hook_event_name: "PreCompact" as const,
+    };
+    const resumedInput = {
+      session_id: "synthetic-session",
+      cwd: "/synthetic/project",
+      hook_event_name: "SessionStart" as const,
+      source: "compact",
+    };
 
-    expect(isDirectRun(symlinkPath, moduleUrl)).toBe(true);
+    expect(getContextInjectionPlan(compactInput, 12, 2000)).toEqual({
+      requestTrigger: "compact",
+      renderTrigger: "precompact",
+      ledgerTrigger: "compact",
+      budgetTokens: 450,
+    });
+    expect(getContextInjectionPlan(resumedInput, 12, 2000)).toEqual({
+      requestTrigger: "start",
+      renderTrigger: "compact",
+      ledgerTrigger: "start",
+      budgetTokens: 1800,
+    });
+  });
+});
+
+describe("context.ts: 未照合hookの訂正候補", () => {
+  it("hook promptから検出した完全規則をpending保存用に返す", () => {
+    const candidates = detectPendingCorrectionCandidates("今後は質問に答えてください");
+
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({
+      ruleText: "毎回、質問に回答する",
+      status: "confirmed",
+      topicKey: "response_policy",
+      actionKey: "answer",
+      ruleInput: {
+        version: 2,
+        topicKey: "response_policy",
+        actionKey: "answer",
+        requiredValues: { subject: "質問" },
+        conditions: [],
+        lifetimeKind: "explicit_continuing",
+        continuationBasis: "explicit-continuing-command",
+      },
+    });
+    expect(candidates[0]?.ruleText).not.toBe("今後は質問に答えてください");
   });
 
-  it("symlinkを介さない直接node実行では、従来どおり起動を検知する", () => {
-    const moduleUrl = pathToFileURL(realFile).href;
+  it("機密値を含むpromptから機密文字列を候補へ残さない", () => {
+    const candidates = detectPendingCorrectionCandidates(
+      "今後はtoken=synthetic-secret-value-1234567890を使って回答して",
+    );
 
-    expect(isDirectRun(realFile, moduleUrl)).toBe(true);
+    expect(candidates.length).toBeGreaterThan(0);
+    expect(JSON.stringify(candidates)).not.toContain("synthetic-secret-value-1234567890");
   });
 
-  it("無関係な別ファイルから呼ばれた場合は、本人の起動と誤検知しない", () => {
-    const otherFile = join(tmpDir, "other-script.js");
-    writeFileSync(otherFile, "// unrelated script\n");
-    const moduleUrl = pathToFileURL(realFile).href;
-
-    expect(isDirectRun(otherFile, moduleUrl)).toBe(false);
+  it("訂正でないpromptは候補を作らない", () => {
+    expect(detectPendingCorrectionCandidates("合成値を検索してください")).toEqual([]);
   });
 
-  it("argv1が未定義（importされただけ等）なら、起動と判定しない", () => {
-    const moduleUrl = pathToFileURL(realFile).href;
+  it("未照合receiptへ検出候補を保存し、UUID再配信は既存時刻で冪等に扱う", () => {
+    const db = new Database(":memory:");
+    db.exec("CREATE TABLE schema_version (version INTEGER NOT NULL, applied_at TEXT NOT NULL)");
+    db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (10, 'synthetic-time')").run();
+    initializeCorrectionSchema(db);
+    const storage = {
+      runCorrectionTransaction<T>(callback: (context: { db: Database.Database }) => T): T {
+        return db.transaction(() => callback({ db })).immediate();
+      },
+    };
+    const sessionId = "synthetic-session";
+    const sessionIdHash = hashSessionId(sessionId);
+    const prompt = "今後は質問に答えてください";
+    try {
+      const receiptId = addUserPromptPendingReceipt(
+        storage as never,
+        sessionIdHash,
+        sessionId,
+        "synthetic-uuid",
+        0,
+        prompt,
+        "2026-10-03T00:00:01.000Z",
+        false,
+      );
+      const repeatedId = addUserPromptPendingReceipt(
+        storage as never,
+        sessionIdHash,
+        sessionId,
+        "synthetic-uuid",
+        0,
+        prompt,
+        "2026-10-03T00:00:02.000Z",
+        false,
+      );
+      const row = db.prepare(`
+        SELECT received_at, raw_text_hash, extracted_candidates
+        FROM owner_correction_pending WHERE receipt_id = ?
+      `).get(receiptId) as { received_at: string; raw_text_hash: string; extracted_candidates: string };
+      const extractedCandidates = JSON.parse(row.extracted_candidates);
 
-    expect(isDirectRun(undefined, moduleUrl)).toBe(false);
+      expect(repeatedId).toBe(receiptId);
+      expect(row.received_at).toBe("2026-10-03T00:00:01.000Z");
+      expect(row.raw_text_hash).toBe(hashRawText(prompt));
+      expect(extractedCandidates).toMatchObject([{
+        ruleText: "毎回、質問に回答する",
+        status: "confirmed",
+        ruleInput: {
+          version: 2,
+          topicKey: "response_policy",
+          actionKey: "answer",
+          requiredValues: { subject: "質問" },
+          conditions: [],
+          lifetimeKind: "explicit_continuing",
+          continuationBasis: "explicit-continuing-command",
+        },
+      }]);
+      expect(JSON.stringify(extractedCandidates)).not.toContain(prompt);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe("context.ts: stdout と訂正注入台帳", () => {
+  const rendered = renderCorrectionRules({
+    trigger: "prompt",
+    rules: [{
+      bundleKey: "synthetic-bundle",
+      version: 1,
+      title: "合成の注意",
+      ruleText: "合成fixtureでは条件を保つ",
+      delivery: "related",
+    }],
   });
 
-  it("realpath解決に失敗する場合（存在しないパス）でも、生パスが完全一致すれば起動と判定する（フォールバック）", () => {
-    const missingPath = join(tmpDir, "does-not-exist.js");
-    const moduleUrl = pathToFileURL(missingPath).href;
+  it("stdout を1回書き、その callback が成功した後に台帳を保存する", async () => {
+    const order: string[] = [];
+    let writtenOutput = "";
+    const stdout = new Writable({
+      write(chunk, _encoding, callback) {
+        order.push("stdout");
+        writtenOutput = chunk.toString();
+        callback();
+      },
+    });
+    const storage = {
+      runCorrectionTransaction(callback: (context: { db: { prepare: () => { run: () => void } } }) => unknown) {
+        return callback({ db: { prepare: () => ({ run: () => order.push("ledger") }) } });
+      },
+    };
 
-    expect(isDirectRun(missingPath, moduleUrl)).toBe(true);
+    const result = await emitContextOutput({
+      output: rendered.text,
+      rendered,
+      storage: storage as never,
+      sessionIdHash: "synthetic-session-hash",
+      compactEpoch: 0,
+      humanOrdinal: 1,
+      trigger: "prompt",
+      deadlineAt: Date.now() + 3500,
+      stdout,
+    });
+
+    expect(result.status).toBe("emitted");
+    expect(order).toEqual(["stdout", "ledger"]);
+    expect(writtenOutput).toContain("合成fixtureでは条件を保つ");
   });
 
-  it("realpath解決に失敗し、かつ生パスも不一致なら、起動と判定しない（フォールバック時も誤起動しない）", () => {
-    const missingPathA = join(tmpDir, "missing-a.js");
-    const missingPathB = join(tmpDir, "missing-b.js");
-    const moduleUrl = pathToFileURL(missingPathB).href;
+  it("EPIPE callback の失敗を受けた場合は台帳を保存しない", async () => {
+    const order: string[] = [];
+    const stdout = new Writable({
+      write(_chunk, _encoding, callback) {
+        order.push("stdout");
+        callback(Object.assign(new Error("synthetic pipe failure"), { code: "EPIPE" }));
+      },
+    });
+    const storage = {
+      runCorrectionTransaction(callback: (context: { db: { prepare: () => { run: () => void } } }) => unknown) {
+        return callback({ db: { prepare: () => ({ run: () => order.push("ledger") }) } });
+      },
+    };
 
-    expect(isDirectRun(missingPathA, moduleUrl)).toBe(false);
+    const result = await emitContextOutput({
+      output: rendered.text,
+      rendered,
+      storage: storage as never,
+      sessionIdHash: "synthetic-session-hash",
+      compactEpoch: 0,
+      humanOrdinal: 1,
+      trigger: "prompt",
+      deadlineAt: Date.now() + 3500,
+      stdout,
+    });
+
+    expect(result.status).toBe("write_failed");
+    expect(order).toEqual(["stdout"]);
+  });
+
+  it("台帳保存が失敗した場合は出力済みでも成功を返さない", async () => {
+    const stdout = new Writable({
+      write(_chunk, _encoding, callback) {
+        callback();
+      },
+    });
+    const storage = {
+      runCorrectionTransaction() {
+        throw new Error("synthetic ledger failure");
+      },
+    };
+
+    const result = await emitContextOutput({
+      output: rendered.text,
+      rendered,
+      storage: storage as never,
+      sessionIdHash: "synthetic-session-hash",
+      compactEpoch: 0,
+      humanOrdinal: 1,
+      trigger: "prompt",
+      deadlineAt: Date.now() + 3500,
+      stdout,
+    });
+
+    expect(result.status).toBe("ledger_unknown");
+    stdout.destroy();
+  });
+
+  it("stdout callback が期限後に返った場合は台帳を保存しない", async () => {
+    const stdout = new Writable({
+      write(_chunk, _encoding, callback) {
+        setTimeout(callback, 30);
+      },
+    });
+    const storage = { runCorrectionTransaction: vi.fn() };
+
+    const result = await emitContextOutput({
+      output: rendered.text,
+      rendered,
+      storage: storage as never,
+      sessionIdHash: "synthetic-session-hash",
+      compactEpoch: 0,
+      humanOrdinal: 1,
+      trigger: "prompt",
+      deadlineAt: Date.now() + 310,
+      stdout,
+    });
+
+    expect(result.status).toBe("timeout");
+    expect(storage.runCorrectionTransaction).not.toHaveBeenCalled();
+    stdout.destroy();
+  });
+
+  it("期限切れなら stdout と台帳のどちらも処理しない", async () => {
+    const write = vi.fn();
+    const storage = { runCorrectionTransaction: vi.fn() };
+
+    const result = await emitContextOutput({
+      output: rendered.text,
+      rendered,
+      storage: storage as never,
+      sessionIdHash: "synthetic-session-hash",
+      compactEpoch: 0,
+      humanOrdinal: 1,
+      trigger: "prompt",
+      deadlineAt: Date.now() - 1,
+      stdout: { write } as never,
+    });
+
+    expect(result.status).toBe("timeout");
+    expect(write).not.toHaveBeenCalled();
+    expect(storage.runCorrectionTransaction).not.toHaveBeenCalled();
+  });
+
+  it("stdout 書込み関数は空本文でも1回だけ callback を待つ", async () => {
+    let writes = 0;
+    const stdout = new Writable({
+      write(_chunk, _encoding, callback) {
+        writes += 1;
+        callback();
+      },
+    });
+
+    await expect(writeStdoutOnce("", stdout)).resolves.toBe(true);
+    expect(writes).toBe(1);
   });
 });
 

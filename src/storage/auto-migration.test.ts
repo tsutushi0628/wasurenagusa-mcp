@@ -2,7 +2,9 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import Database from "better-sqlite3";
 import { SQLiteStorage } from "./sqlite.js";
+import { getSchemaVersion } from "./schema.js";
 import type { MemoryCategory } from "../types.js";
 
 function createMinimalV1Files(memoryPath: string): void {
@@ -121,6 +123,26 @@ describe("TASK-023: マイグレーション自動判定", () => {
     expect(search.totalCount).toBe(0);
 
     storage.close();
+  });
+
+  it("通常initializeは既存v10をv11へ先行移行しない", () => {
+    const initialStorage = new SQLiteStorage(dbPath);
+    initialStorage.initialize();
+    initialStorage.close();
+
+    const before = new Database(dbPath, { readonly: true });
+    expect(getSchemaVersion(before)).toBe(10);
+    expect(before.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'owner_correction_%'").all()).toEqual([]);
+    before.close();
+
+    const storage = new SQLiteStorage(dbPath);
+    storage.initialize();
+    storage.close();
+
+    const after = new Database(dbPath, { readonly: true });
+    expect(getSchemaVersion(after)).toBe(10);
+    expect(after.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'owner_correction_%'").all()).toEqual([]);
+    after.close();
   });
 
   it("DB既存 + v1ファイル存在 → マイグレーションスキップ", () => {

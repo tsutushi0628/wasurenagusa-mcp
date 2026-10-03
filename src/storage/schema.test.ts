@@ -86,6 +86,17 @@ describe("schema", () => {
     expect(version).toBe(CURRENT_SCHEMA_VERSION);
   });
 
+  it("通常のschema初期化は訂正用v11を作成しない", () => {
+    initializeSchema(db);
+    initializeSchema(db, false);
+
+    const correctionTables = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'owner_correction_%'")
+      .all();
+    expect(correctionTables).toEqual([]);
+    expect(getSchemaVersion(db)).toBe(10);
+  });
+
   it("initializeSchemaは冪等（2回実行してもエラーにならない）", () => {
     initializeSchema(db);
     initializeSchema(db);

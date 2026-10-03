@@ -37,7 +37,23 @@ export type MetricName =
   | "embedding_failure_count"
   | "llm_output_guard_warning"
   | "llm_output_batch_skip"
-  | "injection_skipped_count";
+  | "injection_skipped_count"
+  | "correction_input_total"
+  | "correction_queued_total"
+  | "correction_candidate"
+  | "correction_confirmed"
+  | "correction_dedup"
+  | "correction_rejected"
+  | "correction_conflict"
+  | "correction_store_error"
+  | "correction_backlog"
+  | "correction_injected"
+  | "correction_cooldown_skip"
+  | "correction_budget_skip"
+  | "correction_hook_timeout"
+  | "correction_hook_ms"
+  | "correction_tokens"
+  | "correction_llm_call";
 
 export interface CounterEntry {
   ts: string;
@@ -161,9 +177,9 @@ export async function increment(
   try {
     await mkdir(logsDir, { recursive: true });
     await appendFile(filePath, line, "utf-8");
-  } catch (error) {
+  } catch {
     counterWriteFailureCount++;
-    console.error("[observability] カウンタ書き込み失敗:", error);
+    console.error("[observability] カウンタ書き込み失敗");
   }
 }
 

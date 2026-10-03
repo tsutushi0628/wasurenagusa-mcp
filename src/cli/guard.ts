@@ -18,6 +18,7 @@ import { readFile, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import vm from "node:vm";
 import { findProjectRoot } from "../utils/projectRoot.js";
+import { isDirectRun } from "../utils/cli-entry.js";
 import { getMemoryPath } from "../config.js";
 import type { ConsolidatedDont, ConsolidatedPrinciple } from "../types.js";
 
@@ -209,14 +210,7 @@ async function main() {
   process.exit(0);
 }
 
-// CLI として直接実行された場合のみ main を起動する。
-// import 経由（例: pre-tool-use-guard が checkGuard などを利用）では走らせない。
-import { fileURLToPath as _fileURLToPath } from "url";
-const isDirectRun = process.argv[1]
-  ? process.argv[1] === _fileURLToPath(import.meta.url)
-  : false;
-
-if (isDirectRun) {
+if (isDirectRun(process.argv[1], import.meta.url)) {
   main().catch(() => {
     // 想定外エラー → fail-open
     process.exit(0);

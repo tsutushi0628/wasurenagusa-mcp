@@ -1,5 +1,15 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { config as dotenvConfig } from "dotenv";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 import { resolveWindowDaysEnv } from "./config.js";
+import { resolveHookStore } from "./storage/resolve-store.js";
+
+vi.mock("dotenv", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("dotenv")>();
+  return { ...actual, config: vi.fn(() => ({ parsed: undefined })) };
+});
 
 /**
  * env から窓日数を読む際の Number.isFinite ガードの業務要件を固定する。
@@ -15,6 +25,8 @@ import { resolveWindowDaysEnv } from "./config.js";
 describe("resolveWindowDaysEnv（窓日数の env ガード）", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.mocked(dotenvConfig).mockReset();
+    vi.resetModules();
   });
 
   it("非数入力は既定値へフォールバックし warn を1行出す", () => {
@@ -44,5 +56,81 @@ describe("resolveWindowDaysEnv（窓日数の env ガード）", () => {
     expect(resolveWindowDaysEnv("", 30, "LOG_RETENTION_DAYS")).toBe(30);
     expect(resolveWindowDaysEnv("   ", 30, "LOG_RETENTION_DAYS")).toBe(30);
     expect(warn).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "./project-store", join(tmpdir(), "central-store")])(
+    "MCP getMemoryPathとhook resolverが同じ保存先を返す（MEMORY_DIR=%s）",
+    async (memoryDir) => {
+      const previousMemoryDir = process.env.MEMORY_DIR;
+      const homeDir = mkdtempSync(join(tmpdir(), "wasurenagusa-config-home-"));
+      if (memoryDir === undefined) {
+        delete process.env.MEMORY_DIR;
+        mkdirSync(join(homeDir, ".wasurenagusa"), { recursive: true });
+        writeFileSync(join(homeDir, ".wasurenagusa", ".env"), "MEMORY_DIR=home-store\n");
+      } else {
+        process.env.MEMORY_DIR = memoryDir;
+      }
+      vi.resetModules();
+
+      try {
+        const { getMemoryPath } = await import("./config.js");
+        const projectRoot = join(tmpdir(), "wasurenagusa-config-project");
+        // MCP と hook の一致だけを見る。パッケージ直下 .env の有無は実行環境で変わるため、
+        // 優先順そのもの（環境変数 > パッケージ .env > ホーム .env）は resolve-store.test.ts の偽パッケージで検証する
+        const expectedStore = resolveHookStore(projectRoot, import.meta.url, memoryDir, homeDir);
+        expect(getMemoryPath(projectRoot, homeDir)).toBe(expectedStore);
+        expect(resolveHookStore(projectRoot, import.meta.url, memoryDir, homeDir)).toBe(expectedStore);
+      } finally {
+        rmSync(homeDir, { recursive: true, force: true });
+        if (previousMemoryDir === undefined) {
+          delete process.env.MEMORY_DIR;
+        } else {
+          process.env.MEMORY_DIR = previousMemoryDir;
+        }
+      }
+    },
+  );
+
+  it("dotenvで他の設定を読みつつMEMORY_DIRはprocess.envへ混入させない", async () => {
+    const previousMemoryDir = process.env.MEMORY_DIR;
+    const testEnvKey = "T3_CONFIG_DOTENV_TEST";
+    const previousTestEnv = process.env[testEnvKey];
+    delete process.env.MEMORY_DIR;
+    delete process.env[testEnvKey];
+    vi.mocked(dotenvConfig).mockImplementation((options) => {
+      const parsed = {
+        MEMORY_DIR: join(tmpdir(), "dotenv-central-store"),
+        [testEnvKey]: "loaded-from-dotenv",
+      };
+      const processEnv = options?.processEnv;
+      if (processEnv === undefined) {
+        throw new Error("Expected config to receive processEnv");
+      }
+      for (const [key, value] of Object.entries(parsed)) {
+        if (processEnv[key] === undefined) {
+          processEnv[key] = value;
+        }
+      }
+      return { parsed };
+    });
+    vi.resetModules();
+
+    try {
+      const { config: loadedConfig } = await import("./config.js");
+      expect(process.env.MEMORY_DIR).toBeUndefined();
+      expect(process.env[testEnvKey]).toBe("loaded-from-dotenv");
+      expect(loadedConfig.memoryDir).toBe(".wasurenagusa");
+    } finally {
+      if (previousMemoryDir === undefined) {
+        delete process.env.MEMORY_DIR;
+      } else {
+        process.env.MEMORY_DIR = previousMemoryDir;
+      }
+      if (previousTestEnv === undefined) {
+        delete process.env[testEnvKey];
+      } else {
+        process.env[testEnvKey] = previousTestEnv;
+      }
+    }
   });
 });
