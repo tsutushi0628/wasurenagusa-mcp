@@ -44,7 +44,9 @@ type TopicMatch = {
   actionKnown: boolean;
 };
 
-const REPEAT_CUE = /(?:再度|再び|繰り返し|前にも|以前にも|前回|また|(?:前|以前)(?:にも|も|に).{0,12}(?:言|伝|指示))/u;
+const REPEAT_CUE = /(?:再度|再び|繰り返し|前にも|以前にも|前回|(?:前|以前)(?:にも|も|に).{0,12}(?:言|伝|指示))/u;
+// 「また」は「もう一つ」「または」の意味でも使うので、語の頭にあり、後ろに今起きている状態・過去の述語が続くときだけ反復とみなす
+const REPEAT_MATA = /(?:^|[^\p{Script=Hiragana}])また(?![はいねがぐげご])[^。！？!?]{0,24}?(?:い|た|だ|てる|ている|てた|ていた|ない|違う)(?:ので|から|じゃん|よ|ぞ|ね|って|[。、,！!？?\s]|$)/u;
 const PAST_ACTION = /(?:した|していた|している|なった|使った|出した|変えた|保存した|言った|伝えた)/u;
 const MISMATCH = /(?:違う|誤り|無視|守っていない)/u;
 const TECHNICAL_CAUSE = /(?:原因|エラー|障害|例外|バグ|不具合|失敗)/iu;
@@ -451,7 +453,7 @@ function scoreSentence(sentence: string, topic: TopicMatch, context: DetectionCo
   const hasPastQuestion = ((/(?:なぜ|なんで|何で)/u.test(sentence) && PAST_ACTION.test(sentence))
     && !TECHNICAL_CAUSE.test(sentence)) || toneQuestion;
   const hasPredicate = hasCorrectionPredicate(sentence);
-  const repeated = REPEAT_CUE.test(sentence) && (hasPredicate || hasMismatch);
+  const repeated = (REPEAT_CUE.test(sentence) || REPEAT_MATA.test(sentence)) && (hasPredicate || hasMismatch);
   const repeatedScore = repeated ? 3 : 0;
   const pastActionScore = hasPastQuestion || hasMismatch ? 2 : 0;
   const continuing = CONTINUING.test(sentence) && !DEADLINE.test(sentence);

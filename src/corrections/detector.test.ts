@@ -124,6 +124,29 @@ describe("detectOwnerCorrections", () => {
     expect(unrelated[0]?.status).toBe("candidate");
   });
 
+  it("does not read the additive また (another / or / also) as a repeated correction", () => {
+    for (const text of [
+      "要約のルール変更して、要約のプロンプト修正して、また一つなんかの法律対応して。",
+      "要約は短くするか、または箇条書きにして",
+      "また、要約のプロンプトも修正して",
+      "たまたま要約が長くなったので、要約を100文字以内にして",
+      "複数ファイルにまたがる要約を100文字以内にして",
+      "また次の要約も100文字以内にして",
+      "また他の要約も短くして",
+    ]) {
+      const candidates = detect(text);
+      expect(candidates.every((candidate) => candidate.source !== "utterance_detection")).toBe(true);
+      expect(candidates.every((candidate) => candidate.ruleInput.directive === false)).toBe(true);
+    }
+    for (const text of [
+      "また要約が長いので、要約を100文字以内にして",
+      "また、要約が長いので、要約を100文字以内にして",
+      "また要約が長くなってるから、要約を100文字以内にして",
+    ]) {
+      expect(detect(text).some((candidate) => candidate.source === "utterance_detection")).toBe(true);
+    }
+  });
+
   it("keeps identical utterances as separate event evidence with their own available order", () => {
     const firstEvent = extractOwnerEvent({
       type: "user",
