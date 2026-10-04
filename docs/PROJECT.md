@@ -1,7 +1,7 @@
 ---
 schema_version: 1
-verified_at: 2026-09-16T12:58:43Z
-verified_head: cfea62d
+verified_at: 2026-10-04T00:00:00Z
+verified_head: b25d316
 source_worklog: handoff-20260720-a1-atomicity-b2b4-foundation-shipped.md
 ---
 # wasurenagusa-mcp
@@ -24,10 +24,10 @@ source_worklog: handoff-20260720-a1-atomicity-b2b4-foundation-shipped.md
 - `.wasurenagusa/`: ランタイムデータ（記憶DB、設定、バックアップ、ログ）
 
 ## 4. 現在地
-- 焦点: 直近コミットは依存関係管理をpnpm共有ストアへ統一する作業（`cfea62d`）。直前にA1移行原子性根治とB2/B4検索評価基盤をv0.21.1としてnpm公開済み（`ed8c19b`）。
-- 次の一手: B2/B4の検索ランキング利得は基盤のみ整備し係数は据え置き。適用には代表クエリの大規模Golden Set構築が必要（未着手）。
-- 残作業: (a) マルチプロセス同時移行の堅牢化は対応不要(既存の冪等移行機構が直列化するため、配備が現実化したら別タスク)。(b) `src/cli/spec-update.ts` のunhandled rejectionで`npm test`がexit 1になる既知artifact(クリーンアップ推奨、未着手)。
-- オーナー未回答: 忘却の自動アーカイブ安全網欠如への対処方針。即時停止か遡及バックフィルかの1問1答判断待ち(`health-audit-20260719.md`時点で未回答、以降の記録なし)。
+- 焦点: オーナーが同じ注意を二度言わなくて済む「訂正の検出・保存・注入ループ」を実装し、2026-10-04 に本番反映（`647c9bd`・`b25d316`、npm 未公開）。中央ストアは schema v11、毎発話の注入を有効化。
+- 次の一手: 実際の会話で訂正の候補・確定の溜まり方を観察し、誤確定があれば `WASURENAGUSA_CORRECTION_LOOP=off` で止めて直す。
+- 残作業: (a) 過去会話の再生では言い直しの 2 割弱（学習用 13/70）に効き、未見 30 session では 0/29。分からない言葉・確認しろ・要約の型・モデル指定は未対応（設計書 `docs/spec-owner-correction-loop.md` 節 11）。(b) `src/cli/spec-update.ts` の unhandled rejection と `scripts/gates/g1-foundation.test.ts` の Implementation Log 欠落 4 件は既知。
+- オーナー未回答: 今の効き目で足りるか、改修を続けるか。忘却の自動アーカイブ安全網欠如への対処方針（2026-07-19 から未回答）。
 
 ## 5. 制約と注意事項
 - 本番DBの書き換え（忘却バックフィルの遡及処理等）はオーナー承認必須。
@@ -38,4 +38,4 @@ source_worklog: handoff-20260720-a1-atomicity-b2b4-foundation-shipped.md
 
 ## 6. 根拠となる最近の記録
 - [handoff-20260720-a1-atomicity-b2b4-foundation-shipped](findings/handoff-20260720-a1-atomicity-b2b4-foundation-shipped.md)
-- [health-audit-20260719](findings/health-audit-20260719.md)
+- [worklog-20261004-owner-correction-loop](findings/worklog-20261004-owner-correction-loop.md)
