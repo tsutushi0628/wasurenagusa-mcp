@@ -257,9 +257,9 @@ describe("collect*: 実データ収集関数の単体テスト（実スキーマ
     }
   });
 
-  it("collectSpikeReport: 実際のImplementation Log（task-1.2）が実測値パターンを含む", () => {
+  it("collectSpikeReport: task-1.2のImplementation Log、無ければ追跡中のtasks.mdに旧→新の実測値が残っている", () => {
     const data = collectSpikeReport(REPO_ROOT);
-    expect(data.fileExists).toBe(true);
+    expect(data.source).not.toBe("none");
     expect(data.hasBeforeNumber).toBe(true);
     expect(data.hasAfterNumber).toBe(true);
   });
@@ -408,12 +408,28 @@ describe("evaluate*（純粋関数の単体テスト、合成データで直接�
   });
 
   it("evaluateSpikeReport: ファイル存在＋旧新の実測値パターン両方ありならPASS", () => {
-    const result = evaluateSpikeReport({ fileExists: true, hasBeforeNumber: true, hasAfterNumber: true });
+    const result = evaluateSpikeReport({ source: "log", fileExists: true, hasBeforeNumber: true, hasAfterNumber: true });
     expect(result.result).toBe("PASS");
   });
 
+  it("collectSpikeReport: ログが無いときは tasks.md の task-1.2 結果行だけを根拠にし、別の行の同じ数値では通さない", () => {
+    const writeLedger = (body: string): string => {
+      const root = newScratchDir("g1-spike-ledger-");
+      const dir = join(root, ".spec-workflow", "specs", "memory-redesign");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "tasks.md"), body);
+      return root;
+    };
+    const recorded = writeLedger("- [x] 1.2 スパイク\n  - 結果: ゼロヒット率 99.8%→2.5%（改善）\n- [x] 1.3 次\n");
+    expect(collectSpikeReport(recorded)).toEqual({ source: "ledger", fileExists: false, hasBeforeNumber: true, hasAfterNumber: true });
+    expect(evaluateSpikeReport(collectSpikeReport(recorded)).result).toBe("PASS");
+
+    const elsewhere = writeLedger("- [x] 1.2 スパイク\n  - 結果: 未計測\n- [x] 1.3 次\n  - 結果: ゼロヒット率 99.8%→2.5%（改善）\n");
+    expect(evaluateSpikeReport(collectSpikeReport(elsewhere)).result).toBe("FAIL");
+  });
+
   it("evaluateSpikeReport: 意図的な違反（ファイル不在）はFAILする", () => {
-    const result = evaluateSpikeReport({ fileExists: false, hasBeforeNumber: false, hasAfterNumber: false });
+    const result = evaluateSpikeReport({ source: "none", fileExists: false, hasBeforeNumber: false, hasAfterNumber: false });
     expect(result.result).toBe("FAIL");
   });
 });

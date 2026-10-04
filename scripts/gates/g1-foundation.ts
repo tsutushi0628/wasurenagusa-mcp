@@ -421,26 +421,46 @@ const SPIKE_REPORT_RELATIVE_PATH = [
 ] as const;
 
 export interface SpikeReportData {
+  /** 判定の根拠: Implementation Log 本体、追跡中の tasks.md の task-1.2 結果行、どちらも無し */
+  source: "log" | "ledger" | "none";
   fileExists: boolean;
   hasBeforeNumber: boolean;
   hasAfterNumber: boolean;
 }
 
+// Implementation Logs は .gitignore 対象で、別マシンへの移行時に失われる。
+// その場合は追跡されている tasks.md の task-1.2 節の「結果:」行（同じ旧→新の実測値）を根拠にする。
+const SPIKE_LEDGER_RELATIVE_PATH = [".spec-workflow", "specs", "memory-redesign", "tasks.md"] as const;
+const SPIKE_LEDGER_SECTION = /^- \[x\] 1\.2 [^\n]*\n((?:  [^\n]*\n)*)/mu;
+const SPIKE_LEDGER_RESULT = /^  - 結果: ゼロヒット率 (\S+?)→(\S+?)[（(]/mu;
+
 export function collectSpikeReport(repoRoot: string): SpikeReportData {
   const filePath = join(repoRoot, ...SPIKE_REPORT_RELATIVE_PATH);
-  if (!existsSync(filePath)) {
-    return { fileExists: false, hasBeforeNumber: false, hasAfterNumber: false };
+  if (existsSync(filePath)) {
+    const content = readFileSync(filePath, "utf-8");
+    return {
+      source: "log",
+      fileExists: true,
+      hasBeforeNumber: content.includes("ゼロヒット率(エラー含む)=99.8%"),
+      hasAfterNumber: content.includes("ゼロヒット率(エラー含む)=2.5%"),
+    };
   }
-  const content = readFileSync(filePath, "utf-8");
+  const ledgerPath = join(repoRoot, ...SPIKE_LEDGER_RELATIVE_PATH);
+  const section = existsSync(ledgerPath) ? SPIKE_LEDGER_SECTION.exec(readFileSync(ledgerPath, "utf-8"))?.[1] : undefined;
+  if (section === undefined) {
+    return { source: "none", fileExists: false, hasBeforeNumber: false, hasAfterNumber: false };
+  }
+  const result = SPIKE_LEDGER_RESULT.exec(section);
   return {
-    fileExists: true,
-    hasBeforeNumber: content.includes("ゼロヒット率(エラー含む)=99.8%"),
-    hasAfterNumber: content.includes("ゼロヒット率(エラー含む)=2.5%"),
+    source: "ledger",
+    fileExists: false,
+    hasBeforeNumber: result?.[1] === "99.8%",
+    hasAfterNumber: result?.[2] === "2.5%",
   };
 }
 
 export function evaluateSpikeReport(d: SpikeReportData): CheckResult {
-  const result = d.fileExists && d.hasBeforeNumber && d.hasAfterNumber ? "PASS" : "FAIL";
+  const result = d.source !== "none" && d.hasBeforeNumber && d.hasAfterNumber ? "PASS" : "FAIL";
   return {
     check: "spike-report",
     result,
@@ -448,6 +468,7 @@ export function evaluateSpikeReport(d: SpikeReportData): CheckResult {
     threshold: {
       requiredFile: SPIKE_REPORT_RELATIVE_PATH.join("/"),
       requiredPatterns: ["ゼロヒット率(エラー含む)=99.8%", "ゼロヒット率(エラー含む)=2.5%"],
+      fallbackLedger: `${SPIKE_LEDGER_RELATIVE_PATH.join("/")} の task-1.2 結果行: ゼロヒット率 99.8%→2.5%`,
     },
   };
 }
