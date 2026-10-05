@@ -24,6 +24,7 @@ export type CorrectionRuleInput = {
   lifetimeKind: CorrectionRuleLifetime;
   continuationBasis: string;
   directive: boolean;
+  plainCommandEligible: boolean;
   question: boolean;
   toneException: boolean;
   conditionKnown: boolean;
@@ -150,6 +151,7 @@ function canonicalInput(input: CorrectionRuleInput): CorrectionRuleInput {
     lifetimeKind: input.lifetimeKind,
     continuationBasis: normalizeText(input.continuationBasis),
     directive: input.directive,
+    plainCommandEligible: input.plainCommandEligible === true,
     question: input.question,
     toneException: input.toneException,
     conditionKnown: input.conditionKnown,
@@ -173,6 +175,7 @@ function validInput(input: CorrectionRuleInput): boolean {
   if (typeof input.continuationBasis !== "string" || !input.continuationBasis) return false;
   if (typeof input.directive !== "boolean" || typeof input.question !== "boolean"
     || typeof input.toneException !== "boolean" || typeof input.conditionKnown !== "boolean") return false;
+  if (input.plainCommandEligible !== undefined && typeof input.plainCommandEligible !== "boolean") return false;
   if (input.commandText !== undefined && (typeof input.commandText !== "string"
     || Array.from(input.commandText).length > 240 || normalizeText(input.commandText) !== input.commandText)) return false;
   if (!isRecord(input.requiredValues) || Object.keys(input.requiredValues).some((key) => !VALUE_KEYS.has(key))) return false;
@@ -340,6 +343,17 @@ export function renderCorrectionRule(input: CorrectionRuleInput): string {
   return cleanedCommand;
 }
 
+export function renderPlainCorrectionRule(input: CorrectionRuleInput): string {
+  const canonical = canonicalInput(input);
+  if (!validInput(canonical) || !canonical.plainCommandEligible || !canonical.commandText
+    || canonical.question || isConsultationQuestion(canonical.commandText)
+    || Array.from(canonical.commandText).length > 40) return "";
+  if (canonical.topicKey === "model_routing" && !canonical.requiredValues.model) return "";
+  const cleanedCommand = removeCorrectionMarkers(canonical.commandText);
+  if (!hasCorrectionPredicate(cleanedCommand)) return "";
+  return cleanedCommand;
+}
+
 export function serializeCorrectionRuleInput(input: CorrectionRuleInput): string {
   return JSON.stringify(canonicalInput(input));
 }
@@ -375,6 +389,7 @@ function mergeIdentity(input: CorrectionRuleInput): string {
     boundaryKey: input.boundaryKey,
     lifetimeKind: input.lifetimeKind,
     directive: input.directive,
+    plainCommandEligible: input.plainCommandEligible,
     question: input.question,
     toneException: input.toneException,
     conditionKnown: input.conditionKnown,

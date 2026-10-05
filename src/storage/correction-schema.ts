@@ -2,6 +2,23 @@ import type Database from "better-sqlite3";
 import { CURRENT_SCHEMA_VERSION, getSchemaVersion } from "./schema.js";
 
 export const CORRECTION_SCHEMA_VERSION = 11;
+export const CORRECTION_COMPLIANCE_SCHEMA_VERSION = 12;
+
+export const CORRECTION_COMPLIANCE_DDL = `
+CREATE TABLE owner_correction_violations (
+    session_id_hash TEXT NOT NULL,
+    human_ordinal INTEGER NOT NULL CHECK (human_ordinal >= 0),
+    bundle_key TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version > 0),
+    checker TEXT NOT NULL CHECK (checker IN ('tone','document_delivery','expression_policy')),
+    detected_at TEXT NOT NULL,
+    PRIMARY KEY (session_id_hash, human_ordinal, bundle_key, version, checker),
+    FOREIGN KEY (bundle_key, version)
+        REFERENCES owner_correction_versions(bundle_key, version)
+);
+CREATE INDEX idx_owner_correction_violations_session
+    ON owner_correction_violations(session_id_hash, human_ordinal, bundle_key, version);
+`;
 
 export const CORRECTION_SCHEMA_DDL = `
 CREATE TABLE owner_correction_events (
@@ -166,7 +183,7 @@ CREATE TABLE owner_correction_imports (
 );
 `;
 
-const CORRECTION_TABLE_NAMES = [
+export const CORRECTION_TABLE_NAMES = [
   "owner_correction_events",
   "owner_correction_evidence",
   "owner_correction_pending",
@@ -178,8 +195,9 @@ const CORRECTION_TABLE_NAMES = [
 ];
 
 function correctionTablesExist(db: Database.Database): boolean {
+  const placeholders = CORRECTION_TABLE_NAMES.map(() => "?").join(", ");
   const row = db.prepare(
-    "SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name IN (?, ?, ?, ?, ?, ?, ?, ?)",
+    "SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name IN (" + placeholders + ")",
   ).get(...CORRECTION_TABLE_NAMES) as { count: number };
   return row.count === CORRECTION_TABLE_NAMES.length;
 }

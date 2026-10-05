@@ -11,12 +11,14 @@
 import { execSync } from "child_process";
 import { existsSync } from "fs";
 import { mkdir, readFile, writeFile, unlink, stat } from "fs/promises";
-import { dirname, join } from "path";
+import { dirname, join, resolve } from "path";
 import { homedir, platform } from "os";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 
 const PLIST_LABEL = "com.wasurenagusa.consolidate";
 const PLIST_FILENAME = `${PLIST_LABEL}.plist`;
+const ARCHIVE_PLIST_LABEL = "com.wasurenagusa.archive-transcripts";
+const ARCHIVE_PLIST_FILENAME = `${ARCHIVE_PLIST_LABEL}.plist`;
 const CRONTAB_MARKER = "# wasurenagusa-consolidate-all";
 
 function log(message: string): void {
@@ -25,6 +27,10 @@ function log(message: string): void {
 
 function getPlistPath(): string {
   return join(homedir(), "Library", "LaunchAgents", PLIST_FILENAME);
+}
+
+function getArchivePlistPath(): string {
+  return join(homedir(), "Library", "LaunchAgents", ARCHIVE_PLIST_FILENAME);
 }
 
 function getLogDir(): string {
@@ -39,6 +45,50 @@ function getConsolidateAllJsPath(): string {
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = dirname(__filename);
   return join(__dirname, "consolidate-all.js");
+}
+
+function getPackageRoot(): string {
+  const __filename = fileURLToPath(import.meta.url);
+  return resolve(dirname(__filename), "..", "..");
+}
+
+function getArchiveTranscriptsPath(): string {
+  return join(getPackageRoot(), "scripts", "maintenance", "archive-transcripts.mjs");
+}
+
+function escapeXml(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&apos;");
+}
+
+export function buildArchivePlistXml(nodePath: string, scriptPath: string, logPath: string): string {
+  const workingDirectory = resolve(dirname(scriptPath), "..", "..");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${escapeXml(ARCHIVE_PLIST_LABEL)}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${escapeXml(nodePath)}</string>
+    <string>${escapeXml(scriptPath)}</string>
+    <string>--all</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>${escapeXml(workingDirectory)}</string>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>${escapeXml(logPath)}</string>
+  <key>StandardErrorPath</key>
+  <string>${escapeXml(logPath)}</string>
+</dict>
+</plist>`;
 }
 
 function buildPlistXml(nodePath: string, scriptPath: string, logPath: string): string {
@@ -110,6 +160,11 @@ async function installMacOS(): Promise<void> {
     log("Run 'npm run build' first.");
     process.exit(1);
   }
+  const archiveScriptPath = getArchiveTranscriptsPath();
+  if (!existsSync(archiveScriptPath)) {
+    log(`ERROR: archive-transcripts.mjs not found at ${archiveScriptPath}`);
+    process.exit(1);
+  }
 
   const nodePath = process.execPath;
   const logDir = getLogDir();
@@ -143,43 +198,63 @@ async function installMacOS(): Promise<void> {
     const message = err instanceof Error ? err.message : String(err);
     log(`WARNING: launchctl load failed: ${message}`);
     log(`Plist was written to ${plistPath}. You may need to load it manually.`);
-    return;
+  }
+
+  const archivePlistPath = getArchivePlistPath();
+  const archiveLogPath = join(logDir, "archive-transcripts.log");
+  if (existsSync(archivePlistPath)) {
+    try {
+      execSync(`launchctl unload "${archivePlistPath}"`, { stdio: "ignore" });
+    } catch {
+    }
+  }
+  const archivePlistContent = buildArchivePlistXml(
+    nodePath,
+    archiveScriptPath,
+    archiveLogPath,
+  );
+  await writeFile(archivePlistPath, archivePlistContent, "utf-8");
+  try {
+    execSync(`launchctl load "${archivePlistPath}"`);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`WARNING: launchctl load failed: ${message}`);
+    log(`Plist was written to ${archivePlistPath}. You may need to load it manually.`);
   }
 
   log(`Installed: ${plistPath}`);
   log(`Schedule: Daily at 02:00`);
+  log(`Installed archive job: ${archivePlistPath}`);
+  log(`Archive schedule: Daily at 03:00`);
   log(`Log: ${logPath}`);
 }
 
 async function uninstallMacOS(): Promise<void> {
-  const plistPath = getPlistPath();
-
-  if (!existsSync(plistPath)) {
+  const plistPaths = [getPlistPath(), getArchivePlistPath()];
+  if (!plistPaths.some((plistPath) => existsSync(plistPath))) {
     log("Not installed (plist not found).");
     return;
   }
 
-  try {
-    execSync(`launchctl unload "${plistPath}"`, { stdio: "ignore" });
-  } catch {
-    // unload失敗は無視
+  for (const plistPath of plistPaths) {
+    if (!existsSync(plistPath)) {
+      continue;
+    }
+    try {
+      execSync(`launchctl unload "${plistPath}"`, { stdio: "ignore" });
+    } catch {
+    }
+    await unlink(plistPath);
+    log(`Uninstalled: removed ${plistPath}`);
   }
-
-  await unlink(plistPath);
-  log(`Uninstalled: removed ${plistPath}`);
 }
 
 async function statusMacOS(): Promise<void> {
   const plistPath = getPlistPath();
-
-  if (!existsSync(plistPath)) {
-    log("Status: NOT installed");
-    return;
+  const archivePlistPath = getArchivePlistPath();
+  for (const [label, path] of [["consolidate", plistPath], ["archive-transcripts", archivePlistPath]] as const) {
+    log(`${label} status: ${existsSync(path) ? `INSTALLED (${path})` : "NOT installed"}`);
   }
-
-  log("Status: INSTALLED");
-  log(`Plist: ${plistPath}`);
-  log("Schedule: Daily at 02:00");
 
   const logPath = getLogPath();
   if (existsSync(logPath)) {
@@ -333,8 +408,10 @@ async function main(): Promise<void> {
   process.exit(1);
 }
 
-main().catch((err: unknown) => {
-  const message = err instanceof Error ? err.message : String(err);
-  log(`Fatal: ${message}`);
-  process.exit(1);
-});
+if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+  main().catch((err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`Fatal: ${message}`);
+    process.exit(1);
+  });
+}

@@ -4,7 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { createHash } from "crypto";
 import { writeFileSync } from "fs";
-import { parseReplayArguments } from "../simulate.mjs";
+import { parseReplayArguments, REPLAY_USAGE } from "../simulate.mjs";
 import { detectOwnerCorrections } from "../../../src/corrections/detector.js";
 import { extractOwnerEvent } from "../../../src/corrections/events.js";
 import { parseCorrectionRuleInput, serializeCorrectionRuleInput } from "../../../src/corrections/rule-template.js";
@@ -412,6 +412,26 @@ describe("再発前の規則到達判定", () => {
     });
   });
 
+  it("manifestの日付範囲内にある再発を出現行へ含める", () => {
+    const timeline = [
+      {
+        kind: "human",
+        globalOrder: 1,
+        input: { eventId: "first", sessionId: "session-a", sessionHash: "hash-a", labels: ["B8"], dateJst: "2026-10-03", availableAt: "2026-10-02T15:00:00.000Z" },
+      },
+      { kind: "assistant", sessionHash: "hash-a", globalOrder: 2, availableAt: "2026-10-02T15:00:01.000Z" },
+      {
+        kind: "human",
+        globalOrder: 3,
+        input: { eventId: "repeat", sessionId: "session-a", sessionHash: "hash-a", labels: ["B8"], dateJst: "2026-10-04", availableAt: "2026-10-03T15:00:00.000Z" },
+      },
+    ];
+
+    expect(createReplayOccurrenceRows(timeline, { start: "2026-10-03", end: "2026-10-05" })).toMatchObject([
+      { eventId: "repeat", bundleLabel: "B8" },
+    ]);
+  });
+
   it("B1はB2〜B10の合計から外す", () => {
     expect(summarizePrevention([
       { bundleLabel: "B1", result: { prevented: true } },
@@ -438,6 +458,58 @@ describe("再発前の規則到達判定", () => {
     expect(new Set([...tuneHashes, ...evaluationHashes]).size).toBe(98);
     expect(tuneHashes).toEqual(second.tune.map((session) => session.sessionHash));
     expect(evaluationHashes).toEqual(second.evaluation.map((session) => session.sessionHash));
+  });
+
+  it("121sessionもmanifest件数に応じて84:37に分ける", () => {
+    const sessions = Array.from({ length: 121 }, (_, index) => ({
+      sessionHash: "session-" + String(index).padStart(3, "0"),
+    }));
+    const split = splitReplaySessions(sessions);
+
+    expect(split.tune).toHaveLength(84);
+    expect(split.evaluation).toHaveLength(37);
+    expect(internal.isExpectedReplaySplit(sessions, split)).toBe(true);
+    expect(internal.isExpectedReplaySplit(sessions, { tune: split.tune.slice(1), evaluation: split.evaluation })).toBe(false);
+  });
+
+  it("extractOwnerEventがnullを返す自動入力と対応するtimeline行を再生対象から除く", () => {
+    const ownerInput = { lineOrder: 1, event: { prompt: "通常入力" } };
+    const automatedInput = { lineOrder: 2, event: { prompt: "自動入力" } };
+    const sessions = [{
+      humanInputs: [ownerInput, automatedInput],
+      timeline: [
+        { kind: "human", lineOrder: 1, input: ownerInput },
+        { kind: "human", lineOrder: 2, input: automatedInput },
+        { kind: "stop", lineOrder: 3 },
+      ],
+    }];
+    const filtered = internal.filterReplayOwnerInputs(sessions, {
+      extractOwnerEvent(event) {
+        if (event.prompt === "自動入力") return null;
+        return { text: event.prompt };
+      },
+    });
+
+    expect(filtered[0].humanInputs).toMatchObject([{ event: ownerInput.event, ownerEvent: { text: "通常入力" } }]);
+    expect(filtered[0].timeline.filter((row) => row.kind === "human")).toHaveLength(1);
+    expect(sessions[0].humanInputs).toHaveLength(2);
+  });
+
+  it("人口レポートはmanifestの日付範囲で発話数を数える", () => {
+    const population = internal.reportPopulation({
+      dateRangeJst: { start: "2026-10-03", end: "2026-10-05" },
+      fileAudit: { fileCount: 3, included: 1, excluded: 2, noHuman: 1, outsidePeriod: 1 },
+      sessions: [{
+        humanInputs: [
+          { dateJst: "2026-10-02" },
+          { dateJst: "2026-10-03" },
+          { dateJst: "2026-10-05" },
+          { dateJst: "2026-10-06" },
+        ],
+      }],
+    });
+
+    expect(population).toMatchObject({ periodSessionCount: 1, periodHumanUtteranceCount: 2 });
   });
 
   it("評価入力をhash固定し、同じevaluationを二度開始しない", async () => {
@@ -474,6 +546,9 @@ describe("再発前の規則到達判定", () => {
     });
     expect(() => parseReplayArguments(["--mode", "cold", "--compiled-root", "compiled"])).toThrow(/manifest|scratch|split/u);
     expect(() => parseReplayArguments(["--mode", "warm"])).toThrow(/unsupported|mode/u);
+    expect(parseReplayArguments(["--help"])).toMatchObject({ help: true });
+    expect(REPLAY_USAGE).toContain("--mode freeze");
+    expect(REPLAY_USAGE).toContain("--split evaluation");
   });
 
   it("固定manifestはoffsetとprefix hashが一致する合成98対象だけ読む", async () => {

@@ -4,6 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { initializeCorrectionSchema } from "../storage/correction-schema.js";
+import { migrateV11ToV12 } from "../storage/migration.js";
 import { SQLiteStorage } from "../storage/sqlite.js";
 import { selectCorrectionInjections, type CorrectionInjectionRequest } from "./injection-policy.js";
 
@@ -32,6 +33,7 @@ describe("owner correction injection policy", () => {
     initialStorage.close();
     const db = new Database(dbPath);
     initializeCorrectionSchema(db);
+    migrateV11ToV12(db);
     db.close();
     storage = new SQLiteStorage(dbPath);
     storage.initialize();
@@ -141,6 +143,20 @@ describe("owner correction injection policy", () => {
     });
   }
 
+  function addComplianceViolation(
+    bundleKey: string,
+    humanOrdinal: number,
+    checker: "tone" | "document_delivery" | "expression_policy" = "tone",
+  ): void {
+    storage.runCorrectionTransaction(({ db }) => {
+      db.prepare(`
+        INSERT INTO owner_correction_violations (
+          session_id_hash, human_ordinal, bundle_key, version, checker, detected_at
+        ) VALUES ('synthetic-session', ?, ?, 1, ?, '2026-10-03T00:00:00.000Z')
+      `).run(humanOrdinal, bundleKey, checker);
+    });
+  }
+
   function request(overrides: Partial<CorrectionInjectionRequest> = {}): CorrectionInjectionRequest {
     return {
       project: "fixture-project",
@@ -193,7 +209,7 @@ describe("owner correction injection policy", () => {
     addRule({ bundleKey: "always-response", topicKey: "response_policy" });
     addRule({ bundleKey: "always-document", topicKey: "document_delivery" });
     addRule({ bundleKey: "always-verify", topicKey: "verification" });
-    addRule({ bundleKey: "model-route-1", topicKey: "model_routing", visibility: "project" });
+    addRule({ bundleKey: "model-route-1", topicKey: "model_routing", visibility: "owner" });
     addRule({ bundleKey: "model-route-2", topicKey: "model_routing", visibility: "project" });
     addRule({ bundleKey: "model-route-3", topicKey: "model_routing", visibility: "project" });
 
@@ -330,5 +346,81 @@ describe("owner correction injection policy", () => {
 
     expect(matchingRules).toHaveLength(1);
     expect(matchingRules[0].delivery).toBe("restore");
+  });
+
+  it("違反規則を次のUserPromptSubmitで冷却を無視してrestore先頭へ戻す", () => {
+    addRule({ bundleKey: "violated-tone", topicKey: "tone", ruleText: "常体で回答する" });
+    addRule({ bundleKey: "cooled-rule", topicKey: "verification" });
+    addEmission("violated-tone", { humanOrdinal: 1, trigger: "start" });
+    addEmission("cooled-rule", { humanOrdinal: 1, trigger: "prompt" });
+    addComplianceViolation("violated-tone", 2);
+
+    const result = selectCorrectionInjections(storage, request({
+      query: "関係のない合成語",
+      humanOrdinal: 3,
+    }));
+
+    expect(result.rules[0]).toMatchObject({
+      bundleKey: "violated-tone",
+      delivery: "restore",
+    });
+  });
+
+  it("定期UserPromptSubmitで3種の違反規則をrestoreとして全件選ぶ", () => {
+    const rules = [
+      { bundleKey: "violated-tone-refresh", topicKey: "tone", checker: "tone" as const, ruleText: "常体で回答する" },
+      { bundleKey: "violated-document-refresh", topicKey: "document_delivery", checker: "document_delivery" as const, ruleText: "全文を表示する" },
+      { bundleKey: "violated-expression-refresh", topicKey: "expression_policy", checker: "expression_policy" as const, ruleText: "工程略号を使わない" },
+    ];
+
+    for (const rule of rules) {
+      addRule({ bundleKey: rule.bundleKey, topicKey: rule.topicKey, ruleText: rule.ruleText });
+      addEmission(rule.bundleKey, { humanOrdinal: 1, trigger: "start" });
+      addComplianceViolation(rule.bundleKey, 2, rule.checker);
+    }
+
+    const result = selectCorrectionInjections(storage, request({
+      trigger: "refresh",
+      query: "関係のない合成語",
+      humanOrdinal: 31,
+    }));
+
+    expect(result.rules.map((rule) => rule.bundleKey).sort()).toEqual(rules.map((rule) => rule.bundleKey).sort());
+    expect(result.rules.every((rule) => rule.delivery === "restore" && rule.complianceViolation)).toBe(true);
+  });
+
+  it("同じ規則の再注入は一sessionで2回まで", () => {
+    addRule({ bundleKey: "limited-tone", topicKey: "tone", ruleText: "常体で回答する" });
+    addEmission("limited-tone", { humanOrdinal: 1, trigger: "start" });
+    addComplianceViolation("limited-tone", 2);
+    addEmission("limited-tone", { humanOrdinal: 3, trigger: "prompt" });
+    addEmission("limited-tone", { humanOrdinal: 4, trigger: "prompt" });
+
+    const result = selectCorrectionInjections(storage, request({
+      query: "関係のない合成語",
+      humanOrdinal: 5,
+    }));
+
+    expect(result.rules.map((rule) => rule.bundleKey)).not.toContain("limited-tone");
+  });
+
+  it("環境変数offで違反規則の再注入を止める", () => {
+    addRule({ bundleKey: "disabled-tone", topicKey: "tone", ruleText: "常体で回答する" });
+    addEmission("disabled-tone", { humanOrdinal: 1, trigger: "start" });
+    addComplianceViolation("disabled-tone", 2);
+    const previousValue = process.env.WASURENAGUSA_CORRECTION_COMPLIANCE;
+    process.env.WASURENAGUSA_CORRECTION_COMPLIANCE = "off";
+
+    try {
+      const result = selectCorrectionInjections(storage, request({
+        query: "関係のない合成語",
+        humanOrdinal: 3,
+      }));
+
+      expect(result.rules.map((rule) => rule.bundleKey)).not.toContain("disabled-tone");
+    } finally {
+      if (previousValue === undefined) delete process.env.WASURENAGUSA_CORRECTION_COMPLIANCE;
+      else process.env.WASURENAGUSA_CORRECTION_COMPLIANCE = previousValue;
+    }
   });
 });

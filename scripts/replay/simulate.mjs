@@ -4,7 +4,16 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { runSimulation } from "./lib/simulate-engine.mjs";
 
+export const REPLAY_USAGE = [
+  "Usage: node scripts/replay/simulate.mjs --mode cold|freeze|acceptance|hook-timing --manifest <file> --compiled-root <dir> --scratch <dir> [--split tune|evaluation] [--audit <file>]",
+  "",
+  "Cold evaluation sequence: run --mode cold --split tune, then --mode freeze, then --mode cold --split evaluation.",
+  "Keep the same manifest and compiled root within a run; reuse that run's scratch for tune, freeze, and evaluation.",
+  "Use separate scratch directories for before and after. Evaluation can run once after freeze.",
+].join("\n");
+
 export function parseReplayArguments(args) {
+  if (args.length === 1 && args[0] === "--help") return { help: true };
   const options = {};
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
@@ -49,8 +58,13 @@ export function parseReplayArguments(args) {
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
 try {
-  const result = await runSimulation(parseReplayArguments(process.argv.slice(2)));
-  process.stdout.write(`${JSON.stringify(result)}\n`);
+  const options = parseReplayArguments(process.argv.slice(2));
+  if (options.help) {
+    process.stdout.write(`${REPLAY_USAGE}\n`);
+  } else {
+    const result = await runSimulation(options);
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+  }
 } catch (error) {
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;

@@ -2,8 +2,12 @@ import { createHash } from "crypto";
 import { realpathSync } from "fs";
 import Database from "better-sqlite3";
 import type { MemoryCategory, ProjectConfidence } from "../types.js";
-import { migrateV10ToV11 } from "../storage/migration.js";
-import { CORRECTION_SCHEMA_VERSION } from "../storage/correction-schema.js";
+import { migrateV10ToV11, migrateV11ToV12 } from "../storage/migration.js";
+import {
+  CORRECTION_COMPLIANCE_SCHEMA_VERSION,
+  CORRECTION_SCHEMA_VERSION,
+  CORRECTION_TABLE_NAMES,
+} from "../storage/correction-schema.js";
 import { SQLiteStorage } from "../storage/sqlite.js";
 import { computeContentHash } from "../storage/content-hash.js";
 import { CURRENT_SCHEMA_VERSION, getSchemaVersion } from "../storage/schema.js";
@@ -17,6 +21,11 @@ const CORRECTION_TABLES = [
   "owner_correction_sessions",
   "owner_correction_injections",
   "owner_correction_imports",
+];
+
+const CORRECTION_COMPLIANCE_TABLES = [
+  ...CORRECTION_TABLES,
+  "owner_correction_violations",
 ];
 
 const MEMORY_COLUMNS = [
@@ -360,6 +369,32 @@ export function migrateCorrectionDatabase(targetPath: string, apply = false): Co
     }
     migrateV10ToV11(db);
     return { schemaVersion: getSchemaVersion(db), ddlCount: CORRECTION_TABLES.length };
+  } finally {
+    db.close();
+  }
+}
+
+export function migrateCorrectionComplianceDatabase(targetPath: string, apply = false): CorrectionMigrationSummary {
+  const targetRealPath = resolveExistingPath(targetPath);
+  const db = openDatabase(targetRealPath, !apply);
+  try {
+    validateMemoryTable(db);
+    const version = getSchemaVersion(db);
+    if (version !== CORRECTION_SCHEMA_VERSION && version !== CORRECTION_COMPLIANCE_SCHEMA_VERSION) {
+      throw new CorrectionImportError("v12 migration requires schema version 11");
+    }
+    const requiredTables = version === CORRECTION_SCHEMA_VERSION
+      ? CORRECTION_TABLE_NAMES
+      : CORRECTION_COMPLIANCE_TABLES;
+    if (tableCount(db, requiredTables) !== requiredTables.length) {
+      throw new CorrectionImportError("correction database schema is incomplete");
+    }
+    if (version === CORRECTION_COMPLIANCE_SCHEMA_VERSION) {
+      return { schemaVersion: version, ddlCount: 0 };
+    }
+    if (!apply) return { schemaVersion: version, ddlCount: 1 };
+    migrateV11ToV12(db);
+    return { schemaVersion: getSchemaVersion(db), ddlCount: 1 };
   } finally {
     db.close();
   }

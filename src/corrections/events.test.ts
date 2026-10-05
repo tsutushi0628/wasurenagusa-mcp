@@ -113,6 +113,37 @@ describe("extractOwnerEvent", () => {
     expect(extractOwnerEvent({ type: "user", origin: { kind: "human" }, message: { content: "   " } })).toBeNull();
   });
 
+  it("excludes automated prompts by trimmed prefix across hook and queued-command sources", () => {
+    const automatedPrompts = [
+      "keep-alive: synthetic response",
+      "<task-notification>synthetic notification</task-notification>",
+      "<system-reminder>synthetic reminder</system-reminder>",
+      "<command-message>synthetic command</command-message>",
+    ];
+    const hookEvents = automatedPrompts.map((prompt) => extractOwnerEvent({
+      hookEventName: "UserPromptSubmit",
+      prompt: ` \n\t${prompt}`,
+    }));
+    const queuedCommand = extractOwnerEvent({
+      type: "attachment",
+      origin: { kind: "human" },
+      attachment: {
+        type: "queued_command",
+        commandMode: "prompt",
+        prompt: " \n\t<command-message>synthetic command</command-message>",
+      },
+    });
+    const humanText = extractOwnerEvent({
+      type: "user",
+      origin: { kind: "human" },
+      message: { content: "通常の質問。本文中の keep-alive: は文の一部です" },
+    });
+
+    expect(hookEvents).toEqual(automatedPrompts.map(() => null));
+    expect(queuedCommand).toBeNull();
+    expect(humanText?.text).toContain("keep-alive:");
+  });
+
   it("removes wrappers, code, quoted lines, quoted spans, and XML quotation data", () => {
     const event = extractOwnerEvent({
       type: "user",

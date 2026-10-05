@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   mergeCorrectionRuleInputs,
   parseCorrectionRuleInput,
+  renderPlainCorrectionRule,
   renderCorrectionRule,
   renderTypedCorrectionRule,
   serializeCorrectionRuleInput,
@@ -16,6 +17,7 @@ const base = {
   lifetimeKind: "explicit_continuing",
   continuationBasis: "explicit-continuing-command",
   directive: true,
+  plainCommandEligible: false,
   question: false,
   toneException: false,
   conditionKnown: true,
@@ -246,5 +248,44 @@ describe("owner correction rule templates", () => {
     expect(parseCorrectionRuleInput(encoded)).toEqual(input);
     expect(parseCorrectionRuleInput("[]")).toBeNull();
     expect(parseCorrectionRuleInput('{"topicKey":"unknown","ruleText":"raw utterance"}')).toBeNull();
+  });
+
+  it("renders an eligible plain command after removing only correction markers", () => {
+    const input = rule({
+      topicKey: "document_delivery",
+      actionKey: "present_full",
+      requiredValues: { documentKind: "文章" },
+      directive: false,
+      commandText: "前回も言ったよね、全文を出して",
+      plainCommandEligible: true,
+    });
+
+    expect(renderCorrectionRule(input)).toBe("");
+    expect(renderPlainCorrectionRule(input)).toBe("全文を出して");
+    expect(renderPlainCorrectionRule({ ...input, plainCommandEligible: false })).toBe("");
+  });
+
+  it("renders an untyped model route as plain text only when it names a model", () => {
+    const namedModel = rule({
+      topicKey: "model_routing",
+      actionKey: "route_task",
+      lifetimeKind: "routing",
+      continuationBasis: "temporary-model-routing",
+      requiredValues: { model: "Codex" },
+      directive: false,
+      plainCommandEligible: true,
+      commandText: "Codexを使って",
+    });
+    const unnamedModel = { ...namedModel, requiredValues: {} };
+
+    expect(renderPlainCorrectionRule(namedModel)).toBe("Codexを使って");
+    expect(renderPlainCorrectionRule(unnamedModel)).toBe("");
+  });
+
+  it("reads older serialized inputs as ineligible for plain confirmation", () => {
+    const input = rule({ topicKey: "unknown", actionKey: "unknown", requiredValues: {} });
+    const encoded = JSON.stringify(input, (key, value) => key === "plainCommandEligible" ? undefined : value);
+
+    expect(parseCorrectionRuleInput(encoded)?.plainCommandEligible).toBe(false);
   });
 });

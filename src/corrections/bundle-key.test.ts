@@ -85,6 +85,26 @@ describe("correction bundle keys", () => {
     expect(haveSameBundleKey(first, similar)).toBe(false);
   });
 
+  it("normalizes outer whitespace, trailing punctuation, and ASCII case for unknown and model routes", () => {
+    for (const topicKey of ["unknown", "model_routing"]) {
+      const first = {
+        topicKey,
+        actionKey: "route_or_unknown",
+        polarity: "positive",
+        conditionKey: "general",
+        normalizedText: "  Choose CODEX now。！！  ",
+        conditionKnown: false,
+        plainCommandEligible: true,
+      };
+      const same = { ...first, normalizedText: "choose codex now" };
+      const different = { ...first, normalizedText: "choose claude now" };
+
+      expect(haveSameBundleKey(first, same)).toBe(true);
+      expect(haveSameBundleKey(first, different)).toBe(false);
+      expect(createBundleKey(first)).toBe(createBundleKey(same));
+    }
+  });
+
   it("uses the round-zero Dice threshold without a type-formability gate", () => {
     const base = {
       topicKey: "document_delivery",

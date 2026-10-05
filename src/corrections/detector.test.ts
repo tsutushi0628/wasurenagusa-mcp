@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { detectOwnerCorrections } from "./detector.js";
+import {
+  detectOwnerCorrections,
+  getModelRoutingRetractionTargets,
+  isModelRoutingRetraction,
+} from "./detector.js";
 import { extractOwnerEvent } from "./events.js";
 import { parseCorrectionRuleInput, serializeCorrectionRuleInput } from "./rule-template.js";
 
@@ -89,6 +93,113 @@ describe("detectOwnerCorrections", () => {
 
     expect(typedRequest).toMatchObject({ status: "candidate", ruleText: "", ruleInput: { directive: false } });
     expect(unknownRequest).toMatchObject({ topicKey: "unknown", status: "candidate", ruleText: "", ruleInput: { directive: false } });
+  });
+
+  it("marks only short, single-sentence behavior commands as plain eligible", () => {
+    const eligible = [
+      "全文を出して",
+      "質問に答えろ",
+      "要約を短くしないで",
+      "その印を使うな",
+    ].map((text) => detect(text)[0]);
+    const positiveUnknown = detect("記事の下書きを書いて")[0];
+    const longCommand = detect("x".repeat(35) + "質問に答えて")[0];
+    const question = detect("質問に答えて?")[0];
+    const sensitive = detect("前回も言ったが token=synthetic-secret-value-1234567890 を使うな")[0];
+    const segmented = detect("質問に答えろ。記事の下書きを書いて。");
+
+    expect(eligible.map((candidate) => candidate?.ruleInput.plainCommandEligible)).toEqual([true, true, true, true]);
+    expect(eligible.slice(0, 2).map((candidate) => candidate?.ruleText)).toEqual(["", ""]);
+    expect(positiveUnknown?.ruleInput.plainCommandEligible).toBe(false);
+    expect(longCommand?.ruleInput.plainCommandEligible).toBe(false);
+    expect(question?.ruleInput.plainCommandEligible).toBe(false);
+    expect(sensitive?.ruleInput.plainCommandEligible).toBe(false);
+    expect(sensitive?.ruleInput.commandText).toBe("");
+    expect(sensitive?.ruleText).toBe("");
+    expect(segmented.map((candidate) => candidate.ruleInput.plainCommandEligible)).toEqual([true, false]);
+  });
+
+  it("groups plain known topics by required values and plain unknown or routing commands by exact text", () => {
+    const sameValues = detect("文案は全文を出して")[0];
+    const sameValuesVariant = detect("文案の全文を表示して")[0];
+    const differentValues = detect("資料の全文を出して")[0];
+    const modelRoute = detect("実装はCodexで担当して")[0];
+    const differentModelRoute = detect("実装はSonnetで担当して")[0];
+
+    expect(sameValues).toMatchObject({ ruleInput: { plainCommandEligible: true } });
+    expect(sameValuesVariant).toMatchObject({ ruleInput: { plainCommandEligible: true } });
+    expect(differentValues).toMatchObject({ ruleInput: { plainCommandEligible: true } });
+    expect(sameValues?.bundleKey).toBe(sameValuesVariant?.bundleKey);
+    expect(sameValues?.bundleKey).not.toBe(differentValues?.bundleKey);
+    expect(modelRoute).toMatchObject({ topicKey: "model_routing", lifetimeKind: "routing", ruleInput: { plainCommandEligible: true } });
+    expect(differentModelRoute?.bundleKey).not.toBe(modelRoute?.bundleKey);
+  });
+
+  it("keeps short taskless model instructions on the routing path and detects retractions separately", () => {
+    const forced = detect("Codexを使って")[0];
+    const prohibited = detect("Codexを使うな")[0];
+    const forcedHard = detect("Codexを使え")[0];
+    const prohibitedSoft = detect("Codexを使わないで")[0];
+    const prohibitedStop = detect("Codexをやめて")[0];
+    const differentModel = detect("Claudeを使って")[0];
+    const retractionEvent = extractOwnerEvent({
+      type: "user",
+      origin: { kind: "human" },
+      sessionId: "synthetic-session",
+      message: { content: "今回はCodexじゃない" },
+    });
+    const quotaEvent = extractOwnerEvent({
+      type: "user",
+      origin: { kind: "human" },
+      sessionId: "synthetic-session",
+      message: { content: "Codexの枠なし" },
+    });
+
+    expect(forced).toMatchObject({
+      topicKey: "model_routing",
+      polarity: "positive",
+      lifetimeKind: "routing",
+      ruleText: "",
+      ruleInput: { plainCommandEligible: true, requiredValues: { model: "Codex" }, directive: false },
+    });
+    expect(prohibited).toMatchObject({
+      topicKey: "model_routing",
+      polarity: "negative",
+      lifetimeKind: "routing",
+      ruleText: "",
+      ruleInput: { plainCommandEligible: true, requiredValues: { model: "Codex" }, directive: false },
+    });
+    expect(forcedHard).toMatchObject({ topicKey: "model_routing", ruleInput: { plainCommandEligible: true } });
+    expect(prohibitedSoft).toMatchObject({ topicKey: "model_routing", polarity: "negative", ruleInput: { plainCommandEligible: true } });
+    expect(prohibitedStop).toMatchObject({ topicKey: "model_routing", polarity: "negative", ruleInput: { plainCommandEligible: true } });
+    expect(differentModel?.bundleKey).not.toBe(forced?.bundleKey);
+    expect(detect("Codex")).toEqual([]);
+    expect(retractionEvent).not.toBeNull();
+    expect(quotaEvent).not.toBeNull();
+    if (!retractionEvent || !quotaEvent) throw new Error("synthetic model route events were not extracted");
+    expect(detectOwnerCorrections(retractionEvent)).toEqual([]);
+    expect(isModelRoutingRetraction(retractionEvent)).toBe(true);
+    expect(isModelRoutingRetraction(quotaEvent)).toBe(false);
+  });
+
+  it("does not treat a replacement instruction or model-free wording as a routing retraction", () => {
+    const createEvent = (prompt: string) => extractOwnerEvent({
+      hookEventName: "UserPromptSubmit",
+      prompt,
+    });
+    const replacementEvent = createEvent("Claudeじゃない、Codex使って");
+    const genericEvent = createEvent("毎回説明はなしで");
+    const retractionEvent = createEvent("Codexじゃなくていい");
+
+    if (!replacementEvent || !genericEvent || !retractionEvent) {
+      throw new Error("synthetic routing prompts were not extracted");
+    }
+
+    expect(isModelRoutingRetraction(replacementEvent)).toBe(false);
+    expect(isModelRoutingRetraction(genericEvent)).toBe(false);
+    expect(isModelRoutingRetraction(retractionEvent)).toBe(true);
+    expect(getModelRoutingRetractionTargets(replacementEvent)).toEqual([]);
+    expect(getModelRoutingRetractionTargets(retractionEvent)).toEqual(["Codex"]);
   });
 
   it("renders full-document corrections as typed rules without reprimand markers", () => {
@@ -305,7 +416,7 @@ describe("detectOwnerCorrections", () => {
     expect(proposal?.bundleKey).not.toBe(report?.bundleKey);
     expect(proposal?.ruleInput.conditions).toEqual([]);
     expect(report?.ruleInput.conditions).toEqual([]);
-    expect(projectA?.bundleKey).not.toBe(projectB?.bundleKey);
+    expect(projectA?.bundleKey).toBe(projectB?.bundleKey);
     expect(ordinaryRoute?.lifetimeKind).toBe("routing");
     expect(temporaryRoute?.lifetimeKind).toBe("task");
   });
@@ -404,6 +515,7 @@ describe("detectOwnerCorrections", () => {
     expect(codexRoute).toMatchObject({
       topicKey: "model_routing",
       conditionKnown: true,
+      ruleInput: { plainCommandEligible: false, directive: true },
       ruleText: "今後は合成プロジェクトのすべての作業について、Codexで設計して、Claudeで実装して",
     });
     expect(claudeAssignments).toHaveLength(1);

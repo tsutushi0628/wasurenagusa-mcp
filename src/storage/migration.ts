@@ -6,7 +6,13 @@ import { parseMarkdown } from "./parser.js";
 import { getSchemaVersion, LINEAGE_DDL, PRINCIPLES_DDL, GUARDS_DDL } from "./schema.js";
 import { DEFAULT_MODEL } from "../vector/local-embedding.js";
 import { computeContentHash } from "./content-hash.js";
-import { initializeCorrectionSchema } from "./correction-schema.js";
+import {
+  CORRECTION_COMPLIANCE_DDL,
+  CORRECTION_COMPLIANCE_SCHEMA_VERSION,
+  CORRECTION_SCHEMA_VERSION,
+  CORRECTION_TABLE_NAMES,
+  initializeCorrectionSchema,
+} from "./correction-schema.js";
 
 interface MigrationResult {
   entriesCount: number;
@@ -607,6 +613,43 @@ export function migrateV9ToV10(db: Database.Database, memoryPath: string): void 
 
 export function migrateV10ToV11(db: Database.Database): void {
   initializeCorrectionSchema(db);
+}
+
+export function migrateV11ToV12(db: Database.Database): void {
+  const eventsSessionOrdinalIndexDdl = `
+    CREATE INDEX IF NOT EXISTS idx_owner_correction_events_session_ordinal
+    ON owner_correction_events(session_id_hash, human_ordinal)
+  `;
+  const schemaVersion = getSchemaVersion(db);
+  const violationTable = db.prepare(
+    "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'owner_correction_violations'",
+  ).get();
+  if (schemaVersion === CORRECTION_COMPLIANCE_SCHEMA_VERSION) {
+    if (!violationTable) throw new Error("schema version 12 is missing owner correction violations");
+    db.exec(eventsSessionOrdinalIndexDdl);
+    return;
+  }
+  if (schemaVersion !== CORRECTION_SCHEMA_VERSION) {
+    throw new Error("owner correction compliance schema requires schema version 11");
+  }
+
+  const placeholders = CORRECTION_TABLE_NAMES.map(() => "?").join(", ");
+  const row = db.prepare(
+    "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name IN (" + placeholders + ")",
+  ).get(...CORRECTION_TABLE_NAMES) as { count: number };
+  if (row.count !== CORRECTION_TABLE_NAMES.length) {
+    throw new Error("schema version 11 is missing owner correction tables");
+  }
+
+  db.pragma("foreign_keys = ON");
+  const transaction = db.transaction(() => {
+    db.exec(CORRECTION_COMPLIANCE_DDL);
+    db.exec(eventsSessionOrdinalIndexDdl);
+    db.prepare(
+      "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, datetime('now'))",
+    ).run(CORRECTION_COMPLIANCE_SCHEMA_VERSION);
+  });
+  transaction();
 }
 
 /**

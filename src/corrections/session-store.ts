@@ -127,6 +127,25 @@ function readSessionProgress(db: Database.Database, sessionIdHash: string): Sess
   `).get(sessionIdHash) as SessionRow | undefined;
 }
 
+type SessionProjectDatabase = Pick<Database.Database, "prepare">;
+
+export function resolveSessionProject(
+  db: SessionProjectDatabase,
+  sessionIdHash: string,
+  cwdProject: string,
+): string {
+  if (!sessionIdHash) throw new Error("session id hash is required");
+  if (!cwdProject) throw new Error("cwd project is required");
+  const row = db.prepare(`
+    SELECT project FROM owner_correction_events
+    WHERE session_id_hash = ?
+    ORDER BY human_ordinal ASC, event_id ASC
+    LIMIT 1
+  `).get(sessionIdHash) as { project: string } | undefined;
+  if (!row) return cwdProject;
+  return row.project;
+}
+
 function claimSessionCursor(db: Database.Database, input: CommitTranscriptBatchInput): void {
   if (
     input.expected.humanOrdinal === 0 &&

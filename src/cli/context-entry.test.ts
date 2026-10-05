@@ -10,6 +10,7 @@ import {
   writeStdoutOnce,
   detectPendingCorrectionCandidates,
   addUserPromptPendingReceipt,
+  shouldProcessPromptCorrectionWork,
   estimateTokens,
   enforceInjectionTokenBudget,
   logInjectionBudgetWarning,
@@ -18,6 +19,8 @@ import {
 import { isDirectRun as sharedIsDirectRun } from "../utils/cli-entry.js";
 import { renderCorrectionRules } from "../corrections/render.js";
 import { hashRawText, hashSessionId } from "../corrections/session-store.js";
+import { resolveSessionProject } from "../corrections/session-store.js";
+import { extractOwnerEvent, isAutomatedPrompt } from "../corrections/events.js";
 import { initializeCorrectionSchema } from "../storage/correction-schema.js";
 
 describe("context.ts: isDirectRun export compatibility", () => {
@@ -109,6 +112,48 @@ describe("context.ts: event injection route", () => {
   });
 });
 
+describe("context.ts: correction session project", () => {
+  it("SessionStartとcompactは既存eventのprojectを読み、eventなしなら起動時cwdを使う", () => {
+    const db = new Database(":memory:");
+    db.exec("CREATE TABLE schema_version (version INTEGER NOT NULL, applied_at TEXT NOT NULL)");
+    db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (10, 'synthetic-time')").run();
+    initializeCorrectionSchema(db);
+    const sessionIdHash = hashSessionId("synthetic-session");
+    db.prepare(`
+      INSERT INTO owner_correction_events (
+        event_id, session_id_hash, human_ordinal, observed_at, available_at,
+        source_kind, excerpt, previous_action, project, scope, raw_text_hash,
+        source_locator_hash, processed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      "event-first", sessionIdHash, 1, "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z",
+      "user", "合成発話", "action_unknown", "startup-project", "general", "synthetic-hash",
+      "synthetic-locator", "2026-01-01T00:00:01.000Z",
+    );
+    try {
+      expect(resolveSessionProject(db, sessionIdHash, "later-cwd-project"))
+        .toBe("startup-project");
+      expect(resolveSessionProject(db, hashSessionId("empty-session"), "startup-project"))
+        .toBe("startup-project");
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe("context.ts: automated prompt injection gate", () => {
+  it("lets a human code-only prompt reach confirmed and restore injection while skipping automated prompts", () => {
+    const humanPrompt = ["```ts", "const value = 1;", "```"].join("\n");
+    const humanEvent = extractOwnerEvent({ hookEventName: "UserPromptSubmit", prompt: humanPrompt });
+    const automatedPrompt = "keep-alive: synthetic response";
+
+    expect(humanEvent).toBeNull();
+    expect(isAutomatedPrompt(humanPrompt)).toBe(false);
+    expect(shouldProcessPromptCorrectionWork("UserPromptSubmit", isAutomatedPrompt(humanPrompt))).toBe(true);
+    expect(shouldProcessPromptCorrectionWork("UserPromptSubmit", isAutomatedPrompt(automatedPrompt))).toBe(false);
+  });
+});
+
 describe("context.ts: 未照合hookの訂正候補", () => {
   it("hook promptから検出した完全規則をpending保存用に返す", () => {
     const candidates = detectPendingCorrectionCandidates("今後は質問に答えてください");
@@ -143,6 +188,24 @@ describe("context.ts: 未照合hookの訂正候補", () => {
 
   it("訂正でないpromptは候補を作らない", () => {
     expect(detectPendingCorrectionCandidates("合成値を検索してください")).toEqual([]);
+  });
+
+  it("自動promptは出力済みでもpending receiptを保存しない", () => {
+    const storage = { runCorrectionTransaction: vi.fn() };
+    const receiptId = addUserPromptPendingReceipt(
+      storage as never,
+      "synthetic-session-hash",
+      "synthetic-session",
+      "synthetic-uuid",
+      0,
+      "keep-alive: synthetic response",
+      "2026-10-03T00:00:01.000Z",
+      true,
+    );
+
+    expect(detectPendingCorrectionCandidates("keep-alive: synthetic response")).toEqual([]);
+    expect(receiptId).toBe("");
+    expect(storage.runCorrectionTransaction).not.toHaveBeenCalled();
   });
 
   it("未照合receiptへ検出候補を保存し、UUID再配信は既存時刻で冪等に扱う", () => {

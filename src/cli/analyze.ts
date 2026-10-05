@@ -18,15 +18,29 @@ import {
   hashRawText,
   hashSessionId,
   hashTranscriptPosition,
+  resolveSessionProject,
   type SessionCorrectionEvent,
   type SessionProgress,
 } from "../corrections/session-store.js";
-import { detectOwnerCorrections, type CorrectionCandidate } from "../corrections/detector.js";
+import {
+  detectOwnerCorrections,
+  getModelRoutingRetractionTargets,
+  type CorrectionCandidate,
+} from "../corrections/detector.js";
 import { extractOwnerEvent, removeQuotedAndInjectedContent } from "../corrections/events.js";
 import {
   serializeCorrectionRuleInput,
 } from "../corrections/rule-template.js";
-import { applyCorrectionEvidence, cancelCorrectionBundle } from "../corrections/store.js";
+import {
+  applyCorrectionEvidence,
+  cancelCorrectionBundle,
+  disputeRecentModelRoutingBundles,
+} from "../corrections/store.js";
+import {
+  getLatestAssistantText,
+  isCorrectionComplianceEnabled,
+  persistCorrectionComplianceViolations,
+} from "../corrections/compliance.js";
 import { Analyzer } from "../analyzer/index.js";
 import { SQLiteStorage } from "../storage/index.js";
 import { getMemoryPath, config } from "../config.js";
@@ -42,11 +56,12 @@ import {
   type TranscriptRecord,
 } from "./transcript-reader.js";
 import { ChangeLogger } from "../scheduler/change-logger.js";
+import { recordCorrectionViolationMetric } from "../observability/correction-metrics.js";
 
 export const STOP_DETERMINISTIC_TIMEOUT_MS = 2500;
 export const STOP_TOTAL_TIMEOUT_MS = 25000;
 
-const STOP_DETECTOR_VERSION = "owner-correction-v2";
+const STOP_DETECTOR_VERSION = "owner-correction-v3";
 const MAX_STOP_INPUT_BYTES = 1024 * 1024;
 const OWNER_VISIBLE_TOPICS = new Set([
   "tone",
@@ -54,6 +69,11 @@ const OWNER_VISIBLE_TOPICS = new Set([
   "document_delivery",
   "expression_policy",
   "summary_constraints",
+  "storage_location",
+  "verification",
+  "delegation_roles",
+  "unknown",
+  "model_routing",
 ]);
 const PREVIOUS_ACTION_TARGETS = [
   "質問", "回答", "返答", "待機", "全文", "本文", "文書", "文章", "比喩", "用語", "字数", "文字数",
@@ -64,11 +84,13 @@ const PREVIOUS_ACTION_TARGETS = [
 type StopSessionState = {
   progress: SessionProgress;
   lastAvailableAt: number;
+  project: string;
 };
 
 type PreparedStopEvent = {
   event: SessionCorrectionEvent;
   candidates: CorrectionCandidate[];
+  modelRoutingRetractionTargets: string[];
   cancellationBundleKey?: string;
 };
 
@@ -155,6 +177,8 @@ function correctionConditions(candidate: CorrectionCandidate): string {
 
 function correctionVisibility(candidate: CorrectionCandidate): "project" | "owner" {
   if (!OWNER_VISIBLE_TOPICS.has(candidate.topicKey)) return "project";
+  if (candidate.topicKey === "unknown"
+    && (!candidate.ruleInput.plainCommandEligible || candidate.polarity !== "negative")) return "project";
   const conditions = candidate.conditionKey.split(";");
   if (conditions.some((condition) => !["general", "continuing", "audience:owner"].includes(condition))) {
     return "project";
@@ -274,6 +298,7 @@ function prepareStopEvents(
         processedAt: now,
       },
       candidates,
+      modelRoutingRetractionTargets: getModelRoutingRetractionTargets(ownerEvent),
       ...(cancellationBundleKey ? { cancellationBundleKey } : {}),
     });
   }
@@ -281,7 +306,11 @@ function prepareStopEvents(
   return { prepared, lastAvailableAt };
 }
 
-function readStopSessionState(storage: SQLiteStorage, sessionIdHash: string): StopSessionState {
+function readStopSessionState(
+  storage: SQLiteStorage,
+  sessionIdHash: string,
+  cwdProject: string,
+): StopSessionState {
   return storage.runCorrectionTransaction(({ db }) => {
     const row = db.prepare(`
       SELECT human_ordinal, transcript_offset, transcript_identity
@@ -295,6 +324,7 @@ function readStopSessionState(storage: SQLiteStorage, sessionIdHash: string): St
       SELECT available_at FROM owner_correction_events
       WHERE session_id_hash = ? ORDER BY human_ordinal DESC, event_id DESC LIMIT 1
     `).get(sessionIdHash) as { available_at: string } | undefined;
+    const project = resolveSessionProject(db, sessionIdHash, cwdProject);
 
     return {
       progress: row
@@ -305,6 +335,7 @@ function readStopSessionState(storage: SQLiteStorage, sessionIdHash: string): St
           }
         : { humanOrdinal: 0, transcriptOffset: 0, transcriptIdentity: "" },
       lastAvailableAt: lastEvent ? Date.parse(lastEvent.available_at) : 0,
+      project,
     };
   });
 }
@@ -317,8 +348,8 @@ function commitStopBatch(
   prepared: PreparedStopEvent[],
   processedAt: string,
   deadline: number,
-): void {
-  storage.runCorrectionTransaction(({ db, save }) => {
+): number | null {
+  return storage.runCorrectionTransaction(({ db, save }) => {
     if (!hasDeadlineTimeRemaining(deadline)) throw new StopDeadlineExceededError();
     const committed = commitTranscriptBatch(
       db as unknown as Parameters<typeof commitTranscriptBatch>[0],
@@ -334,7 +365,7 @@ function commitStopBatch(
         events: prepared.map(({ event }) => event),
       },
     );
-    if (!committed.committed) return;
+    if (!committed.committed) return null;
 
     const candidatesByEvent = new Map(prepared.map(({ event, candidates }) => [event.eventId, candidates]));
     for (const match of committed.matchedReceipts) {
@@ -380,6 +411,15 @@ function commitStopBatch(
         });
       }
     }
+    for (const { event, modelRoutingRetractionTargets } of prepared) {
+      if (modelRoutingRetractionTargets.length === 0) continue;
+      if (!hasDeadlineTimeRemaining(deadline)) throw new StopDeadlineExceededError();
+      disputeRecentModelRoutingBundles(transaction, {
+        eventId: event.eventId,
+        at: event.observedAt,
+        targetModels: modelRoutingRetractionTargets,
+      });
+    }
     for (const { event, cancellationBundleKey } of prepared) {
       if (!cancellationBundleKey) continue;
       if (!hasDeadlineTimeRemaining(deadline)) throw new StopDeadlineExceededError();
@@ -400,6 +440,7 @@ function commitStopBatch(
       });
     }
     if (!hasDeadlineTimeRemaining(deadline)) throw new StopDeadlineExceededError();
+    return committed.humanOrdinal;
   });
 }
 
@@ -414,7 +455,7 @@ async function recoverStopCorrections(hookInput: HookInput, deadline: number): P
     if (!storage.supportsCorrectionHooks) return true;
     if (!hasDeadlineTimeRemaining(deadline)) return false;
     const sessionIdHash = hashSessionId(hookInput.session_id);
-    const state = readStopSessionState(storage, sessionIdHash);
+    const state = readStopSessionState(storage, sessionIdHash, project);
     if (!hasDeadlineTimeRemaining(deadline)) return false;
     const delta = await readTranscriptDelta(hookInput.transcript_path, {
       offset: state.progress.transcriptOffset,
@@ -426,14 +467,14 @@ async function recoverStopCorrections(hookInput: HookInput, deadline: number): P
     const { prepared } = prepareStopEvents(
       delta.records,
       hookInput.session_id,
-      project,
+      state.project,
       processedAt,
       state.lastAvailableAt,
       deadline,
     );
     if (!hasDeadlineTimeRemaining(deadline)) return false;
 
-    commitStopBatch(
+    const humanOrdinal = commitStopBatch(
       storage,
       sessionIdHash,
       state.progress,
@@ -442,6 +483,19 @@ async function recoverStopCorrections(hookInput: HookInput, deadline: number): P
       processedAt,
       deadline,
     );
+    if (humanOrdinal !== null && isCorrectionComplianceEnabled() && hasDeadlineTimeRemaining(deadline)) {
+      const assistantText = getLatestAssistantText(delta.records);
+      const violations = persistCorrectionComplianceViolations(storage, {
+        sessionIdHash,
+        humanOrdinal,
+        assistantText,
+        detectedAt: processedAt,
+      });
+      for (const _violation of violations) {
+        if (!hasDeadlineTimeRemaining(deadline)) return false;
+        await recordCorrectionViolationMetric(memoryPath);
+      }
+    }
     return hasDeadlineTimeRemaining(deadline);
   } catch (error) {
     if (error instanceof StopDeadlineExceededError) return false;

@@ -27,6 +27,7 @@ const IDE_EMPTY = /<ide_[\w-]+\b[^>]*\/?>/giu;
 const XML_QUOTATION = /<(?:quote|quoted|quoted[-_]?text|quoted[-_]?data|citation|blockquote)\b[^>]*>[\s\S]*?<\/(?:quote|quoted|quoted[-_]?text|quoted[-_]?data|citation|blockquote)\s*>/giu;
 const HANDOFF_MARKER = /(?:復帰ブロック|引継ぎ命令テキスト|引き継ぎ命令テキスト|引継ぎブロック|引き継ぎブロック|復帰用(?:ブロック|指示)|引継ぎ用(?:ブロック|指示)|handoff[- _]?text\.md|resume(?:\s|-)?block)/iu;
 const SLASH_COMMAND = /^\/[a-z][a-z0-9-]*(?:\s|$)/iu;
+const AUTOMATED_PROMPT_PREFIXES = ["<task-notification", "<system-reminder", "<command-message>"] as const;
 const SECRET_VALUE = /\b(?:api[_-]?key|token|secret|password|authorization)\s*[:=]\s*["']?[A-Za-z0-9_./+=-]{8,}|\b(?:sk|pk|ghp|gho|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{12,}\b|\bBearer\s+[A-Za-z0-9._~+/-]{12,}=*/giu;
 const PRIVATE_KEY = /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gu;
 const HOME_PATH = /\/(?:Users|home)\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*/gu;
@@ -118,6 +119,13 @@ export function isHandoffPaste(value: string): boolean {
   return HANDOFF_MARKER.test(value);
 }
 
+export function isAutomatedPrompt(value: string): boolean {
+  const trimmedValue = value.trimStart();
+  if (trimmedValue.startsWith("keep-alive:")) return true;
+  const lowerCaseValue = trimmedValue.toLowerCase();
+  return AUTOMATED_PROMPT_PREFIXES.some((prefix) => lowerCaseValue.startsWith(prefix));
+}
+
 function optionalString(record: RecordValue | null, key: string): string | undefined {
   const value = record?.[key];
   return typeof value === "string" && value.length > 0 ? value : undefined;
@@ -149,7 +157,7 @@ function buildOwnerEvent(
   rawText: string,
   fallbackRecord?: RecordValue | null,
 ): OwnerEvent | null {
-  if (!rawText.trim()) return null;
+  if (!rawText.trim() || isAutomatedPrompt(rawText)) return null;
   const redacted = redactSensitiveValues(rawText);
   const normalized = normalizeLineEndings(redacted.text);
   const cleaned = normalizeDetectionText(removeQuotedAndInjectedContent(normalized));

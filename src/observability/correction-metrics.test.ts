@@ -7,10 +7,20 @@ import {
   CORRECTION_HOOK_EVENT_KINDS,
   CORRECTION_REASON_CODES,
   recordCorrectionMetric,
+  recordCorrectionViolationMetric,
   rotateCorrectionMetrics,
 } from "./correction-metrics.js";
 
 const jstMidnightUtc = new Date("2026-10-02T15:00:00.000Z");
+const zeroStageDurationsMs = {
+  stdin: 0,
+  position: 0,
+  detect: 0,
+  store: 0,
+  retrieve: 0,
+  render: 0,
+  write: 0,
+};
 
 describe("observability/correction-metrics", () => {
   let tmpDir: string;
@@ -32,6 +42,7 @@ describe("observability/correction-metrics", () => {
       durationMs: 0,
       tokens: 0,
       missingCount: 0,
+      stageDurationsMs: zeroStageDurationsMs,
       eventIdHash: "a".repeat(64),
       detectorVersion: "v1.0",
       reasonCode: "ledger_unknown",
@@ -48,6 +59,7 @@ describe("observability/correction-metrics", () => {
       ms: 0,
       tok: 0,
       miss: 0,
+      st: [0, 0, 0, 0, 0, 0, 0],
       hash: "a".repeat(64),
       v: "v1.0",
       reason_code: "ledger_unknown",
@@ -69,7 +81,20 @@ describe("observability/correction-metrics", () => {
     expect(Buffer.byteLength(maximumLine)).toBeLessThanOrEqual(256);
   });
 
+  it("違反数をk=violationで記録し、本文を出力しない", async () => {
+    await expect(recordCorrectionViolationMetric(memoryPath, jstMidnightUtc)).resolves.toBe("recorded");
+
+    const filePath = join(memoryPath, "logs", "correction-metrics", "Stop-2026-10-03.jsonl");
+    const line = readFileSync(filePath, "utf-8");
+    expect(JSON.parse(line)).toEqual({
+      ts: "2026-10-03T00:00:00.000+09:00",
+      k: "violation",
+    });
+    expect(Buffer.byteLength(line)).toBeLessThanOrEqual(256);
+  });
+
   it("設計書にある理由コードを許可する", async () => {
+    expect(CORRECTION_REASON_CODES).toContain("automated_prompt");
     for (const reasonCode of CORRECTION_REASON_CODES) {
       await expect(recordCorrectionMetric(memoryPath, {
         eventKind: "Stop",
@@ -85,6 +110,61 @@ describe("observability/correction-metrics", () => {
     expect(reasons).toEqual(CORRECTION_REASON_CODES);
   });
 
+  it("UserPromptSubmitとSessionStartは段別時間を必須にし、7段を短いst配列で保存する", async () => {
+    await expect(recordCorrectionMetric(memoryPath, {
+      eventKind: "UserPromptSubmit",
+      durationMs: 12,
+      tokens: 3,
+      missingCount: 1,
+    }, jstMidnightUtc)).rejects.toThrow();
+
+    await expect(recordCorrectionMetric(memoryPath, {
+      eventKind: "SessionStart",
+      durationMs: 12,
+      tokens: 3,
+      missingCount: 1,
+      stageDurationsMs: {
+        stdin: 1,
+        position: 2,
+        detect: 3,
+        store: 4,
+        retrieve: 5,
+        render: 6,
+        write: 7,
+      },
+    }, jstMidnightUtc)).resolves.toBe("recorded");
+
+    const line = readFileSync(join(memoryPath, "logs", "correction-metrics", "SessionStart-2026-10-03.jsonl"), "utf-8");
+    const entry = JSON.parse(line);
+    expect(entry.st).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(entry).toMatchObject({ ms: 12, tok: 3, miss: 1 });
+    expect(Buffer.byteLength(line)).toBeLessThanOrEqual(256);
+
+    await expect(recordCorrectionMetric(memoryPath, {
+      eventKind: "UserPromptSubmit",
+      durationMs: 3500,
+      tokens: 5000,
+      missingCount: 999,
+      stageDurationsMs: {
+        stdin: 3500,
+        position: 3500,
+        detect: 3500,
+        store: 3500,
+        retrieve: 3500,
+        render: 3500,
+        write: 3500,
+      },
+      eventIdHash: "b".repeat(64),
+      detectorVersion: "v999999999999.99",
+      reasonCode: "automated_prompt",
+    }, jstMidnightUtc)).resolves.toBe("recorded");
+    const maximumStageLine = readFileSync(
+      join(memoryPath, "logs", "correction-metrics", "UserPromptSubmit-2026-10-03.jsonl"),
+      "utf-8",
+    ).trim().split("\n")[0];
+    expect(Buffer.byteLength(maximumStageLine)).toBeLessThanOrEqual(256);
+  });
+
   it("4種のhookイベントを別々のJST日別JSONLへ保存する", async () => {
     for (const eventKind of CORRECTION_HOOK_EVENT_KINDS) {
       await expect(recordCorrectionMetric(memoryPath, {
@@ -92,6 +172,9 @@ describe("observability/correction-metrics", () => {
         durationMs: 0,
         tokens: 0,
         missingCount: 0,
+        ...(eventKind === "SessionStart" || eventKind === "UserPromptSubmit"
+          ? { stageDurationsMs: zeroStageDurationsMs }
+          : {}),
       }, jstMidnightUtc)).resolves.toBe("recorded");
     }
 
@@ -152,6 +235,7 @@ describe("observability/correction-metrics", () => {
       durationMs: 0,
       tokens: 0,
       missingCount: 0,
+      stageDurationsMs: zeroStageDurationsMs,
     };
 
     for (let index = 0; index < 1000; index++) {

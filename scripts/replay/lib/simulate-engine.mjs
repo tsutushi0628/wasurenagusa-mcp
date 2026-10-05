@@ -17,7 +17,7 @@ const DATE_END = "2026-10-02";
 const PERIOD_START_MS = Date.parse("2026-09-21T15:00:00.000Z");
 const ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const SAMPLE_SEED = 20261003;
-const DETECTOR_VERSION = "owner-correction-v2";
+const DETECTOR_VERSION = "owner-correction-v3";
 const REPORT_VERSION = 1;
 const AUDIT_PROMPT = [
   "独立監査。与えた人間発話と直前AI区間だけを読む。引用・貼付・AI生成文は本人の訂正として数えない。",
@@ -28,6 +28,16 @@ const AUDIT_PROMPT = [
 const STOP_COMMAND = "wasurenagusa-analyze";
 const SOURCE_PROJECT = "firebase-kit";
 const SOURCE_SCOPE = "general";
+
+function validateDateRange(dateRange) {
+  const isValidDate = (value) => typeof value === "string"
+    && /^\d{4}-\d{2}-\d{2}$/u.test(value)
+    && !Number.isNaN(Date.parse(`${value}T00:00:00.000Z`))
+    && new Date(`${value}T00:00:00.000Z`).toISOString().slice(0, 10) === value;
+  if (!dateRange || !isValidDate(dateRange.start) || !isValidDate(dateRange.end) || dateRange.start > dateRange.end) {
+    throw new Error("manifest date range is invalid");
+  }
+}
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -218,7 +228,7 @@ async function readFixedFile(filename, readEndByteOffset) {
   }
 }
 
-function parseSnapshot(snapshot, sessionId) {
+function parseSnapshot(snapshot, sessionId, dateStart = DATE_START, dateEnd = DATE_END) {
   const rows = [];
   const allHuman = [];
   const transcriptRecords = [];
@@ -254,7 +264,7 @@ function parseSnapshot(snapshot, sessionId) {
       const date = jstDate(event.timestamp);
       input.dateJst = date;
       if (eventMs !== null && (firstHumanMs === null || eventMs < firstHumanMs)) firstHumanMs = eventMs;
-      if (date && date >= DATE_START && date <= DATE_END) hasHumanInPeriod = true;
+      if (date && date >= dateStart && date <= dateEnd) hasHumanInPeriod = true;
       input.availableMs = eventMs === null ? previousAvailableMs : Math.max(previousAvailableMs, eventMs);
       if (Number.isFinite(input.availableMs)) previousAvailableMs = input.availableMs;
       input.availableAt = Number.isFinite(input.availableMs) ? new Date(input.availableMs).toISOString() : null;
@@ -337,6 +347,8 @@ export async function readManifest(filename) {
   if (manifest.version !== 1 || !Array.isArray(manifest.sessions)) {
     throw new Error("manifest version 1 with a sessions array is required");
   }
+  const dateRangeJst = manifest.dateRangeJst ?? { start: DATE_START, end: DATE_END };
+  validateDateRange(dateRangeJst);
   const fileMetadata = Array.isArray(manifest.files) ? manifest.files : [];
   const files = [];
   const sessions = [];
@@ -354,7 +366,7 @@ export async function readManifest(filename) {
     const filePath = resolve(dirname(manifestPath), entry.path);
     const snapshot = await readFixedFile(filePath, entry.readEndByteOffset);
     if (snapshot.prefixHash !== entry.prefixSha256) throw new Error("manifest transcript hash mismatch");
-    const parsed = parseSnapshot(snapshot.snapshot, entry.sessionId);
+    const parsed = parseSnapshot(snapshot.snapshot, entry.sessionId, dateRangeJst.start, dateRangeJst.end);
     if (parsed.sessionId !== entry.sessionId || !parsed.hasHumanInPeriod || parsed.humanInputs.length === 0) {
       throw new Error("manifest session does not match the fixed population");
     }
@@ -416,6 +428,7 @@ export async function readManifest(filename) {
     sessions,
     files,
     fileAudit,
+    dateRangeJst,
     manifestHash: sha256(rawManifest),
     manifestPath,
     fixtureKind: manifest.fixtureKind ?? null,
@@ -1019,7 +1032,7 @@ async function createRuntime(compiledRoot, scratchRoot) {
   return { storage, events, detector, sessionStore, correctionStore, context, policy, render, budget, transcriptReader, redact, query, ruleTemplate };
 }
 
-export function createReplayOccurrenceRows(timeline) {
+export function createReplayOccurrenceRows(timeline, dateRangeJst = { start: DATE_START, end: DATE_END }) {
   const priorThemeCounts = new Map();
   const rows = [];
   const previousHumanBySession = new Map();
@@ -1087,7 +1100,7 @@ export function createReplayOccurrenceRows(timeline) {
       counts.set(label, next);
     }
     input.themeOccurrenceNumbers = counts;
-    if (input.dateJst && input.dateJst >= DATE_START && input.dateJst <= DATE_END) {
+    if (input.dateJst && input.dateJst >= dateRangeJst.start && input.dateJst <= dateRangeJst.end) {
       for (const label of input.labels) {
         if (counts.get(label) < 2) continue;
         let actionStartAt = null;
@@ -1225,11 +1238,41 @@ function buildTranscriptContext(sessions, runtime) {
   return { timeline, bySession };
 }
 
+function filterReplayOwnerInputs(sourceSessions, events) {
+  return sourceSessions.map((session) => {
+    const retainedInputs = new Map();
+    const retainedInputsByLineOrder = new Map();
+    const humanInputs = [];
+    for (const input of session.humanInputs) {
+      const ownerEvent = events.extractOwnerEvent(input.event);
+      if (!ownerEvent) continue;
+      const retainedInput = { ...input, ownerEvent };
+      retainedInputs.set(input, retainedInput);
+      retainedInputsByLineOrder.set(input.lineOrder, retainedInput);
+      humanInputs.push(retainedInput);
+    }
+    const timeline = session.timeline.flatMap((row) => {
+      if (row.kind !== "human") return [{ ...row }];
+      const input = retainedInputs.get(row.input) ?? retainedInputsByLineOrder.get(row.input?.lineOrder);
+      if (!input) return [];
+      return [{ ...row, input }];
+    });
+    return { ...session, humanInputs, timeline };
+  });
+}
+
+function detectReplayOwnerCorrections(input, runtime, context) {
+  const ownerEvent = input.ownerEvent ?? runtime.events.extractOwnerEvent(input.event);
+  if (!ownerEvent) return [];
+  return runtime.detector.detectOwnerCorrections(ownerEvent, context);
+}
+
 function makeSessionEvent(input, context, runtime, processedAt) {
   const eventId = input.eventId;
   const availableAt = input.availableAt ?? processedAt;
-  const ownerEvent = runtime.events.extractOwnerEvent(input.event);
-  const eventText = ownerEvent?.text ?? input.text;
+  const ownerEvent = input.ownerEvent ?? runtime.events.extractOwnerEvent(input.event);
+  if (!ownerEvent) throw new Error("replay input has no owner event");
+  const eventText = ownerEvent.text;
   const previousText = context.latestAssistantText;
   const target = ["質問", "回答", "返答", "待機", "全文", "本文", "文書", "文章", "比喩", "用語", "字数", "文字数", "要約", "フォント", "CSS", "デザイン", "部品", "原本", "出典", "検証", "確認", "設計", "実装", "保存", "配置", "成果物", "モデル"]
     .filter((word) => previousText.includes(word)).slice(0, 3);
@@ -1658,13 +1701,14 @@ function summarizeOutputs(rendered, selection, estimateTokens) {
   };
 }
 
-async function runCoverage({ split, coverage, sessions, compiledRoot, scratchRoot }) {
+async function runCoverage({ split, coverage, sessions: sourceSessions, compiledRoot, scratchRoot, dateRangeJst }) {
   const coverageRoot = join(resolve(scratchRoot), "splits", split, coverage);
   await mkdir(coverageRoot, { recursive: true });
   const isolatedStoreRoot = coverageRoot;
   const runtime = await initializeBlankStore(compiledRoot, isolatedStoreRoot);
   const { storage } = runtime;
   resetStore(isolatedStoreRoot, compiledRoot);
+  const sessions = filterReplayOwnerInputs(sourceSessions, runtime.events);
   for (const session of sessions) {
     session.startHookObservations = [];
     session.deliveryAttempts = [];
@@ -1692,10 +1736,17 @@ async function runCoverage({ split, coverage, sessions, compiledRoot, scratchRoo
   const snapshotsByEvent = new Map();
   const allInputs = inputRows;
   const stopFailures = [];
+  for (const session of sessions) {
+    pendingStopInputs.set(session.sessionHash, []);
+    sessionStates.set(session.sessionHash, {
+      compactEpoch: 0,
+      humanSeen: 0,
+      progress: { humanOrdinal: 0, transcriptOffset: 0, transcriptIdentity: "" },
+      lastAvailableMs: 0,
+    });
+  }
   for (const input of inputRows) {
     input.eventId = input.eventId ?? eventIdForInput(input, runtime);
-    if (!pendingStopInputs.has(input.sessionHash)) pendingStopInputs.set(input.sessionHash, []);
-    if (!sessionStates.has(input.sessionHash)) sessionStates.set(input.sessionHash, { compactEpoch: 0, humanSeen: 0, progress: { humanOrdinal: 0, transcriptOffset: 0, transcriptIdentity: "" }, lastAvailableMs: 0 });
   }
   for (const session of sessions) session.humanInputs.sort((a, b) => a.lineOrder - b.lineOrder);
   const originalTimeline = [];
@@ -1773,7 +1824,7 @@ async function runCoverage({ split, coverage, sessions, compiledRoot, scratchRoo
     }
     if (row.kind !== "human") return;
   });
-  const targetRows = createReplayOccurrenceRows(originalTimeline);
+  const targetRows = createReplayOccurrenceRows(originalTimeline, dateRangeJst);
   const targetMap = new Map(targetRows.map((entry) => [`${entry.eventId}:${entry.bundleLabel}`, entry]));
 
   const pendingCandidatesByEvent = new Map();
@@ -2109,7 +2160,7 @@ async function runCoverage({ split, coverage, sessions, compiledRoot, scratchRoo
       if (toProcess.length > 0) {
         const items = toProcess.map(({ input, hasReceipt, hookCandidates }) => {
           const context = assistantContextFor(input, runtime);
-          const candidates = hasReceipt ? hookCandidates : runtime.detector.detectOwnerCorrections(runtime.events.extractOwnerEvent(input.event), context);
+          const candidates = hasReceipt ? hookCandidates : detectReplayOwnerCorrections(input, runtime, context);
           return { input, context, candidates };
         });
         const eventItems = items.map(({ input, context }) => makeSessionEvent(input, context, runtime, at));
@@ -2255,7 +2306,7 @@ async function runCoverage({ split, coverage, sessions, compiledRoot, scratchRoo
     population: {
       sessionCount: sessions.length,
       humanUtteranceCount: allInputs.length,
-      periodHumanUtteranceCount: allInputs.filter((input) => input.dateJst >= DATE_START && input.dateJst <= DATE_END).length,
+      periodHumanUtteranceCount: allInputs.filter((input) => input.dateJst >= dateRangeJst.start && input.dateJst <= dateRangeJst.end).length,
       recurrenceCountB2ToB10: counts.main.recurrenceCount,
       recurrenceCountB1: counts.b1.recurrenceCount,
     },
@@ -2435,10 +2486,12 @@ async function computeReplayHashes(manifest, split, compiledRoot) {
 }
 
 function isExpectedReplaySplit(sessions, split) {
-  return sessions.length === 98 && split.tune.length === 68 && split.evaluation.length === 30;
+  const tuneCount = Math.floor(sessions.length * 0.7);
+  return split.tune.length === tuneCount && split.evaluation.length === sessions.length - tuneCount;
 }
 
 function reportPopulation(manifest) {
+  const dateRangeJst = manifest.dateRangeJst ?? { start: DATE_START, end: DATE_END };
   return {
     fileCount: manifest.fileAudit.fileCount,
     includedSessionCount: manifest.fileAudit.included,
@@ -2447,7 +2500,7 @@ function reportPopulation(manifest) {
     outsidePeriodCount: manifest.fileAudit.outsidePeriod,
     periodSessionCount: manifest.sessions.length,
     periodHumanUtteranceCount: manifest.sessions.reduce((sum, session) =>
-      sum + session.humanInputs.filter((input) => input.dateJst >= DATE_START && input.dateJst <= DATE_END).length, 0),
+      sum + session.humanInputs.filter((input) => input.dateJst >= dateRangeJst.start && input.dateJst <= dateRangeJst.end).length, 0),
   };
 }
 
@@ -2465,7 +2518,7 @@ async function writeAuditPrompts(scratchRoot, splitName, auditRows) {
   await writeFile(join(outputDirectory, `${splitName}.jsonl`), rows.join("\n") + (rows.length > 0 ? "\n" : ""), "utf8");
 }
 
-async function runColdSplit({ splitName, split, compiledRoot, scratchRoot, hashes, auditArgs }) {
+async function runColdSplit({ splitName, split, compiledRoot, scratchRoot, hashes, auditArgs, dateRangeJst }) {
   const coverageRuns = [];
   for (const coverage of ["observed", "contract"]) {
     coverageRuns.push(await runCoverage({
@@ -2474,6 +2527,7 @@ async function runColdSplit({ splitName, split, compiledRoot, scratchRoot, hashe
       sessions: split,
       compiledRoot,
       scratchRoot,
+      dateRangeJst,
     }));
   }
   const auditRows = coverageRuns[0].auditRows;
@@ -2485,7 +2539,7 @@ async function runColdSplit({ splitName, split, compiledRoot, scratchRoot, hashe
     hashes,
     population: {
       sessionCount: split.length,
-      humanUtteranceCount: split.reduce((sum, session) => sum + session.humanInputs.length, 0),
+      humanUtteranceCount: coverageRuns[0].report.population.humanUtteranceCount,
       recurrenceCountByLabel: Object.fromEntries(["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9", "B10"].map((label) => [
         label,
         coverageRuns[0].report.prevention.perTheme[label].recurrenceCount,
@@ -2648,7 +2702,7 @@ function readRound0CoverageRows(sessions, coverage, databasePath) {
   const eventByOrdinal = new Map(eventRows.map((row) => [`${row.sessionHash}:${row.humanOrdinal}`, row]));
   const eventSessionHashes = new Set(eventRows.map((row) => row.sessionHash));
   if (eventSessionHashes.size !== sessions.length || sessions.some((session) => !eventSessionHashes.has(session.sessionHash))) {
-    throw new Error(`round 0 ${coverage} store does not match the 98-session manifest`);
+    throw new Error(`round 0 ${coverage} store does not match the ${sessions.length}-session manifest`);
   }
   const rowsBySession = new Map();
   const timeline = [];
@@ -2959,6 +3013,7 @@ function buildEffectMarkdown(body) {
     "| 指標 | 調整用70% | 評価用30% |",
     "|---|---:|---:|",
     `| session数 | ${tune.sessionCount ?? "未実行"} | ${evaluation.sessionCount ?? "未実行"} |`,
+    `| 人間発話数 | ${tune.summary?.population.humanUtteranceCount ?? "未実行"} | ${evaluation.summary?.population.humanUtteranceCount ?? "未実行"} |`,
     `| 再発分母 B2〜B10 | ${tune.summary?.population.recurrenceCountByLabel ? Object.entries(tune.summary.population.recurrenceCountByLabel).filter(([key]) => key !== "B1").reduce((sum, [, count]) => sum + count, 0) : "未実行"} | ${evaluation.summary?.population.recurrenceCountByLabel ? Object.entries(evaluation.summary.population.recurrenceCountByLabel).filter(([key]) => key !== "B1").reduce((sum, [, count]) => sum + count, 0) : "未実行"} |`,
     "",
   ];
@@ -2980,13 +3035,15 @@ function buildEffectMarkdown(body) {
   ));
   const round0 = body.round0TuneComparison;
   sections.push(
-    "## ラウンド0と調整用sessionの比較",
+    "## 前ラウンドとの比較",
     "",
     round0.tune.status === "verified_from_round0_replay_store"
       ? `ラウンド0 tune値は全${round0.fullPopulationSessionCount} sessionの再生DBから復元し、JSONの全体集計と照合済み。対象: ${round0.tune.sessionCount} session。`
       : `ラウンド0 tune値は算出不可。${round0.tune.reason}。対象: ${round0.tune.sessionCount} session。`,
     "",
-    "| coverage | bundle | ラウンド0 tune | ラウンド0 全98 session |",
+  );
+  if (round0.all98.length > 0) sections.push(
+    `| coverage | bundle | ラウンド0 tune | ラウンド0 全${round0.fullPopulationSessionCount} session |`,
     "|---|---|---:|---:|",
     ...round0.all98.flatMap((run) => [
       `| ${run.coverage} | B2〜B10 | ${round0.tune.perCoverage?.[run.coverage] ? preventionCell(round0.tune.perCoverage[run.coverage].main) : "算出不可"} | ${preventionCell(run.main)} |`,
@@ -3025,19 +3082,42 @@ async function writeEffectReports(scratchRoot, hashes, population, manifest) {
   const stateDirectory = join(scratchRoot, "state");
   const tune = await readRunState(join(stateDirectory, "tune-run.json"));
   const evaluation = await readRunState(join(stateDirectory, "evaluation-run.json"));
-  const baselineReport = JSON.parse(await readFile(join(ROOT, ".wasurenagusa", "reports", "replay", "simulate-cold.json"), "utf8"));
-  const tuneSessions = splitReplaySessions(manifest.sessions).tune;
-  const round0Manifest = await readManifest(manifest.manifestPath);
-  const round0SessionRows = await readRound0SessionRows(round0Manifest.sessions);
+  const partition = splitReplaySessions(manifest.sessions);
+  let round0TuneComparison;
+  if (manifest.sessions.length === 98) {
+    const baselineReport = JSON.parse(await readFile(join(ROOT, ".wasurenagusa", "reports", "replay", "simulate-cold.json"), "utf8"));
+    const round0Manifest = await readManifest(manifest.manifestPath);
+    const round0SessionRows = await readRound0SessionRows(round0Manifest.sessions);
+    round0TuneComparison = summarizeRound0TuneComparison(baselineReport, partition.tune.length, round0SessionRows,
+      partition.tune.map((session) => session.sessionHash));
+  } else {
+    round0TuneComparison = {
+      tune: {
+        sessionCount: partition.tune.length,
+        status: "skipped_previous_round_population",
+        reason: `The round 0 store is specific to 98 sessions; the current manifest contains ${manifest.sessions.length} sessions`,
+      },
+      fullPopulationSessionCount: 98,
+      all98: [],
+    };
+  }
+  const replayedOwnerHumanUtteranceCount = tune && evaluation
+    ? tune.population.humanUtteranceCount + evaluation.population.humanUtteranceCount
+    : null;
   const body = {
     reportVersion: REPORT_VERSION,
     evaluationStatus: evaluation ? "評価済み" : "評価未実行",
-    dateRangeJst: { start: DATE_START, end: DATE_END },
-    split: { seed: SAMPLE_SEED, adjustmentPercent: 70, evaluationPercent: 30, adjustmentSessions: 68, evaluationSessions: 30 },
-    population,
+    dateRangeJst: manifest.dateRangeJst,
+    split: {
+      seed: SAMPLE_SEED,
+      adjustmentPercent: 70,
+      evaluationPercent: 30,
+      adjustmentSessions: partition.tune.length,
+      evaluationSessions: partition.evaluation.length,
+    },
+    population: { ...population, replayedOwnerHumanUtteranceCount },
     hashes,
-    round0TuneComparison: summarizeRound0TuneComparison(baselineReport, tuneSessions.length, round0SessionRows,
-      tuneSessions.map((session) => session.sessionHash)),
+    round0TuneComparison,
     columns: {
       adjustment70: tune
         ? { status: "完了", sessionCount: tune.sessionCount, summary: tune.summary, run: tune.run }
@@ -3047,8 +3127,8 @@ async function writeEffectReports(scratchRoot, hashes, population, manifest) {
         : { status: "未実行", sessionCount: null, summary: null, run: null },
     },
     gates: {
-      current98Sessions: population.periodSessionCount === 98,
-      fixedSplit: true,
+      manifestPopulationValid: population.includedSessionCount === population.periodSessionCount,
+      fixedSplit: isExpectedReplaySplit(manifest.sessions, partition),
       evaluationFrozen: Boolean(await readRunState(join(scratchRoot, "evaluation-freeze.json"))),
       evaluationConsumedOnce: Boolean(await readRunState(join(scratchRoot, "evaluation-claim.json"))),
       independentSolOpusAudit: Boolean(evaluation?.run.audit.status === "監査結果読込済み"),
@@ -3086,6 +3166,7 @@ async function runColdSimulation({ splitName, manifest, split, compiledRoot, scr
     scratchRoot,
     hashes,
     auditArgs,
+    dateRangeJst: manifest.dateRangeJst,
   });
   const state = {
     sessionCount: splitRun.sessionCount,
@@ -3347,15 +3428,15 @@ export async function runSimulation({ mode, manifest: manifestPath, compiledRoot
   const { compiled, scratch } = await validateRunPaths(compiledRoot, scratchRoot);
   const manifest = await readManifest(manifestPath);
   if (mode === "cold" || mode === "freeze") {
-    if (manifest.sessions.length !== 98 || manifest.fileAudit.included !== 98) {
-      throw new Error("cold replay requires exactly 98 valid period sessions");
+    if (manifest.sessions.length !== manifest.fileAudit.included) {
+      throw new Error("cold replay requires every included manifest session");
     }
   } else if (manifest.fixtureKind !== "synthetic") {
     throw new Error("acceptance and hook-timing require a synthetic manifest fixture");
   }
   const partition = splitReplaySessions(manifest.sessions);
   if ((mode === "cold" || mode === "freeze") && !isExpectedReplaySplit(manifest.sessions, partition)) {
-    throw new Error("current 98-session split must be fixed at 68:30");
+    throw new Error("replay split must partition all manifest sessions at 70:30");
   }
   const hashes = await computeReplayHashes(manifest, partition, compiled);
   const population = reportPopulation(manifest);
@@ -3364,7 +3445,13 @@ export async function runSimulation({ mode, manifest: manifestPath, compiledRoot
     if (!tuneState) throw new Error("freeze requires a completed tune split");
     if (JSON.stringify(tuneState.hashes) !== JSON.stringify(hashes)) throw new Error("tune inputs changed before evaluation freeze");
     const frozen = await freezeReplayEvaluation(scratch, hashes);
-    const body = { mode, status: "frozen", hashes: frozen.hashes, sessionCount: manifest.sessions.length, split: { adjustment: 68, evaluation: 30 } };
+    const body = {
+      mode,
+      status: "frozen",
+      hashes: frozen.hashes,
+      sessionCount: manifest.sessions.length,
+      split: { adjustment: partition.tune.length, evaluation: partition.evaluation.length },
+    };
     await writeSimpleReport(scratch, "evaluation-freeze", body, buildSimpleMarkdown("評価入力の固定", body));
     return body;
   }
@@ -3392,4 +3479,13 @@ export async function runSimulation({ mode, manifest: manifestPath, compiledRoot
   return body;
 }
 
-export const internal = { deterministicSample, wilsonInterval, nextCursorIdentity, hashCompiledTree, reportPopulation, confidenceConditions };
+export const internal = {
+  deterministicSample,
+  wilsonInterval,
+  nextCursorIdentity,
+  hashCompiledTree,
+  reportPopulation,
+  filterReplayOwnerInputs,
+  isExpectedReplaySplit,
+  confidenceConditions,
+};

@@ -27,6 +27,7 @@ import { AUTONOMOUS_DEFAULT_OPTIONS, MAX_RETRY_COUNT, TEMPLATE_PATTERNS } from "
 import { SlackNotifier, type CycleTaskResult } from "../autonomous/notifier.js";
 import { TaskMarkdownAdapter } from "../autonomous/task-markdown.js";
 import type { SchedulerConfig, ExecutionLogEntry, AutonomousTask, AutonomousTaskStatus } from "../types.js";
+import { isMainModule } from "../utils/cli-entry.js";
 
 /**
  * Claude CLIの出力からトークンリミット到達を検出する。
@@ -718,7 +719,10 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  console.error("Fatal error:", err);
-  process.exit(1);
-});
+// テストが detectRateLimit を import しただけで本処理（ロック取得・spec 更新）が走らないよう、直接起動時だけ実行する
+if (isMainModule(import.meta.url)) {
+  main().catch((err) => {
+    console.error("Fatal error:", err);
+    process.exit(1);
+  });
+}

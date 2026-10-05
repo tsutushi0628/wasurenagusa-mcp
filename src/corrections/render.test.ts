@@ -74,6 +74,42 @@ describe("renderCorrectionRules", () => {
     expect(result.tokenCount).toBeLessThanOrEqual(800);
   });
 
+  it("遵守違反のrestore規則を3件まで全体800 tokens枠内で送る", () => {
+    const rules = [
+      rule("violation-1", "常体で回答する。", { delivery: "restore", complianceViolation: true }),
+      rule("violation-2", "全文を表示する。", { delivery: "restore", complianceViolation: true }),
+      rule("violation-3", "工程略号を使わない。", { delivery: "restore", complianceViolation: true }),
+    ];
+
+    const result = renderCorrectionRules({ trigger: "prompt", rules });
+
+    expect(result.includedRules.map((entry) => entry.bundleKey)).toEqual([
+      "violation-1",
+      "violation-2",
+      "violation-3",
+    ]);
+    expect(result.tokenCount).toBeLessThanOrEqual(800);
+  });
+
+  it("定期UserPromptSubmitでも遵守違反のrestore規則を3件まで送る", () => {
+    const rules = [
+      rule("refresh-violation-1", "常体で回答する。", { delivery: "restore", complianceViolation: true }),
+      rule("refresh-violation-2", "全文を表示する。", { delivery: "restore", complianceViolation: true }),
+      rule("refresh-violation-3", "工程略号を使わない。", { delivery: "restore", complianceViolation: true }),
+      rule("refresh-normal", "定期規則。", { delivery: "refresh" }),
+    ];
+
+    const result = renderCorrectionRules({ trigger: "refresh", rules });
+
+    expect(result.includedRules.map((entry) => entry.bundleKey)).toEqual([
+      "refresh-violation-1",
+      "refresh-violation-2",
+      "refresh-violation-3",
+    ]);
+    expect(result.text).not.toContain("refresh-normal");
+    expect(result.tokenCount).toBeLessThanOrEqual(800);
+  });
+
   it("発話時は本文640文字・ブロック650 tokens・全出力800 tokensを守る", () => {
     const rules = [
       rule("restore-1", "あ".repeat(240), { delivery: "restore" }),

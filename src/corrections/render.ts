@@ -19,6 +19,7 @@ export interface CorrectionRule {
   title: string;
   ruleText: string;
   delivery: CorrectionRuleDelivery;
+  complianceViolation?: boolean;
 }
 
 export type CorrectionRenderTrigger =
@@ -62,7 +63,10 @@ interface CorrectionRenderLimits {
   maxOutputTokens: number;
 }
 
-function getLimits(trigger: CorrectionRenderTrigger): CorrectionRenderLimits {
+function getLimits(
+  trigger: CorrectionRenderTrigger,
+  rules: readonly CorrectionRule[],
+): CorrectionRenderLimits {
   if (trigger === "prompt") {
     return {
       maxItems: 3,
@@ -73,6 +77,15 @@ function getLimits(trigger: CorrectionRenderTrigger): CorrectionRenderLimits {
     };
   }
   if (trigger === "refresh") {
+    if (rules.some((rule) => rule.delivery === "restore" && rule.complianceViolation)) {
+      return {
+        maxItems: 3,
+        maxRuleCharacters: 240,
+        maxTotalCharacters: 640,
+        maxBlockTokens: 650,
+        maxOutputTokens: 800,
+      };
+    }
     return {
       maxItems: 2,
       maxRuleCharacters: 160,
@@ -104,11 +117,18 @@ function getRuleOrder(
   rules: readonly CorrectionRule[],
 ): CorrectionRule[] {
   if (trigger === "refresh") {
+    const complianceRestore = rules
+      .filter((entry) => entry.delivery === "restore" && entry.complianceViolation)
+      .slice(0, 3);
+    if (complianceRestore.length > 0) return complianceRestore;
     return rules.filter((entry) => entry.delivery === "refresh");
   }
   if (trigger !== "prompt") return [...rules];
 
-  const restore = rules.filter((entry) => entry.delivery === "restore").slice(0, 2);
+  const restore = [
+    ...rules.filter((entry) => entry.delivery === "restore" && entry.complianceViolation).slice(0, 3),
+    ...rules.filter((entry) => entry.delivery === "restore" && !entry.complianceViolation).slice(0, 2),
+  ];
   const refresh = rules.filter((entry) => entry.delivery === "refresh").slice(0, 1);
   const related = rules.filter((entry) => entry.delivery === "related").slice(0, 2);
   return [...restore, ...refresh, ...related];
@@ -172,7 +192,7 @@ export function renderCorrectionRules({
   rules,
   budgetTokens = DEFAULT_INJECTION_TOKEN_BUDGET,
 }: CorrectionRenderInput): CorrectionRenderResult {
-  const limits = getLimits(trigger);
+  const limits = getLimits(trigger, rules);
   let outputLimit: number;
   if (Number.isFinite(budgetTokens)) {
     outputLimit = Math.max(0, Math.floor(budgetTokens));

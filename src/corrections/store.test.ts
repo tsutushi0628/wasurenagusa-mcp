@@ -18,6 +18,7 @@ import {
   applyCorrectionEvidence,
   cancelCorrectionBundle,
   disputeCorrectionBundles,
+  disputeRecentModelRoutingBundles,
   expireCorrectionBundles,
   getCorrectionVersionAt,
   prepareCorrectionBundle,
@@ -57,16 +58,23 @@ describe("correction evidence store", () => {
     return new Date(START + offsetMs).toISOString();
   }
 
-  function addEvent(eventId: string, sessionIdHash: string, observedAt: string, project = "fixture-project", scope = "backend"): void {
+  function addEvent(
+    eventId: string,
+    sessionIdHash: string,
+    observedAt: string,
+    project = "fixture-project",
+    scope = "backend",
+    humanOrdinal = 1,
+  ): void {
     storage.runCorrectionTransaction(({ db }) => {
       db.prepare(`
         INSERT INTO owner_correction_events (
           event_id, session_id_hash, source_uuid_hash, human_ordinal, observed_at, available_at,
           source_kind, excerpt, previous_action, action_first_locator_hash, action_last_locator_hash,
           project, scope, raw_text_hash, source_locator_hash, processed_at
-        ) VALUES (?, ?, NULL, 1, ?, ?, 'user', '合成発話', 'action_unknown', NULL, NULL,
+        ) VALUES (?, ?, NULL, ?, ?, ?, 'user', '合成発話', 'action_unknown', NULL, NULL,
           ?, ?, 'synthetic-hash', ?, ?)
-      `).run(eventId, sessionIdHash, observedAt, observedAt, project, scope, `locator-${eventId}`, observedAt);
+      `).run(eventId, sessionIdHash, humanOrdinal, observedAt, observedAt, project, scope, `locator-${eventId}`, observedAt);
     });
   }
 
@@ -121,6 +129,7 @@ describe("correction evidence store", () => {
       lifetimeKind,
       continuationBasis,
       directive: true,
+      plainCommandEligible: false,
       question: false,
       toneException: false,
       conditionKnown: topicKey !== "unknown",
@@ -160,7 +169,13 @@ describe("correction evidence store", () => {
     };
   }
 
-  function detectedObservation(text: string, sessionId: string, eventId: string, at: string): CorrectionEvidenceInput {
+  function detectedObservation(
+    text: string,
+    sessionId: string,
+    eventId: string,
+    at: string,
+    detectorVersion = "synthetic-detector-v2",
+  ): CorrectionEvidenceInput {
     const event = extractOwnerEvent({
       type: "user",
       origin: { kind: "human" },
@@ -187,7 +202,7 @@ describe("correction evidence store", () => {
       evidence: {
         source: candidate.source,
         score: candidate.score,
-        detectorVersion: "synthetic-detector-v2",
+        detectorVersion,
         conditions: serializeCorrectionRuleInput(candidate.ruleInput),
         polarity: candidate.polarity,
       },
@@ -289,7 +304,7 @@ describe("correction evidence store", () => {
     expect(readBundle(second.bundleKey).memories).toEqual([]);
   });
 
-  it("旧束キーは異なる言い回しを別候補にする", () => {
+  it("同じ必須値の短い要約命令は束ね、v2根拠だけでは確定しない", () => {
     const firstAt = iso(0);
     const firstInput = detectedObservation("要約を100字以内にして", "session-one", "event-typed-one", firstAt);
     addEvent(firstInput.eventId, "session-one", firstAt);
@@ -298,10 +313,10 @@ describe("correction evidence store", () => {
     const secondAt = iso(DAY_MS);
     const secondInput = detectedObservation("要約を100字以内にまとめて", "session-two", "event-typed-two", secondAt);
     addEvent(secondInput.eventId, "session-two", secondAt);
-    expect(secondInput.bundleKey).not.toBe(firstInput.bundleKey);
+    expect(secondInput.bundleKey).toBe(firstInput.bundleKey);
     const second = apply(secondInput);
 
-    expect(second).toMatchObject({ status: "candidate", occurrenceCount: 1, sessionCount: 1, memoryId: null });
+    expect(second).toMatchObject({ status: "candidate", occurrenceCount: 2, sessionCount: 2, memoryId: null });
     expect(readBundle(second.bundleKey).bundle).toMatchObject({ rule_text: "" });
   });
 
@@ -397,7 +412,7 @@ describe("correction evidence store", () => {
     expect(readBundle().memories).toHaveLength(1);
   });
 
-  it("同一session内の異なる言い回しは旧束キーで別候補にする", () => {
+  it("同じ必須値の短い命令は同じsessionで束ねても確定しない", () => {
     const firstAt = iso(0);
     const firstInput = detectedObservation("要約を100字以内にして", "session-one", "event-same-session-one", firstAt);
     addEvent(firstInput.eventId, "session-one", firstAt);
@@ -408,8 +423,8 @@ describe("correction evidence store", () => {
     addEvent(secondInput.eventId, "session-one", secondAt);
     const second = apply(secondInput);
 
-    expect(secondInput.bundleKey).not.toBe(firstInput.bundleKey);
-    expect(second).toMatchObject({ status: "candidate", occurrenceCount: 1, sessionCount: 1, memoryId: null });
+    expect(secondInput.bundleKey).toBe(firstInput.bundleKey);
+    expect(second).toMatchObject({ status: "candidate", occurrenceCount: 2, sessionCount: 1, memoryId: null });
     expect(readBundle(second.bundleKey).memories).toEqual([]);
   });
 
@@ -718,6 +733,24 @@ describe("correction evidence store", () => {
     expect(readBundle(second.bundleKey).memories).toMatchObject([{ content: "オーナーへの応答は常体で書く" }]);
   });
 
+  it("R2型の短文命令は別projectの2 sessionで確定時にownerへ昇格する", () => {
+    const command = "質問に答えろ";
+    const firstAt = iso(0);
+    addEvent("event-r2-one", "session-r2-one", firstAt, "project-one");
+    const firstInput = detectedObservation(command, "session-r2-one", "event-r2-one", firstAt, "owner-correction-v3");
+    const first = apply({ ...firstInput, visibility: "owner" });
+
+    const secondAt = iso(DAY_MS);
+    addEvent("event-r2-two", "session-r2-two", secondAt, "project-two");
+    const secondInput = detectedObservation(command, "session-r2-two", "event-r2-two", secondAt, "owner-correction-v3");
+    const second = apply({ ...secondInput, visibility: "owner" });
+
+    expect(first).toMatchObject({ status: "candidate", occurrenceCount: 1, sessionCount: 1 });
+    expect(second.bundleKey).toBe(first.bundleKey);
+    expect(second).toMatchObject({ status: "confirmed", occurrenceCount: 2, sessionCount: 2 });
+    expect(readBundle(second.bundleKey).bundle).toMatchObject({ visibility: "owner", status: "confirmed" });
+  });
+
   it("同じ動作・必須値・適用範囲の逆極性だけ両方をdisputedへ止める", () => {
     const firstAt = iso(0);
     addEvent("event-positive", "session-positive", firstAt);
@@ -775,5 +808,267 @@ describe("correction evidence store", () => {
     const result = apply(observation("event-two", secondAt));
     expect(result).toMatchObject({ status: "candidate", occurrenceCount: 2, sessionCount: 2, version: 3, memoryId: null });
     expect(readBundle().memories).toEqual([]);
+  });
+
+  it("confirms eligible typed and negative unknown commands across two sessions", () => {
+    const commands = ["全文を出して", "質問に答えろ", "要約を短くしないで", "その印を使うな"];
+
+    for (const [index, text] of commands.entries()) {
+      const firstAt = iso(index * 10 * DAY_MS);
+      const firstEventId = `plain-first-${index}`;
+      addEvent(firstEventId, `plain-session-first-${index}`, firstAt);
+      const firstInput = detectedObservation(text, `plain-session-first-${index}`, firstEventId, firstAt, "owner-correction-v3");
+      expect(JSON.parse(firstInput.evidence.conditions)).toMatchObject({ plainCommandEligible: true });
+      if (index < 2) expect(firstInput.ruleText).toBe("");
+      const first = apply(firstInput);
+      expect(first).toMatchObject({ status: "candidate", occurrenceCount: 1, sessionCount: 1, memoryId: null });
+
+      const secondAt = iso((index * 10 + 1) * DAY_MS);
+      const secondEventId = `plain-second-${index}`;
+      addEvent(secondEventId, `plain-session-second-${index}`, secondAt);
+      const second = apply(detectedObservation(text, `plain-session-second-${index}`, secondEventId, secondAt, "owner-correction-v3"));
+
+      expect(second).toMatchObject({ status: "confirmed", occurrenceCount: 2, sessionCount: 2 });
+      expect(readBundle(second.bundleKey).bundle).toMatchObject({
+        rule_text: text,
+        lifetime_kind: "inferred",
+        expires_at: iso((index * 10 + 31) * DAY_MS),
+      });
+      expect(readBundle(second.bundleKey).memories.some((memory: { content: string }) => memory.content === text)).toBe(true);
+    }
+  });
+
+  it("does not confirm plain commands twice in one session or for ineligible text", () => {
+    const cases = [
+      { text: "全文を出して", firstSession: "same-session", secondSession: "same-session" },
+      { text: "記事の下書きを書いて", firstSession: "positive-unknown-one", secondSession: "positive-unknown-two" },
+      { text: "x".repeat(35) + "質問に答えて", firstSession: "long-one", secondSession: "long-two" },
+      { text: "質問に答えて?", firstSession: "question-one", secondSession: "question-two" },
+    ];
+
+    for (const [index, item] of cases.entries()) {
+      const firstAt = iso(index * 3 * DAY_MS);
+      const firstEventId = `ineligible-first-${index}`;
+      addEvent(firstEventId, item.firstSession, firstAt);
+      const firstInput = detectedObservation(item.text, item.firstSession, firstEventId, firstAt, "owner-correction-v3");
+      expect(JSON.parse(firstInput.evidence.conditions).plainCommandEligible).toBe(item.text === "全文を出して");
+      apply(firstInput);
+
+      const secondAt = iso((index * 3 + 1) * DAY_MS);
+      const secondEventId = `ineligible-second-${index}`;
+      addEvent(secondEventId, item.secondSession, secondAt);
+      const second = apply(detectedObservation(item.text, item.secondSession, secondEventId, secondAt, "owner-correction-v3"));
+
+      expect(second.status).toBe("candidate");
+      expect(second.memoryId).toBeNull();
+    }
+  });
+
+  it("counts identical same-minute broadcasts as one action and ignores v2 plain evidence", () => {
+    const firstAt = iso(0);
+    addEvent("broadcast-one", "broadcast-session-one", firstAt);
+    apply(detectedObservation("全文を出して", "broadcast-session-one", "broadcast-one", firstAt, "owner-correction-v3"));
+    addEvent("broadcast-two", "broadcast-session-two", firstAt);
+    const duplicateBroadcast = apply(detectedObservation("全文を出して", "broadcast-session-two", "broadcast-two", firstAt, "owner-correction-v3"));
+    expect(duplicateBroadcast).toMatchObject({ status: "candidate", occurrenceCount: 1, sessionCount: 1, memoryId: null });
+    const repeatedDelivery = apply(detectedObservation("全文を出して", "broadcast-session-two", "broadcast-two", firstAt, "owner-correction-v3"));
+    expect(repeatedDelivery).toEqual(duplicateBroadcast);
+
+    const laterAt = iso(60 * 1000);
+    addEvent("broadcast-three", "broadcast-session-two", laterAt);
+    const independentAction = apply(detectedObservation("全文を出して", "broadcast-session-two", "broadcast-three", laterAt, "owner-correction-v3"));
+    expect(independentAction).toMatchObject({ status: "confirmed", occurrenceCount: 2, sessionCount: 2 });
+
+    const legacyAt = iso(3 * DAY_MS);
+    addEvent("legacy-one", "legacy-session-one", legacyAt);
+    apply(detectedObservation("質問に答えろ", "legacy-session-one", "legacy-one", legacyAt, "owner-correction-v2"));
+    const legacySecondAt = iso(4 * DAY_MS);
+    addEvent("legacy-two", "legacy-session-two", legacySecondAt);
+    const legacySecond = apply(detectedObservation("質問に答えろ", "legacy-session-two", "legacy-two", legacySecondAt, "owner-correction-v2"));
+    expect(legacySecond).toMatchObject({ status: "candidate", occurrenceCount: 2, sessionCount: 2, memoryId: null });
+  });
+
+  it("chooses a repeated plain wording before a shorter singleton and otherwise chooses the shortest", () => {
+    const repeatedWording = "文案は全文を表示して";
+    const firstAt = iso(0);
+    addEvent("wording-one", "wording-session-one", firstAt);
+    apply(detectedObservation(repeatedWording, "wording-session-one", "wording-one", firstAt, "owner-correction-v3"));
+    const secondAt = iso(DAY_MS);
+    addEvent("wording-two", "wording-session-two", secondAt);
+    apply(detectedObservation(repeatedWording, "wording-session-two", "wording-two", secondAt, "owner-correction-v3"));
+    const thirdAt = iso(2 * DAY_MS);
+    addEvent("wording-three", "wording-session-three", thirdAt);
+    const repeatedResult = apply(detectedObservation("文案全文を出せ", "wording-session-three", "wording-three", thirdAt, "owner-correction-v3"));
+    expect(readBundle(repeatedResult.bundleKey).bundle).toMatchObject({ rule_text: repeatedWording });
+    expect(readBundle(repeatedResult.bundleKey).memories.some((memory: { content: string }) => memory.content === repeatedWording)).toBe(true);
+
+    const shortFirstAt = iso(5 * DAY_MS);
+    addEvent("shortest-one", "shortest-session-one", shortFirstAt);
+    apply(detectedObservation("全文を表示して", "shortest-session-one", "shortest-one", shortFirstAt, "owner-correction-v3"));
+    const shortSecondAt = iso(6 * DAY_MS);
+    addEvent("shortest-two", "shortest-session-two", shortSecondAt);
+    const shortestResult = apply(detectedObservation("全文を出せ", "shortest-session-two", "shortest-two", shortSecondAt, "owner-correction-v3"));
+    expect(readBundle(shortestResult.bundleKey).bundle).toMatchObject({ rule_text: "全文を出せ" });
+    expect(readBundle(shortestResult.bundleKey).memories.some((memory: { content: string }) => memory.content === "全文を出せ")).toBe(true);
+  });
+
+  it("cancels a plain-confirmed memory through the existing bundle path", () => {
+    const firstAt = iso(0);
+    addEvent("plain-cancel-one", "plain-cancel-session-one", firstAt);
+    apply(detectedObservation("全文を出して", "plain-cancel-session-one", "plain-cancel-one", firstAt, "owner-correction-v3"));
+    const secondAt = iso(DAY_MS);
+    addEvent("plain-cancel-two", "plain-cancel-session-two", secondAt);
+    const result = apply(detectedObservation("全文を出して", "plain-cancel-session-two", "plain-cancel-two", secondAt, "owner-correction-v3"));
+
+    const cancelAt = iso(2 * DAY_MS);
+    addEvent("plain-cancel-event", "plain-cancel-three", cancelAt);
+    storage.runCorrectionTransaction(({ db, save }) => cancelCorrectionBundle({ db, save }, {
+      bundleKey: result.bundleKey,
+      eventId: "plain-cancel-event",
+      at: cancelAt,
+    }));
+
+    expect(readBundle(result.bundleKey).bundle).toMatchObject({ status: "rejected", version: 4 });
+    expect(readBundle(result.bundleKey).memories[0]).toMatchObject({ state: "archived" });
+  });
+
+  it("confirms a short owner-visible model route for 24 hours", () => {
+    const command = "Codexを使って";
+    const firstAt = iso(0);
+    addEvent("route-one", "route-session-one", firstAt);
+    apply({ ...detectedObservation(command, "route-session-one", "route-one", firstAt, "owner-correction-v3"), visibility: "owner" });
+    const secondAt = iso(2 * 60 * 60 * 1000);
+    addEvent("route-two", "route-session-two", secondAt);
+    const result = apply({ ...detectedObservation(command, "route-session-two", "route-two", secondAt, "owner-correction-v3"), visibility: "owner" });
+
+    expect(result).toMatchObject({ status: "confirmed", occurrenceCount: 2, sessionCount: 2 });
+    expect(readBundle(result.bundleKey).bundle).toMatchObject({
+      rule_text: command,
+      visibility: "owner",
+      lifetime_kind: "routing",
+      expires_at: iso(26 * 60 * 60 * 1000),
+    });
+  });
+
+  it("counts a same-minute model-route broadcast once and expires it on a five-utterance retraction", () => {
+    const command = "Codexを使って";
+    const firstAt = iso(0);
+    addEvent("route-broadcast-one", "route-session-one", firstAt);
+    const first = apply({
+      ...detectedObservation(command, "route-session-one", "route-broadcast-one", firstAt, "owner-correction-v3"),
+      visibility: "owner",
+    });
+    addEvent("route-broadcast-two", "route-session-two", firstAt);
+    const broadcast = apply({
+      ...detectedObservation(command, "route-session-two", "route-broadcast-two", firstAt, "owner-correction-v3"),
+      visibility: "owner",
+    });
+
+    expect(broadcast.bundleKey).toBe(first.bundleKey);
+    expect(broadcast).toMatchObject({ status: "candidate", occurrenceCount: 1, sessionCount: 1, memoryId: null });
+
+    for (let humanOrdinal = 2; humanOrdinal <= 5; humanOrdinal += 1) {
+      addEvent(`route-intervening-${humanOrdinal}`, "route-session-one", iso(humanOrdinal * 1000), "fixture-project", "backend", humanOrdinal);
+    }
+    const retractionAt = iso(60 * 1000);
+    addEvent("route-retraction", "route-session-one", retractionAt, "fixture-project", "backend", 6);
+    const disputed = storage.runCorrectionTransaction(({ db, save }) => disputeRecentModelRoutingBundles(
+      { db, save },
+      { eventId: "route-retraction", at: retractionAt, targetModels: ["Codex"] },
+    ));
+
+    expect(disputed).toMatchObject([{ bundleKey: first.bundleKey, status: "expired" }]);
+    expect(readBundle(first.bundleKey).bundle).toMatchObject({ status: "expired", counterevidence_event_id: "route-retraction" });
+  });
+
+  it("retracts only the named model and starts a fresh candidate in a later session", () => {
+    const sessionId = "named-route-session";
+    const firstAt = iso(0);
+    addEvent("named-route-codex", sessionId, firstAt, "fixture-project", "backend", 1);
+    const codex = apply({
+      ...detectedObservation("Codexを使って", sessionId, "named-route-codex", firstAt, "owner-correction-v3"),
+      visibility: "owner",
+    });
+    const claudeAt = iso(1000);
+    addEvent("named-route-claude", sessionId, claudeAt, "fixture-project", "backend", 2);
+    const claude = apply({
+      ...detectedObservation("Claudeを使って", sessionId, "named-route-claude", claudeAt, "owner-correction-v3"),
+      visibility: "owner",
+    });
+    const sonnetAt = iso(1500);
+    addEvent("named-route-sonnet", sessionId, sonnetAt, "fixture-project", "backend", 3);
+    const sonnet = apply({
+      ...detectedObservation("Claude Sonnetを使って", sessionId, "named-route-sonnet", sonnetAt, "owner-correction-v3"),
+      visibility: "owner",
+    });
+    const retractionAt = iso(2000);
+    addEvent("named-route-retraction", sessionId, retractionAt, "fixture-project", "backend", 4);
+
+    const stopped = storage.runCorrectionTransaction(({ db, save }) => disputeRecentModelRoutingBundles(
+      { db, save },
+      { eventId: "named-route-retraction", at: retractionAt, targetModels: ["Claude"] },
+    ));
+
+    expect(stopped.map((bundle) => bundle.bundleKey)).toEqual([claude.bundleKey]);
+    expect(readBundle(codex.bundleKey).bundle).toMatchObject({ status: "candidate" });
+    expect(readBundle(claude.bundleKey).bundle).toMatchObject({ status: "expired" });
+    expect(readBundle(sonnet.bundleKey).bundle).toMatchObject({ status: "candidate" });
+
+    const laterAt = iso(3000);
+    addEvent("named-route-claude-later", "later-route-session", laterAt);
+    const restarted = apply({
+      ...detectedObservation("Claudeを使って", "later-route-session", "named-route-claude-later", laterAt, "owner-correction-v3"),
+      visibility: "owner",
+    });
+
+    expect(restarted.bundleKey).toBe(claude.bundleKey);
+    expect(restarted).toMatchObject({ status: "candidate", occurrenceCount: 1, sessionCount: 1 });
+    expect(readBundle(claude.bundleKey).bundle).toMatchObject({
+      status: "candidate",
+      counterevidence_event_id: null,
+    });
+  });
+
+  it("ignores a model-route retraction after six later human utterances", () => {
+    const command = "Claudeを使って";
+    const firstAt = iso(0);
+    addEvent("late-route-root", "late-route-session", firstAt);
+    const root = apply({
+      ...detectedObservation(command, "late-route-session", "late-route-root", firstAt, "owner-correction-v3"),
+      visibility: "owner",
+    });
+    for (let humanOrdinal = 2; humanOrdinal <= 6; humanOrdinal += 1) {
+      addEvent(`late-route-intervening-${humanOrdinal}`, "late-route-session", iso(humanOrdinal * 1000), "fixture-project", "backend", humanOrdinal);
+    }
+    const retractionAt = iso(60 * 1000);
+    addEvent("late-route-retraction", "late-route-session", retractionAt, "fixture-project", "backend", 7);
+    const disputed = storage.runCorrectionTransaction(({ db, save }) => disputeRecentModelRoutingBundles(
+      { db, save },
+      { eventId: "late-route-retraction", at: retractionAt, targetModels: ["Claude"] },
+    ));
+
+    expect(disputed).toEqual([]);
+    expect(readBundle(root.bundleKey).bundle).toMatchObject({ status: "candidate" });
+  });
+
+  it("reopens an expired short model route as a fresh candidate after 24 hours", () => {
+    const command = "Codexを使って";
+    const firstAt = iso(0);
+    addEvent("route-expiry-one", "route-expiry-session-one", firstAt);
+    apply({ ...detectedObservation(command, "route-expiry-session-one", "route-expiry-one", firstAt, "owner-correction-v3"), visibility: "owner" });
+    const secondAt = iso(2 * 60 * 60 * 1000);
+    addEvent("route-expiry-two", "route-expiry-session-two", secondAt);
+    const confirmed = apply({ ...detectedObservation(command, "route-expiry-session-two", "route-expiry-two", secondAt, "owner-correction-v3"), visibility: "owner" });
+    const expiredAt = iso(26 * 60 * 60 * 1000);
+    storage.runCorrectionTransaction(({ db, save }) => expireCorrectionBundles({ db, save }, expiredAt));
+
+    const nextAt = iso(26 * 60 * 60 * 1000 + 1);
+    addEvent("route-expiry-three", "route-expiry-session-three", nextAt);
+    const reopened = apply({ ...detectedObservation(command, "route-expiry-session-three", "route-expiry-three", nextAt, "owner-correction-v3"), visibility: "owner" });
+
+    expect(confirmed.status).toBe("confirmed");
+    expect(reopened.bundleKey).toBe(confirmed.bundleKey);
+    expect(reopened).toMatchObject({ status: "candidate", occurrenceCount: 1, sessionCount: 1 });
+    expect(readBundle(confirmed.bundleKey).memories[0]).toMatchObject({ state: "archived" });
   });
 });

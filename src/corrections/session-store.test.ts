@@ -13,6 +13,7 @@ import {
   hashRawText,
   hashSessionId,
   queuePendingReceipt,
+  resolveSessionProject,
   type SessionCorrectionEvent,
   type SessionProgress,
 } from "./session-store.js";
@@ -135,6 +136,46 @@ describe("correction session store", () => {
       events: [{ event_id: event.eventId, human_ordinal: 1 }],
       evidenceCount: { count: 2 },
     });
+  });
+
+  it("同じsessionの後続発話はcwdが変わっても最初のevent projectを使う", () => {
+    const sessionId = "synthetic-session";
+    const sessionIdHash = hashSessionId(sessionId);
+    const initialProject = storage.runCorrectionTransaction(({ db }) =>
+      resolveSessionProject(db, sessionIdHash, "startup-project"),
+    );
+    expect(initialProject).toBe("startup-project");
+
+    const firstEvent = makeEvent(sessionId, "合成の第一発話", "event-one", [], {
+      project: initialProject,
+    });
+    storage.runCorrectionTransaction(({ db }) => commitTranscriptBatch(db, {
+      sessionIdHash,
+      expected: INITIAL_PROGRESS,
+      nextCursor: { transcriptOffset: 128, transcriptIdentity: "file-one:marker-one" },
+      lastSeenAt: "2026-01-01T00:00:03.000Z",
+      events: [firstEvent],
+    }));
+
+    const laterProject = storage.runCorrectionTransaction(({ db }) =>
+      resolveSessionProject(db, sessionIdHash, "later-cwd-project"),
+    );
+    const secondEvent = makeEvent(sessionId, "合成の第二発話", "event-two", [], {
+      project: laterProject,
+    });
+    storage.runCorrectionTransaction(({ db }) => commitTranscriptBatch(db, {
+      sessionIdHash,
+      expected: { humanOrdinal: 1, transcriptOffset: 128, transcriptIdentity: "file-one:marker-one" },
+      nextCursor: { transcriptOffset: 256, transcriptIdentity: "file-one:marker-two" },
+      lastSeenAt: "2026-01-01T00:00:04.000Z",
+      events: [secondEvent],
+    }));
+
+    const projects = storage.runCorrectionTransaction(({ db }) => db.prepare(`
+      SELECT project FROM owner_correction_events
+      WHERE session_id_hash = ? ORDER BY human_ordinal
+    `).all(sessionIdHash) as { project: string }[]);
+    expect(projects.map((event) => event.project)).toEqual(["startup-project", "startup-project"]);
   });
 
   it("同じreceiptの再配信はpendingを重複保存しない", () => {

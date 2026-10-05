@@ -27,7 +27,11 @@ import { getMemoryPath, config } from "../config.js";
 
 import { loadOwnerProfile } from "../utils/owner-profile.js";
 import { increment } from "../observability/counters.js";
-import { recordCorrectionMetric, type CorrectionHookEventKind } from "../observability/correction-metrics.js";
+import {
+  recordCorrectionMetric,
+  type CorrectionHookEventKind,
+  type CorrectionMetricStageDurations,
+} from "../observability/correction-metrics.js";
 import { buildInjection, BENIGN_SKIP_LABELS } from "../injection/builder.js";
 import {
   DEFAULT_INJECTION_TOKEN_BUDGET,
@@ -36,7 +40,7 @@ import {
   logInjectionBudgetWarning,
 } from "../injection/budget.js";
 import { readTranscriptDelta, type TranscriptCursor, type TranscriptRecord } from "./transcript-reader.js";
-import { extractOwnerEvent } from "../corrections/events.js";
+import { extractOwnerEvent, isAutomatedPrompt } from "../corrections/events.js";
 import { detectOwnerCorrections, type CorrectionCandidate } from "../corrections/detector.js";
 import {
   selectCorrectionInjections,
@@ -55,6 +59,7 @@ import {
   hashRawText,
   hashSessionId,
   queuePendingReceipt,
+  resolveSessionProject,
 } from "../corrections/session-store.js";
 
 export const CONTEXT_HOOK_STDIN_LIMIT_BYTES = 1024 * 1024;
@@ -252,6 +257,7 @@ export interface EmitContextOutputInput {
   deadlineAt: number;
   pendingReceiptId?: string;
   stdout?: NodeJS.WriteStream;
+  lap?: CorrectionMetricLap;
 }
 
 export interface EmitContextOutputResult {
@@ -271,6 +277,7 @@ export async function emitContextOutput({
   deadlineAt,
   pendingReceiptId,
   stdout = process.stdout,
+  lap,
 }: EmitContextOutputInput): Promise<EmitContextOutputResult> {
   const finalRender = finalizeCorrectionRender(rendered, output);
   if (deadlineAt - Date.now() <= CONTEXT_HOOK_OUTPUT_RESERVE_MS) {
@@ -282,13 +289,15 @@ export async function emitContextOutput({
     stdout,
     deadlineAt - Date.now() - CONTEXT_HOOK_OUTPUT_RESERVE_MS,
   );
+  const writeCompletedAt = Date.now();
+  lap?.("write");
   if (!writeSucceeded) {
-    const status = deadlineAt - Date.now() <= CONTEXT_HOOK_OUTPUT_RESERVE_MS
+    const status = deadlineAt - writeCompletedAt <= CONTEXT_HOOK_OUTPUT_RESERVE_MS
       ? "timeout"
       : "write_failed";
     return { status, rendered: finalRender, writeAttempted: true };
   }
-  if (deadlineAt - Date.now() <= CONTEXT_HOOK_OUTPUT_RESERVE_MS) {
+  if (deadlineAt - writeCompletedAt <= CONTEXT_HOOK_OUTPUT_RESERVE_MS) {
     return { status: "timeout", rendered: finalRender, writeAttempted: true };
   }
   if (finalRender.ledger.length === 0) {
@@ -302,6 +311,8 @@ export async function emitContextOutput({
       return { status, rendered: finalRender, writeAttempted: true };
     } catch {
       return { status: "ledger_unknown", rendered: finalRender, writeAttempted: true };
+    } finally {
+      lap?.("store");
     }
   }
 
@@ -367,6 +378,8 @@ export async function emitContextOutput({
     });
   } catch {
     return { status: "ledger_unknown", rendered: finalRender, writeAttempted: true };
+  } finally {
+    lap?.("store");
   }
 
   return { status: "emitted", rendered: finalRender, writeAttempted: true };
@@ -379,6 +392,7 @@ interface HookSessionState {
   compactEpoch: number;
   lastRefreshOrdinal: number;
   lastSeenAt: string | null;
+  project: string;
 }
 
 const EMPTY_HOOK_SESSION_STATE: HookSessionState = {
@@ -388,39 +402,13 @@ const EMPTY_HOOK_SESSION_STATE: HookSessionState = {
   compactEpoch: 0,
   lastRefreshOrdinal: 0,
   lastSeenAt: null,
+  project: "",
 };
 
-function readHookSessionState(storage: SQLiteStorage, sessionIdHash: string): HookSessionState {
-  return storage.runCorrectionTransaction(({ db }) => {
-    const row = db.prepare(`
-      SELECT human_ordinal, transcript_offset, transcript_identity, compact_epoch,
-        last_refresh_ordinal, last_seen_at
-      FROM owner_correction_sessions WHERE session_id_hash = ?
-    `).get(sessionIdHash) as {
-      human_ordinal: number;
-      transcript_offset: number;
-      transcript_identity: string;
-      compact_epoch: number;
-      last_refresh_ordinal: number;
-      last_seen_at: string;
-    } | undefined;
-    if (!row) return { ...EMPTY_HOOK_SESSION_STATE };
-    return {
-      humanOrdinal: row.human_ordinal,
-      transcriptOffset: row.transcript_offset,
-      transcriptIdentity: row.transcript_identity,
-      compactEpoch: row.compact_epoch,
-      lastRefreshOrdinal: row.last_refresh_ordinal,
-      lastSeenAt: row.last_seen_at,
-    };
-  });
-}
-
-function prepareSessionStartEpoch(
+function readHookSessionState(
   storage: SQLiteStorage,
   sessionIdHash: string,
-  source: string | undefined,
-  now: string,
+  cwdProject: string,
 ): HookSessionState {
   return storage.runCorrectionTransaction(({ db }) => {
     const row = db.prepare(`
@@ -435,6 +423,41 @@ function prepareSessionStartEpoch(
       last_refresh_ordinal: number;
       last_seen_at: string;
     } | undefined;
+    const project = resolveSessionProject(db, sessionIdHash, cwdProject);
+    if (!row) return { ...EMPTY_HOOK_SESSION_STATE, project };
+    return {
+      humanOrdinal: row.human_ordinal,
+      transcriptOffset: row.transcript_offset,
+      transcriptIdentity: row.transcript_identity,
+      compactEpoch: row.compact_epoch,
+      lastRefreshOrdinal: row.last_refresh_ordinal,
+      lastSeenAt: row.last_seen_at,
+      project,
+    };
+  });
+}
+
+function prepareSessionStartEpoch(
+  storage: SQLiteStorage,
+  sessionIdHash: string,
+  source: string | undefined,
+  now: string,
+  cwdProject: string,
+): HookSessionState {
+  return storage.runCorrectionTransaction(({ db }) => {
+    const row = db.prepare(`
+      SELECT human_ordinal, transcript_offset, transcript_identity, compact_epoch,
+        last_refresh_ordinal, last_seen_at
+      FROM owner_correction_sessions WHERE session_id_hash = ?
+    `).get(sessionIdHash) as {
+      human_ordinal: number;
+      transcript_offset: number;
+      transcript_identity: string;
+      compact_epoch: number;
+      last_refresh_ordinal: number;
+      last_seen_at: string;
+    } | undefined;
+    const project = resolveSessionProject(db, sessionIdHash, cwdProject);
     const state = row ? {
       humanOrdinal: row.human_ordinal,
       transcriptOffset: row.transcript_offset,
@@ -442,7 +465,8 @@ function prepareSessionStartEpoch(
       compactEpoch: row.compact_epoch,
       lastRefreshOrdinal: row.last_refresh_ordinal,
       lastSeenAt: row.last_seen_at,
-    } : { ...EMPTY_HOOK_SESSION_STATE };
+      project,
+    } : { ...EMPTY_HOOK_SESSION_STATE, project };
     if (source !== "compact" && source !== "clear" && source !== "resume") return state;
 
     const latestStart = db.prepare(`
@@ -477,6 +501,7 @@ function reserveCompactEpoch(
   storage: SQLiteStorage,
   sessionIdHash: string,
   now: string,
+  cwdProject: string,
 ): HookSessionState {
   return storage.runCorrectionTransaction(({ db }) => {
     const row = db.prepare(`
@@ -491,6 +516,7 @@ function reserveCompactEpoch(
       last_refresh_ordinal: number;
       last_seen_at: string;
     } | undefined;
+    const project = resolveSessionProject(db, sessionIdHash, cwdProject);
     const state = row ? {
       humanOrdinal: row.human_ordinal,
       transcriptOffset: row.transcript_offset,
@@ -498,7 +524,8 @@ function reserveCompactEpoch(
       compactEpoch: row.compact_epoch,
       lastRefreshOrdinal: row.last_refresh_ordinal,
       lastSeenAt: row.last_seen_at,
-    } : { ...EMPTY_HOOK_SESSION_STATE };
+      project,
+    } : { ...EMPTY_HOOK_SESSION_STATE, project };
     const existingAttempt = db.prepare(`
       SELECT 1 AS present FROM owner_correction_injections
       WHERE session_id_hash = ? AND compact_epoch = ? AND trigger = 'compact'
@@ -614,6 +641,39 @@ function getHookEventKind(eventName: ContextHookEventName): CorrectionHookEventK
   return "PreCompact";
 }
 
+function createCorrectionMetricStageDurations(): CorrectionMetricStageDurations {
+  return {
+    stdin: 0,
+    position: 0,
+    detect: 0,
+    store: 0,
+    retrieve: 0,
+    render: 0,
+    write: 0,
+  };
+}
+
+type CorrectionMetricLap = (stage: keyof CorrectionMetricStageDurations) => void;
+
+function createCorrectionMetricLap(
+  stageDurationsMs: CorrectionMetricStageDurations,
+  startedAt: number,
+): CorrectionMetricLap {
+  let previousLapAt = startedAt;
+  return (stage) => {
+    const currentLapAt = Date.now();
+    stageDurationsMs[stage] += Math.max(0, currentLapAt - previousLapAt);
+    previousLapAt = currentLapAt;
+  };
+}
+
+export function shouldProcessPromptCorrectionWork(
+  hookEventName: ContextHookEventName,
+  automatedPrompt: boolean,
+): boolean {
+  return hookEventName !== "UserPromptSubmit" || !automatedPrompt;
+}
+
 function getRequestTrigger(input: HookInput, humanOrdinal: number): CorrectionInjectionTrigger {
   if (input.hook_event_name === "SessionStart") return "start";
   if (input.hook_event_name === "PreCompact") return "compact";
@@ -684,44 +744,45 @@ function makeEmptyCorrectionRender(trigger: CorrectionRenderTrigger, budgetToken
 
 async function buildSessionStartBody(
   storage: SQLiteStorage,
-  currentProject: string,
+  sessionProject: string,
   memoryPath: string,
   budgetTokens: number,
   correctionRender: CorrectionRenderResult,
   correctionEnabled: boolean,
   deadlineAt: number,
+  onRetrievalComplete?: () => void,
 ): Promise<string> {
-  const output: string[] = [];
-  if (correctionRender.text) output.push(correctionRender.text);
-
   const remainingBudget = correctionEnabled
     ? Math.max(0, budgetTokens - estimateTokens(correctionRender.text) - 1)
     : budgetTokens;
   const indexBudget = correctionEnabled ? Math.min(5000, remainingBudget) : budgetTokens;
   requireHookTime(deadlineAt);
-  const injectionResult = buildInjection(storage, currentProject, indexBudget);
+  const injectionResult = buildInjection(storage, sessionProject, indexBudget);
   const deficiencySkips = injectionResult.skipped.filter((label) => !BENIGN_SKIP_LABELS.has(label));
   if (deficiencySkips.length > 0) {
     console.error("[injection] 素材欠損/切り詰め:", deficiencySkips.join(", "));
     await increment(memoryPath, "injection_skipped_count", deficiencySkips.length);
     requireHookTime(deadlineAt);
   }
+  requireHookTime(deadlineAt);
+  const [dreamContent, successContent] = await Promise.all([
+    getDreamContent(storage, sessionProject),
+    getSuccessContent(storage, sessionProject),
+  ]);
+  requireHookTime(deadlineAt);
+  const ownerProfile = await loadOwnerProfile(memoryPath);
+  requireHookTime(deadlineAt);
 
+  if (onRetrievalComplete) onRetrievalComplete();
+
+  const output: string[] = [];
+  if (correctionRender.text) output.push(correctionRender.text);
   output.push("## 記憶インデックス（詳細はサブエージェント経由で memory_get_detail を使用）\n");
   output.push(injectionResult.text || "（対象なし）");
   output.push("");
-
-  requireHookTime(deadlineAt);
-  const [dreamContent, successContent] = await Promise.all([
-    getDreamContent(storage, currentProject),
-    getSuccessContent(storage, currentProject),
-  ]);
-  requireHookTime(deadlineAt);
   if (dreamContent) output.push(dreamContent + "\n");
   if (successContent) output.push(successContent + "\n");
 
-  const ownerProfile = await loadOwnerProfile(memoryPath);
-  requireHookTime(deadlineAt);
   if (ownerProfile) {
     output.push("### オーナー判断基準");
     output.push(ownerProfile);
@@ -749,18 +810,19 @@ async function buildSessionStartBody(
   return finalBody;
 }
 
-export function addUserPromptPendingReceipt(
+type ExtractedUserPromptEvent = NonNullable<ReturnType<typeof extractOwnerEvent>>;
+
+function saveUserPromptPendingReceipt(
   storage: SQLiteStorage,
   sessionIdHash: string,
   sessionId: string,
   uuid: string | undefined,
   lastConfirmedOrdinal: number,
-  prompt: string,
+  event: ExtractedUserPromptEvent,
+  candidates: CorrectionCandidate[],
   receivedAt: string,
   hasOutput: boolean,
 ): string {
-  const event = extractOwnerEvent({ hookEventName: "UserPromptSubmit", prompt });
-  const candidates = detectPendingCorrectionCandidates(prompt);
   if (!hasOutput && candidates.length === 0) return "";
   const receiptId = uuid
     ? createPendingReceiptId(sessionId, { uuid })
@@ -774,11 +836,36 @@ export function addUserPromptPendingReceipt(
       sessionIdHash,
       receivedAt: existing?.received_at ?? receivedAt,
       lastConfirmedOrdinal,
-      rawTextHash: hashRawText(event?.text ?? prompt),
+      rawTextHash: hashRawText(event.text),
       extractedCandidates: candidates,
     });
   });
   return receiptId;
+}
+
+export function addUserPromptPendingReceipt(
+  storage: SQLiteStorage,
+  sessionIdHash: string,
+  sessionId: string,
+  uuid: string | undefined,
+  lastConfirmedOrdinal: number,
+  prompt: string,
+  receivedAt: string,
+  hasOutput: boolean,
+): string {
+  const event = extractOwnerEvent({ hookEventName: "UserPromptSubmit", prompt });
+  if (!event) return "";
+  return saveUserPromptPendingReceipt(
+    storage,
+    sessionIdHash,
+    sessionId,
+    uuid,
+    lastConfirmedOrdinal,
+    event,
+    detectOwnerCorrections(event),
+    receivedAt,
+    hasOutput,
+  );
 }
 
 function recordPendingOutput(
@@ -902,11 +989,18 @@ export type ContextHookStatus = EmitContextOutputResult["status"] | "failed";
 export async function main(): Promise<ContextHookStatus> {
   const startedAt = Date.now();
   const deadlineAt = startedAt + CONTEXT_HOOK_TIMEOUT_MS;
+  const stageDurationsMs = createCorrectionMetricStageDurations();
+  const lap = createCorrectionMetricLap(stageDurationsMs, startedAt);
   let storage: SQLiteStorage | null = null;
   try {
     const inputData = await readStdin(deadlineAt);
+    lap("stdin");
     requireHookTime(deadlineAt);
     const hookInput = parseContextHookInput(inputData);
+    const automatedPrompt = hookInput.hook_event_name === "UserPromptSubmit" &&
+      typeof hookInput.prompt === "string" &&
+      isAutomatedPrompt(hookInput.prompt);
+    const shouldProcessPrompt = shouldProcessPromptCorrectionWork(hookInput.hook_event_name, automatedPrompt);
     requireHookTime(deadlineAt);
 
     const projectRoot = findProjectRoot(hookInput.cwd);
@@ -921,6 +1015,9 @@ export async function main(): Promise<ContextHookStatus> {
     const correctionLoopEnabled = correctionLoopRequested && storage.supportsCorrectionHooks;
     const correctionInjectionEnabled = correctionLoopEnabled &&
       process.env.WASURENAGUSA_CORRECTION_INJECT?.trim().toLowerCase() !== "off";
+    const eventKind = getHookEventKind(hookInput.hook_event_name);
+    const stageMetricEvent = eventKind === "SessionStart" || eventKind === "UserPromptSubmit";
+    const captureStageMetrics = correctionInjectionEnabled && stageMetricEvent;
     requireHookTime(deadlineAt);
 
     const sessionIdHash = hashSessionId(hookInput.session_id);
@@ -932,27 +1029,51 @@ export async function main(): Promise<ContextHookStatus> {
       lastConfirmedOrdinal: 0,
     };
 
-    if (correctionLoopEnabled) {
+    if (correctionLoopEnabled && shouldProcessPrompt) {
       if (hookInput.hook_event_name === "SessionStart") {
         sessionState = prepareSessionStartEpoch(
           storage,
           sessionIdHash,
           hookInput.source,
           new Date().toISOString(),
+          currentProject,
         );
       } else if (hookInput.hook_event_name === "PreCompact") {
         sessionState = reserveCompactEpoch(
           storage,
           sessionIdHash,
           new Date().toISOString(),
+          currentProject,
         );
       } else {
-        sessionState = readHookSessionState(storage, sessionIdHash);
+        sessionState = readHookSessionState(storage, sessionIdHash, currentProject);
       }
       requireHookTime(deadlineAt);
+    }
+    if (correctionLoopEnabled && shouldProcessPrompt) {
       position = await resolveHookPosition(storage, hookInput, sessionIdHash, sessionState, deadlineAt);
       requireHookTime(deadlineAt);
     }
+    if (captureStageMetrics) lap("position");
+
+    const userPromptEvent = hookInput.hook_event_name === "UserPromptSubmit" && !automatedPrompt
+      ? extractOwnerEvent({ hookEventName: "UserPromptSubmit", prompt: hookInput.prompt })
+      : undefined;
+    let pendingCandidates: CorrectionCandidate[] | undefined;
+    if (
+      correctionLoopEnabled &&
+      hookInput.hook_event_name === "UserPromptSubmit" &&
+      userPromptEvent !== null &&
+      userPromptEvent !== undefined &&
+      !position.currentPromptLocated &&
+      hookInput.prompt !== undefined
+    ) {
+      pendingCandidates = detectOwnerCorrections(userPromptEvent);
+    }
+    if (captureStageMetrics) lap("detect");
+
+    let sessionProject = currentProject;
+    if (sessionState.project) sessionProject = sessionState.project;
 
     const injectionPlan = getContextInjectionPlan(hookInput, position.humanOrdinal, budgetTokens);
     let selection: CorrectionInjectionSelection = {
@@ -962,10 +1083,10 @@ export async function main(): Promise<ContextHookStatus> {
       ftsCandidateCount: 0,
     };
     let correctionRender = makeEmptyCorrectionRender(injectionPlan.renderTrigger, injectionPlan.budgetTokens);
-    if (correctionInjectionEnabled) {
+    if (correctionInjectionEnabled && shouldProcessPrompt) {
       requireHookTime(deadlineAt);
       selection = selectCorrectionInjections(storage, {
-        project: currentProject,
+        project: sessionProject,
         scope: "general",
         query: hookInput.prompt ?? "",
         at: new Date().toISOString(),
@@ -975,35 +1096,55 @@ export async function main(): Promise<ContextHookStatus> {
         trigger: injectionPlan.requestTrigger,
       });
       requireHookTime(deadlineAt);
-      correctionRender = renderCorrectionRules({
-        trigger: injectionPlan.renderTrigger,
-        rules: selection.rules,
-        budgetTokens: injectionPlan.budgetTokens,
-      });
-      requireHookTime(deadlineAt);
     }
-
-    let output = getOutputForNonStart(correctionRender);
+    if (captureStageMetrics) lap("retrieve");
+    let output: string;
     if (hookInput.hook_event_name === "SessionStart") {
+      if (correctionInjectionEnabled && shouldProcessPrompt) {
+        correctionRender = renderCorrectionRules({
+          trigger: injectionPlan.renderTrigger,
+          rules: selection.rules,
+          budgetTokens: injectionPlan.budgetTokens,
+        });
+        requireHookTime(deadlineAt);
+      }
       output = await buildSessionStartBody(
         storage,
-        currentProject,
+        sessionProject,
         memoryPath,
         budgetTokens,
         correctionRender,
         correctionInjectionEnabled,
         deadlineAt,
+        captureStageMetrics ? () => lap("retrieve") : undefined,
       );
+    } else {
+      if (correctionInjectionEnabled && shouldProcessPrompt) {
+        correctionRender = renderCorrectionRules({
+          trigger: injectionPlan.renderTrigger,
+          rules: selection.rules,
+          budgetTokens: injectionPlan.budgetTokens,
+        });
+        requireHookTime(deadlineAt);
+      }
+      output = getOutputForNonStart(correctionRender);
     }
     requireHookTime(deadlineAt);
+    const outputReadyAt = Date.now();
+    if (captureStageMetrics) lap("render");
+    const durationMs = Math.max(0, outputReadyAt - startedAt);
 
-    if (correctionInjectionEnabled) {
-      const missingCount = selection.unreached.length + correctionRender.omittedBundleKeys.length;
+    const tokens = estimateTokens(output);
+    const missingCount = automatedPrompt
+      ? 0
+      : selection.unreached.length + correctionRender.omittedBundleKeys.length;
+    if (correctionInjectionEnabled && !stageMetricEvent) {
       await recordCorrectionMetric(memoryPath, {
-        eventKind: getHookEventKind(hookInput.hook_event_name),
-        durationMs: Math.max(0, Date.now() - startedAt),
-        tokens: estimateTokens(output),
+        eventKind,
+        durationMs,
+        tokens,
         missingCount,
+        reasonCode: automatedPrompt ? "automated_prompt" : undefined,
       });
       requireHookTime(deadlineAt);
     }
@@ -1013,20 +1154,25 @@ export async function main(): Promise<ContextHookStatus> {
       correctionLoopEnabled &&
       hookInput.hook_event_name === "UserPromptSubmit" &&
       !position.currentPromptLocated &&
-      hookInput.prompt !== undefined
+      hookInput.prompt !== undefined &&
+      userPromptEvent !== null &&
+      userPromptEvent !== undefined &&
+      pendingCandidates !== undefined
     ) {
       requireHookTime(deadlineAt);
-      pendingReceiptId = addUserPromptPendingReceipt(
+      pendingReceiptId = saveUserPromptPendingReceipt(
         storage,
         sessionIdHash,
         hookInput.session_id,
         hookInput.uuid,
         position.lastConfirmedOrdinal,
-        hookInput.prompt,
+        userPromptEvent,
+        pendingCandidates,
         new Date().toISOString(),
         correctionRender.ledger.length > 0,
       );
       requireHookTime(deadlineAt);
+      if (captureStageMetrics) lap("store");
     }
 
     const result = await emitContextOutput({
@@ -1039,7 +1185,18 @@ export async function main(): Promise<ContextHookStatus> {
       trigger: injectionPlan.ledgerTrigger,
       deadlineAt,
       pendingReceiptId,
+      lap: captureStageMetrics ? lap : undefined,
     });
+    if (correctionInjectionEnabled && stageMetricEvent) {
+      await recordCorrectionMetric(memoryPath, {
+        eventKind,
+        durationMs,
+        tokens,
+        missingCount,
+        reasonCode: automatedPrompt ? "automated_prompt" : undefined,
+        stageDurationsMs,
+      });
+    }
     if (result.status === "write_failed") console.error("[context] stdout write failed");
     if (result.status === "ledger_unknown") console.error("[context] correction ledger unknown");
     if (result.status === "timeout") console.error("[context] hook timeout");

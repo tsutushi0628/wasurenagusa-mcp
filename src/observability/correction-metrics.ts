@@ -3,12 +3,15 @@ import { join } from "path";
 import { generateJstDatePart, generateJstTimestamp } from "../utils/operation-logger.js";
 import { increment } from "./counters.js";
 
-/** JSONLの短縮キー: ts=時刻、k=行種別、ms=時間、tok=token数、miss=欠落数、hash=イベントID、v=検出器版。 */
+/** JSONLの短縮キー: ts=時刻、k=行種別、ms=時間、tok=token数、miss=欠落数、st=段別時間、hash=イベントID、v=検出器版。 */
 export const CORRECTION_HOOK_EVENT_KINDS = ["SessionStart", "UserPromptSubmit", "PreCompact", "Stop"] as const;
-export const CORRECTION_REASON_CODES = ["action_unknown", "pending_unmatched", "always_not_emitted", "ledger_unknown"] as const;
+export const CORRECTION_REASON_CODES = ["action_unknown", "pending_unmatched", "always_not_emitted", "ledger_unknown", "automated_prompt"] as const;
+export const CORRECTION_METRIC_STAGE_NAMES = ["stdin", "position", "detect", "store", "retrieve", "render", "write"] as const;
 
 export type CorrectionHookEventKind = (typeof CORRECTION_HOOK_EVENT_KINDS)[number];
 export type CorrectionReasonCode = (typeof CORRECTION_REASON_CODES)[number];
+export type CorrectionMetricStageName = (typeof CORRECTION_METRIC_STAGE_NAMES)[number];
+export type CorrectionMetricStageDurations = Record<CorrectionMetricStageName, number>;
 
 export interface CorrectionMetricInput {
   eventKind: CorrectionHookEventKind;
@@ -18,12 +21,14 @@ export interface CorrectionMetricInput {
   eventIdHash?: string;
   detectorVersion?: string;
   reasonCode?: CorrectionReasonCode;
+  stageDurationsMs?: CorrectionMetricStageDurations;
 }
 
 export type CorrectionMetricWriteResult = "recorded" | "omitted" | "failed";
 
 const MAX_DAILY_SAMPLES = 1000;
 const MAX_RECORD_BYTES = 256;
+const MAX_STAGE_DURATION_MS = 9999;
 const RETENTION_DAYS = 30;
 const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -35,6 +40,7 @@ const METRIC_INPUT_KEYS = new Set([
   "eventIdHash",
   "detectorVersion",
   "reasonCode",
+  "stageDurationsMs",
 ]);
 const EVENT_ID_HASH_PATTERN = /^[a-f0-9]{16,64}$/;
 const DETECTOR_VERSION_PATTERN = /^v\d+(?:\.\d+){0,2}$/;
@@ -42,10 +48,11 @@ const METRIC_FILE_PATTERN = /^(SessionStart|UserPromptSubmit|PreCompact|Stop)-(\
 
 interface MetricFileEntry {
   ts: string;
-  k: "sample" | "omitted";
+  k: "sample" | "omitted" | "violation";
   ms?: number;
   tok?: number;
   miss?: number;
+  st?: readonly [number, number, number, number, number, number, number];
   hash?: string;
   v?: string;
   reason_code?: CorrectionReasonCode;
@@ -89,6 +96,27 @@ function validateInput(input: CorrectionMetricInput): void {
   if (!Number.isSafeInteger(input.durationMs) || input.durationMs < 0) throw new Error("Invalid correction metric input");
   if (!Number.isSafeInteger(input.tokens) || input.tokens < 0) throw new Error("Invalid correction metric input");
   if (!Number.isSafeInteger(input.missingCount) || input.missingCount < 0) throw new Error("Invalid correction metric input");
+  const stageMetricsRequired = input.eventKind === "SessionStart" || input.eventKind === "UserPromptSubmit";
+  const stageDurationsMs = input.stageDurationsMs;
+  if (stageMetricsRequired && stageDurationsMs === undefined) throw new Error("Invalid correction metric input");
+  if (stageDurationsMs !== undefined) {
+    if (typeof stageDurationsMs !== "object" || stageDurationsMs === null || Array.isArray(stageDurationsMs)) {
+      throw new Error("Invalid correction metric input");
+    }
+    const stageKeys = Object.keys(stageDurationsMs);
+    if (
+      stageKeys.length !== CORRECTION_METRIC_STAGE_NAMES.length
+      || stageKeys.some((key) => !CORRECTION_METRIC_STAGE_NAMES.includes(key as CorrectionMetricStageName))
+    ) {
+      throw new Error("Invalid correction metric input");
+    }
+    for (const stageName of CORRECTION_METRIC_STAGE_NAMES) {
+      const durationMs = stageDurationsMs[stageName];
+      if (!Number.isSafeInteger(durationMs) || durationMs < 0 || durationMs > MAX_STAGE_DURATION_MS) {
+        throw new Error("Invalid correction metric input");
+      }
+    }
+  }
   if (input.eventIdHash !== undefined && (typeof input.eventIdHash !== "string" || !EVENT_ID_HASH_PATTERN.test(input.eventIdHash))) {
     throw new Error("Invalid correction metric input");
   }
@@ -189,6 +217,7 @@ async function readMetricFileCounts(filePath: string): Promise<MetricFileCounts>
       throw new Error("Invalid correction metric file");
     }
     const parsed = entry as { k: unknown; total_count?: unknown; omitted_count?: unknown };
+    if (parsed.k === "violation") continue;
     if (parsed.k === "sample") {
       if (omittedCount > 0 || sampleCount >= MAX_DAILY_SAMPLES) throw new Error("Invalid correction metric file");
       sampleCount++;
@@ -217,6 +246,17 @@ function getSampleEntry(input: CorrectionMetricInput, now: Date): MetricFileEntr
     tok: input.tokens,
     miss: input.missingCount,
   };
+  if (input.stageDurationsMs !== undefined) {
+    entry.st = [
+      input.stageDurationsMs.stdin,
+      input.stageDurationsMs.position,
+      input.stageDurationsMs.detect,
+      input.stageDurationsMs.store,
+      input.stageDurationsMs.retrieve,
+      input.stageDurationsMs.render,
+      input.stageDurationsMs.write,
+    ];
+  }
   if (input.eventIdHash !== undefined) entry.hash = input.eventIdHash;
   if (input.detectorVersion !== undefined) entry.v = input.detectorVersion;
   if (input.reasonCode !== undefined) entry.reason_code = input.reasonCode;
@@ -229,6 +269,13 @@ function getOmittedEntry(now: Date, totalCount: number, omittedCount: number): M
     k: "omitted",
     total_count: totalCount,
     omitted_count: omittedCount,
+  };
+}
+
+function getViolationEntry(now: Date): MetricFileEntry {
+  return {
+    ts: generateJstTimestamp(now),
+    k: "violation",
   };
 }
 
@@ -309,6 +356,26 @@ export async function recordCorrectionMetric(
     await ensureMetricsDirectory(memoryPath);
     await rotateCorrectionMetrics(memoryPath, now);
     return await recordValidatedMetric(memoryPath, input, now);
+  } catch {
+    console.error("[observability] 訂正メトリクス記録失敗");
+    await increment(memoryPath, "write_failure_count", 1, now);
+    return "failed";
+  }
+}
+
+export async function recordCorrectionViolationMetric(
+  memoryPath: string,
+  now: Date = new Date(),
+): Promise<CorrectionMetricWriteResult> {
+  try {
+    await ensureMetricsDirectory(memoryPath);
+    await rotateCorrectionMetrics(memoryPath, now);
+    const filePath = getMetricFilePath(memoryPath, "Stop", now);
+    return await withMetricFileLock<CorrectionMetricWriteResult>(filePath, async () => {
+      await readMetricFileCounts(filePath);
+      await appendEntry(filePath, getViolationEntry(now));
+      return "recorded";
+    });
   } catch {
     console.error("[observability] 訂正メトリクス記録失敗");
     await increment(memoryPath, "write_failure_count", 1, now);

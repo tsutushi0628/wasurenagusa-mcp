@@ -91,6 +91,32 @@ describe("訂正記憶取込CLI", () => {
     expect(readFileSync(targetPath)).toEqual(before);
   });
 
+  it("v12専用移行はdry-runを保ち、apply付きだけで版数を進める", () => {
+    const migrationDb = new Database(targetPath);
+    migrateV10ToV11(migrationDb);
+    migrationDb.close();
+    const before = readFileSync(targetPath);
+
+    const preview = runCorrectionImportCli(["--migrate-v12"], targetPath);
+
+    expect(preview.exitCode).toBe(0);
+    expect(preview.stdout).toMatch(/schema=11 ddl=1/);
+    expect(readFileSync(targetPath)).toEqual(before);
+
+    const apply = runCorrectionImportCli(["--migrate-v12", "--apply"], targetPath);
+
+    expect(apply.exitCode).toBe(0);
+    expect(apply.stdout).toMatch(/schema=12 ddl=1/);
+    const db = new Database(targetPath, { readonly: true, fileMustExist: true });
+    try {
+      expect(db.prepare("SELECT MAX(version) AS version FROM schema_version").get()).toEqual({ version: 12 });
+      expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get("owner_correction_violations")).toEqual({ name: "owner_correction_violations" });
+    } finally {
+      db.close();
+    }
+  });
+
   it("migrationモードとsource指定を同時に受け付けない", () => {
     expect(runCorrectionImportCli(["--migrate-v11", "--source", sourcePath, "--apply"], targetPath).exitCode).toBe(2);
   });

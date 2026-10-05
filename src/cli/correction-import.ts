@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 import { join } from "path";
 import { config, getMemoryPath } from "../config.js";
-import { CorrectionImportError, importCorrectionMemories, migrateCorrectionDatabase } from "../corrections/import.js";
+import {
+  CorrectionImportError,
+  importCorrectionMemories,
+  migrateCorrectionComplianceDatabase,
+  migrateCorrectionDatabase,
+} from "../corrections/import.js";
 import { isDirectRun } from "../utils/cli-entry.js";
 import { findProjectRoot } from "../utils/projectRoot.js";
 
@@ -9,6 +14,7 @@ type ParsedArguments = {
   sourcePath?: string;
   apply: boolean;
   migrateV11: boolean;
+  migrateV12: boolean;
 };
 
 export type CorrectionImportCliResult = {
@@ -21,6 +27,7 @@ function parseArguments(args: string[]): ParsedArguments {
   let sourcePath: string | undefined;
   let apply = false;
   let migrateV11 = false;
+  let migrateV12 = false;
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === "--source") {
@@ -45,13 +52,26 @@ function parseArguments(args: string[]): ParsedArguments {
       migrateV11 = true;
       continue;
     }
+    if (argument === "--migrate-v12") {
+      if (migrateV12) {
+        throw new CorrectionImportError("--migrate-v12 cannot be repeated");
+      }
+      migrateV12 = true;
+      continue;
+    }
     throw new CorrectionImportError("unsupported argument");
   }
 
-  if (migrateV11 === (sourcePath !== undefined)) {
+  if (migrateV11 && migrateV12) {
+    throw new CorrectionImportError("choose either --source or one migration");
+  }
+  if ((migrateV11 && sourcePath !== undefined) || (!migrateV11 && !migrateV12 && sourcePath === undefined)) {
     throw new CorrectionImportError("choose either --source or --migrate-v11");
   }
-  return { sourcePath, apply, migrateV11 };
+  if (migrateV12 && sourcePath !== undefined) {
+    throw new CorrectionImportError("choose either --source or --migrate-v12");
+  }
+  return { sourcePath, apply, migrateV11, migrateV12 };
 }
 
 function formatImportSummary(
@@ -84,7 +104,19 @@ export function runCorrectionImportCli(
       const summary = migrateCorrectionDatabase(targetPath, parsed.apply);
       return {
         exitCode: 0,
-        stdout: `mode=migrate apply=${Number(parsed.apply)} schema=${summary.schemaVersion} ddl=${summary.ddlCount}\n`,
+        stdout: "mode=migrate apply=" + Number(parsed.apply)
+          + " schema=" + summary.schemaVersion
+          + " ddl=" + summary.ddlCount + "\n",
+        stderr: "",
+      };
+    }
+    if (parsed.migrateV12) {
+      const summary = migrateCorrectionComplianceDatabase(targetPath, parsed.apply);
+      return {
+        exitCode: 0,
+        stdout: "mode=migrate apply=" + Number(parsed.apply)
+          + " schema=" + summary.schemaVersion
+          + " ddl=" + summary.ddlCount + "\n",
         stderr: "",
       };
     }
@@ -101,8 +133,11 @@ export function runCorrectionImportCli(
       "--source requires one database path",
       "--apply cannot be repeated",
       "--migrate-v11 cannot be repeated",
+      "--migrate-v12 cannot be repeated",
       "unsupported argument",
       "choose either --source or --migrate-v11",
+      "choose either --source or --migrate-v12",
+      "choose either --source or one migration",
     ].includes(error.message);
     return { exitCode: argumentError ? 2 : 1, stdout: "", stderr: `error: ${message}\n` };
   }

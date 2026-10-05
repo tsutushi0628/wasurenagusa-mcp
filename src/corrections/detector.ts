@@ -3,6 +3,7 @@ import { createBundleKey, haveSameBundleKey, type CorrectionBundleDescriptor } f
 import { removeQuotedAndInjectedContent, type OwnerEvent } from "./events.js";
 import {
   correctionConditionKey,
+  correctionRequiredValuesKey,
   hasCorrectionPredicate,
   hasUnrepresentedRuleMeaning,
   isConsultationQuestion,
@@ -61,8 +62,17 @@ const EXAMPLE_CONTEXT = /(?:否定例|技術サンプル|コード例|禁止形)
 const BROAD_ACTION = /(?:答え|回答して|返事して|待(?:つ|って)|止(?:まる|め|めて)|再開|出(?:す|して|せ)|示(?:す|して|せ)|表示して|見せ|使(?:う|って|え)|説明して|置換して|言い換|避け|控え|制限して|解除して|まとめて|短くして|維持して|再利用して|変更して|変えて|確認して|検証して|照合して|保存して|配置して|保持して|保管して|担当して|任せて|委譲して|割り当て|回す|実行|付(?:け|けて)|書(?:く|いて)|作成して|対応して)/u;
 const GENERAL_VERB = /(?:して|ください|する|しろ|せよ|します|にする|として扱|維持|変更|指定|選ん|選択|使っ|使う|出す|出して|話す|答える|保存|配置|担当)/u;
 const MODEL_NAME = /(?:Codex|Claude|Sonnet|Opus|GPT(?:[- ]?\d(?:\.\d)?)?|Gemini|モデル)/giu;
-const MODEL_ROUTE_ACTION = /(?:使(?:って|う|い)|利用(?:して|する)|担当(?:して|する)|割り当て|回(?:して|す)|実行(?:して|する)|経路を(?:選|使|通)|設計(?:して|する)|実装(?:して|する)|分析(?:して|する)|レビュー(?:して|する)|テスト(?:して|する))/u;
+const MODEL_ROUTE_ACTION = /(?:使(?:わない|うな|って|う|い|え|わず)|使用(?:して|する|しないで)|利用(?:して|する|しないで)|やめ(?:て|ろ)|担当(?:して|する)|割り当て|回(?:して|す)|実行(?:して|する)|経路を(?:選|使|通)|設計(?:して|する)|実装(?:して|する)|分析(?:して|する)|レビュー(?:して|する)|テスト(?:して|する))/u;
 const ROUTE_MODEL_SOURCE = String.raw`(?:Claude(?:\s+Sonnet)?|Codex|Sonnet|Opus|GPT(?:[- ]?\d(?:\.\d)?)?|Gemini)`;
+const MODEL_ROUTE_RETRACTION_MODEL = new RegExp(
+  `(${ROUTE_MODEL_SOURCE})(?:\\s*(?:は|を))?\\s*(?:じゃなくて(?:いい|もいい)?|ではなくて(?:いい|もいい)?|じゃない|ではない|(?:もう)?使わないで|(?:もう)?使わない|使うな|やめて|なし)(?=$|[、,。.!！?？\\s]|で(?:も|いい)|なら)`,
+  "giu",
+);
+const MODEL_ROUTE_POSITIVE_INSTRUCTION = new RegExp(
+  `${ROUTE_MODEL_SOURCE}\\s*(?:を\\s*)?(?:使って|使え|使う|使用して|使用する|利用して|利用する|で(?!は|ない|なく)|にして|にする|を選んで|に割り当てて|に任せて)`,
+  "iu",
+);
+const MODEL_ROUTE_AVAILABILITY_REPORT = /(?:枠|利用上限|レート制限|残量).{0,8}(?:切れ|なし|不足|尽き|到達)|(?:復旧|回復|上限到達|枠切れ)|(?:切れ|不足|尽き|使い切).{0,8}(?:枠|利用上限)/u;
 const ROUTE_TASK_SOURCE = String.raw`(?:文書作成|設計|実装|検証|分析|レビュー|テスト|文書|コード|作業|documentation|design|implementation|verification|analysis|review|testing|coding|work)`;
 const MODEL_FIRST_ASSIGNMENT = new RegExp(`(${ROUTE_MODEL_SOURCE})\\s*(?:で|を使って|を利用して)\\s*(${ROUTE_TASK_SOURCE})`, "giu");
 const TASK_FIRST_ASSIGNMENT = new RegExp(`(${ROUTE_TASK_SOURCE})(?:は|を)?\\s*(${ROUTE_MODEL_SOURCE})\\s*(?:で|に)\\s*(?:担当|実施|実行|処理|任せ)(?:して|する|る)?`, "giu");
@@ -80,7 +90,7 @@ const ROUTE_TASKS = [
 const NEGATIVE_ACTION = /(?:ないで|しない|さない|わない|するな|(?:使|出|示|提示|表示|見せ)(?:うな|すな)|やめ|禁止|避け|省(?:く|いて|か)|除外)/u;
 const NON_DIRECTIVE_STATEMENT = /(?:予定|つもり|計画)(?:です|だ|である|している|しています)?[。！？!?]*$/u;
 const SELF_ACTION_SUBJECT = /(?:私は|私が|自分は|自分が)/u;
-const EXPLICIT_COMMAND_ENDING = /(?:て|で|ください|下さい|しろ|せよ|なさい|するな|しないで|ないで|(?:使|出|示|提示|表示|見せ)(?:うな|すな)|使う|答えろ|出せ|示せ|止まれ|使え|こと)(?:[。！？!?])?$/u;
+const EXPLICIT_COMMAND_ENDING = /(?:て|で|ください|下さい|しろ|せよ|なさい|するな|しないで|ないで|やめ(?:て|ろ)|(?:使|出|示|提示|表示|見せ)(?:うな|すな)|使う|答えろ|出せ|示せ|止まれ|使え|こと)(?:[。！？!?])?$/u;
 
 type RouteAssignment = { key: string; model: string };
 
@@ -269,6 +279,9 @@ function requiredValues(
     if (assignments && assignments.length === 1) {
       values.workType = assignments[0].key;
       values.model = assignments[0].model;
+    } else {
+      const modelName = sentence.match(new RegExp(ROUTE_MODEL_SOURCE, "iu"))?.[0];
+      if (modelName) values.model = canonicalModelName(modelName);
     }
   }
   return values;
@@ -415,14 +428,17 @@ function conditionDescriptor(sentence: string, topicKey: string): {
     conditionParts.push(`unparsed:${conditionText ?? "condition"}`);
   }
 
+  let hasTaskRoute = true;
   if (topicKey === "model_routing") {
     const route = routeConditionKey(sentence);
+    hasTaskRoute = route !== null;
     if (route) conditionParts.push(`route:${route}`);
     else conditionKnown = false;
   }
 
   if (topicKey === "tone" && /オーナー|owner|自分/u.test(sentence)) conditionParts.push("audience:owner");
-  const lifetimeKind: CorrectionCandidate["lifetimeKind"] = deadline ? "task"
+  const lifetimeKind: CorrectionCandidate["lifetimeKind"] = topicKey === "model_routing" && !hasTaskRoute ? "routing"
+    : deadline ? "task"
     : continuing ? "explicit_continuing"
       : topicKey === "model_routing" ? "routing" : "inferred";
   return { conditionKey: conditionParts.join(";"), conditionKnown, lifetimeKind, conditions: [] };
@@ -569,19 +585,41 @@ function detectSentence(
   if (!event.hasSensitiveValue && !event.isPasteCandidate && Array.from(normalizedCommand).length <= 240) {
     commandText = normalizedCommand;
   }
+  const requiredRuleValues = event.hasSensitiveValue || event.isPasteCandidate
+    ? {} : requiredValues(sentence, topicForRule, specialTone);
+  const hasRequiredRuleValues = Object.values(requiredRuleValues).some((value) => value.length > 0);
+  const hasModelName = new RegExp(MODEL_NAME.source, "iu").test(normalizedCommand);
+  const tasklessModelRoute = topic.topicKey === "model_routing" && routeAssignments(normalizedCommand) === null;
+  const plainCommandEligible = Array.from(normalizedCommand).length <= 40
+    && EXPLICIT_COMMAND_ENDING.test(normalizedCommand)
+    && hasCorrectionPredicate(normalizedCommand)
+    && !looksLikeQuestion
+    && !isConsultationQuestion(normalizedCommand)
+    && !event.hasSensitiveValue
+    && !event.isPasteCandidate
+    && !THIRD_PARTY.test(normalizedCommand)
+    && !EXAMPLE_CONTEXT.test(normalizedCommand)
+    && (topic.topicKey === "unknown"
+      ? NEGATIVE_ACTION.test(normalizedCommand)
+      : topic.topicKey === "model_routing"
+        ? Boolean(requiredRuleValues.model) && hasModelName
+          && (tasklessModelRoute || Boolean(requiredRuleValues.workType))
+        : hasRequiredRuleValues);
+  const plainModelRoute = tasklessModelRoute && plainCommandEligible;
   const input: CorrectionRuleInput = {
     version: 2,
     topicKey: topic.topicKey as CorrectionRuleInput["topicKey"],
     actionKey,
     polarity,
-    requiredValues: event.hasSensitiveValue || event.isPasteCandidate ? {} : requiredValues(sentence, topicForRule, specialTone),
+    requiredValues: requiredRuleValues,
     conditions: condition.conditions,
     boundaryKey: condition.conditionKey,
     lifetimeKind: condition.lifetimeKind,
     continuationBasis: condition.lifetimeKind === "explicit_continuing" ? "explicit-continuing-command"
       : condition.lifetimeKind === "task" ? "task-scoped-request"
         : condition.lifetimeKind === "routing" ? "temporary-model-routing" : "inferred-repeat",
-    directive: directive || specialTone,
+    directive: plainModelRoute ? false : directive || specialTone,
+    plainCommandEligible,
     question: looksLikeQuestion || specialTone,
     toneException: specialTone,
     conditionKnown: ruleConditionKnown,
@@ -599,6 +637,8 @@ function detectSentence(
     conditionKey: correctionConditionKey(ruleInput),
     normalizedText: normalizedCommand,
     conditionKnown: ruleConditionKnown,
+    plainCommandEligible,
+    requiredValuesKey: correctionRequiredValuesKey(input),
   };
   const status = !event.hasSensitiveValue
     && !event.isPasteCandidate
@@ -657,4 +697,31 @@ export function detectOwnerCorrections(event: OwnerEvent, context: DetectionCont
     candidates.push(candidate);
   }
   return candidates.sort((left, right) => right.score - left.score).slice(0, 3);
+}
+
+export function getModelRoutingRetractionTargets(event: OwnerEvent): string[] {
+  if (event.isSlashCommand || event.isHandoffPaste || event.isPasteCandidate || event.hasSensitiveValue) return [];
+  const targets: string[] = [];
+  for (const sentence of event.segments) {
+    const normalizedSentence = sentence.normalize("NFKC");
+    if (
+      MODEL_ROUTE_AVAILABILITY_REPORT.test(normalizedSentence)
+      || MODEL_ROUTE_POSITIVE_INSTRUCTION.test(normalizedSentence)
+    ) {
+      continue;
+    }
+    MODEL_ROUTE_RETRACTION_MODEL.lastIndex = 0;
+    for (const match of normalizedSentence.matchAll(MODEL_ROUTE_RETRACTION_MODEL)) {
+      const target = match[1]?.trim();
+      if (!target) continue;
+      const targetKey = target.toLocaleLowerCase("en-US");
+      if (targets.some((existing) => existing.toLocaleLowerCase("en-US") === targetKey)) continue;
+      targets.push(target);
+    }
+  }
+  return targets;
+}
+
+export function isModelRoutingRetraction(event: OwnerEvent): boolean {
+  return getModelRoutingRetractionTargets(event).length > 0;
 }

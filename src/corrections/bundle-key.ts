@@ -7,6 +7,8 @@ export type CorrectionBundleDescriptor = {
   conditionKey: string;
   normalizedText: string;
   conditionKnown: boolean;
+  plainCommandEligible?: boolean;
+  requiredValuesKey?: string;
   bundleKey?: string;
 };
 
@@ -14,6 +16,14 @@ const DICE_THRESHOLD = 0.85;
 
 function normalizedCharacters(value: string): string[] {
   return Array.from(value.normalize("NFKC").replace(/\s+/gu, " ").trim());
+}
+
+function normalizedExactText(value: string): string {
+  return value.normalize("NFKC")
+    .trim()
+    .replace(/[。．.!！?？、,]+$/u, "")
+    .trim()
+    .toLocaleLowerCase("en-US");
 }
 
 function bigramCounts(value: string): Map<string, number> {
@@ -56,11 +66,19 @@ export function haveSameBundleKey(
   right: CorrectionBundleDescriptor,
 ): boolean {
   if (!sameDimensions(left, right)) return false;
+  if (left.plainCommandEligible || right.plainCommandEligible) {
+    if (!left.plainCommandEligible || !right.plainCommandEligible) return false;
+    if (left.topicKey === "unknown" || left.topicKey === "model_routing") {
+      return normalizedExactText(left.normalizedText) === normalizedExactText(right.normalizedText);
+    }
+    return typeof left.requiredValuesKey === "string"
+      && left.requiredValuesKey === right.requiredValuesKey;
+  }
   if (left.topicKey === "unknown" || right.topicKey === "unknown") {
-    return left.normalizedText === right.normalizedText;
+    return normalizedExactText(left.normalizedText) === normalizedExactText(right.normalizedText);
   }
   if (!left.conditionKnown || !right.conditionKnown) {
-    return left.normalizedText === right.normalizedText;
+    return normalizedExactText(left.normalizedText) === normalizedExactText(right.normalizedText);
   }
   return diceCoefficient(left.normalizedText, right.normalizedText) >= DICE_THRESHOLD;
 }
@@ -75,12 +93,18 @@ export function createBundleKey(
 ): string {
   const matching = existing.find((item) => haveSameBundleKey(candidate, item));
   if (matching?.bundleKey) return matching.bundleKey;
+  let normalizedText = candidate.topicKey === "unknown" || candidate.topicKey === "model_routing"
+    ? normalizedExactText(candidate.normalizedText)
+    : candidate.normalizedText.normalize("NFKC").replace(/\s+/gu, " ").trim();
+  if (candidate.plainCommandEligible && candidate.topicKey !== "unknown" && candidate.topicKey !== "model_routing") {
+    normalizedText = `plain-values:${candidate.requiredValuesKey ?? ""}`;
+  }
   const identity = [
     candidate.topicKey,
     candidate.actionKey,
     candidate.polarity,
     candidate.conditionKey,
-    candidate.normalizedText.normalize("NFKC").replace(/\s+/gu, " ").trim(),
+    normalizedText,
   ].join("\u001f");
   return hashKey(identity);
 }

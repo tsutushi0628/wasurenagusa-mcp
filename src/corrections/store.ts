@@ -5,6 +5,7 @@ import {
   correctionConditionKey,
   mergeCorrectionRuleInputs,
   parseCorrectionRuleInput,
+  renderPlainCorrectionRule,
   renderCorrectionRule,
   serializeCorrectionRuleInput,
   type CorrectionRuleInput,
@@ -130,6 +131,7 @@ interface EvidenceRow {
   event_id: string;
   score: number;
   conditions: string;
+  detector_version: string;
   polarity: string;
   session_id_hash: string;
   observed_at: string;
@@ -263,7 +265,7 @@ function loadEvidenceRows(
   polarity: string,
 ): EvidenceRow[] {
   return db.prepare(`
-    SELECT e.event_id, e.score, e.conditions, e.polarity, v.session_id_hash, v.observed_at
+    SELECT e.event_id, e.score, e.conditions, e.detector_version, e.polarity, v.session_id_hash, v.observed_at
     FROM owner_correction_evidence e
     JOIN owner_correction_events v ON v.event_id = e.event_id
     WHERE e.bundle_key = ? AND e.polarity = ?
@@ -279,6 +281,67 @@ function usableRuleInputs(rows: EvidenceRow[]): CorrectionRuleInput[] {
     result.push(input);
   }
   return result;
+}
+
+function detectorMajorVersion(version: string): number {
+  const match = version.match(/(?:^|[-.])v(\d+)(?:$|[-.])/iu);
+  if (!match) return 0;
+  const majorVersion = Number(match[1]);
+  if (!Number.isSafeInteger(majorVersion)) return 0;
+  return majorVersion;
+}
+
+function eligiblePlainCommandRows(rows: EvidenceRow[]): EvidenceRow[] {
+  return rows.filter((row) => {
+    const input = parseCorrectionRuleInput(row.conditions);
+    return input !== null
+      && detectorMajorVersion(row.detector_version) >= 3
+      && input.plainCommandEligible
+      && renderCorrectionRule(input).length === 0
+      && renderPlainCorrectionRule(input).length > 0;
+  });
+}
+
+function distinctPlainCommandRows(rows: EvidenceRow[]): EvidenceRow[] {
+  const actions = new Map<string, EvidenceRow>();
+  for (const row of rows) {
+    const input = parseCorrectionRuleInput(row.conditions);
+    if (!input?.commandText) continue;
+    const minute = Math.floor(parseTime(row.observed_at, "plain correction evidence time") / 60000);
+    const actionKey = JSON.stringify([minute, input.commandText]);
+    if (!actions.has(actionKey)) actions.set(actionKey, row);
+  }
+  return Array.from(actions.values()).sort((left, right) => {
+    const timeOrder = parseTime(left.observed_at, "plain correction evidence time")
+      - parseTime(right.observed_at, "plain correction evidence time");
+    if (timeOrder !== 0) return timeOrder;
+    return left.event_id.localeCompare(right.event_id);
+  });
+}
+
+function selectPlainCommandRuleText(rows: EvidenceRow[]): string {
+  const variants = new Map<string, { ruleText: string; sessions: Set<string> }>();
+  for (const row of rows) {
+    const input = parseCorrectionRuleInput(row.conditions);
+    if (!input?.commandText) continue;
+    const ruleText = renderPlainCorrectionRule(input);
+    if (!ruleText) continue;
+    let variant = variants.get(input.commandText);
+    if (!variant) {
+      variant = { ruleText, sessions: new Set() };
+      variants.set(input.commandText, variant);
+    }
+    variant.sessions.add(row.session_id_hash);
+  }
+  const allVariants = Array.from(variants.values());
+  const repeatedVariants = allVariants.filter((variant) => variant.sessions.size >= 2);
+  const candidates = repeatedVariants.length > 0 ? repeatedVariants : allVariants;
+  candidates.sort((left, right) => {
+    const lengthOrder = Array.from(left.ruleText).length - Array.from(right.ruleText).length;
+    if (lengthOrder !== 0) return lengthOrder;
+    return left.ruleText.localeCompare(right.ruleText);
+  });
+  return candidates[0]?.ruleText ?? "";
 }
 
 function ruleInputSnapshot(rows: EvidenceRow[], usableInputs: CorrectionRuleInput[]): string {
@@ -583,12 +646,17 @@ function calculateIntensity(rows: EvidenceRow[]): number {
   return Math.min(5, intensity);
 }
 
-function getRepeatRows(rows: EvidenceRow[], currentEventAt: string): EvidenceRow[] {
+function getRepeatRows(
+  rows: EvidenceRow[],
+  currentEventAt: string,
+  windowMs = EVIDENCE_WINDOW_MS,
+  includeWindowStart = true,
+): EvidenceRow[] {
   const currentTime = parseTime(currentEventAt, "event observed time");
-  const cutoff = currentTime - EVIDENCE_WINDOW_MS;
+  const cutoff = currentTime - windowMs;
   return rows.filter((row) => {
     const eventTime = parseTime(row.observed_at, "evidence observed time");
-    return eventTime >= cutoff && eventTime <= currentTime;
+    return (includeWindowStart ? eventTime >= cutoff : eventTime > cutoff) && eventTime <= currentTime;
   });
 }
 
@@ -620,12 +688,37 @@ function currentConditions(db: CorrectionStoreTransaction["db"], bundle: BundleR
   return row.conditions;
 }
 
+function modelRoutingRetractionTime(
+  db: CorrectionStoreTransaction["db"],
+  bundle: BundleRow,
+): string | null {
+  if (bundle.status !== "expired" || bundle.topic_key !== "model_routing" || !bundle.counterevidence_event_id) return null;
+  const version = db.prepare(`
+    SELECT change_reason FROM owner_correction_versions WHERE bundle_key = ? AND version = ?
+  `).get(bundle.bundle_key, bundle.version) as { change_reason: string } | undefined;
+  if (!version) throw new Error("correction bundle version is missing");
+  if (version.change_reason !== "model_routing_retracted") return null;
+  const event = db.prepare(`
+    SELECT observed_at FROM owner_correction_events WHERE event_id = ?
+  `).get(bundle.counterevidence_event_id) as { observed_at: string } | undefined;
+  if (!event) throw new Error("model routing retraction event is missing");
+  return event.observed_at;
+}
+
+function sameModelName(targetModel: string, bundleModel: string): boolean {
+  const normalizedTarget = targetModel.normalize("NFKC").trim().toLocaleLowerCase("en-US");
+  const normalizedBundle = bundleModel.normalize("NFKC").trim().toLocaleLowerCase("en-US");
+  return normalizedBundle === normalizedTarget;
+}
+
 function expirationVersion(
   transaction: CorrectionStoreTransaction,
   bundle: BundleRow,
   reason: string,
+  expiresAt = bundle.expires_at,
+  counterevidenceEventId = bundle.counterevidence_event_id,
 ): BundleRow {
-  if (!bundle.expires_at) throw new Error("expired correction bundle is missing its deadline");
+  if (!expiresAt) throw new Error("expired correction bundle is missing its deadline");
   const conditions = currentConditions(transaction.db, bundle);
   const next: BundleUpdate = {
     bundleKey: bundle.bundle_key,
@@ -643,23 +736,25 @@ function expirationVersion(
     sessionCount: bundle.session_count,
     firstSeenAt: bundle.first_seen_at,
     lastSeenAt: bundle.last_seen_at,
-    expiresAt: bundle.expires_at,
+    expiresAt,
     lifetimeKind: bundle.lifetime_kind,
     continuationBasis: bundle.continuation_basis,
     confirmedAt: bundle.confirmed_at,
     version: bundle.version + 1,
-    counterevidenceEventId: bundle.counterevidence_event_id,
+    counterevidenceEventId,
     lastConfirmationAskedAt: bundle.last_confirmation_asked_at,
     confirmationState: bundle.confirmation_state,
   };
   updateBundle(transaction.db, next);
+  let evidenceEventIds = evidenceIdsForBundle(transaction.db, bundle.bundle_key);
+  if (counterevidenceEventId) evidenceEventIds = withEventId(evidenceEventIds, counterevidenceEventId);
   insertVersion(
     transaction.db,
     bundle.bundle_key,
     next.version,
     asVersionFields(next, conditions),
-    evidenceIdsForBundle(transaction.db, bundle.bundle_key),
-    bundle.expires_at,
+    evidenceEventIds,
+    expiresAt,
     reason,
   );
   archiveMemory(transaction.db, bundle.memory_id);
@@ -806,6 +901,11 @@ export function applyCorrectionEvidence(
   validateInput(input);
   const submittedInput = input;
   const submittedRuleInput = ruleInputFromConditions(submittedInput.evidence.conditions);
+  const shortModelRoute = submittedRuleInput.topicKey === "model_routing"
+    && submittedRuleInput.plainCommandEligible
+    && !submittedRuleInput.requiredValues.workType;
+  const repeatWindow = shortModelRoute ? ROUTING_TTL_MS : EVIDENCE_WINDOW_MS;
+  const includeRepeatWindowStart = !shortModelRoute;
   if (submittedRuleInput.question && !submittedRuleInput.toneException) {
     input = { ...submittedInput, ruleText: "", decision: "candidate" };
   }
@@ -838,19 +938,33 @@ export function applyCorrectionEvidence(
   if (bundle.status === "rejected" || bundle.status === "disputed") return resultFromBundle(bundle);
 
   bundle = expireIfDue(transaction, bundle, at);
+  const retractionAt = shortModelRoute ? modelRoutingRetractionTime(db, bundle) : null;
+  if (retractionAt && parseTime(event.observed_at, "event observed time") <= parseTime(retractionAt, "model routing retraction time")) {
+    return resultFromBundle(bundle);
+  }
   const existingConditions = currentConditions(db, bundle);
   const inserted = addEvidence(transaction, storedInput);
-  const rows = loadEvidenceRows(db, bundleKey, input.polarity);
+  let rows = loadEvidenceRows(db, bundleKey, input.polarity);
+  if (retractionAt) {
+    const retractionTime = parseTime(retractionAt, "model routing retraction time");
+    rows = rows.filter((row) => parseTime(row.observed_at, "evidence observed time") > retractionTime);
+  }
   if (rows.length === 0) throw new Error("correction evidence disappeared after insert");
   const usableRows = rows.filter((row) => {
     const evidenceRule = parseCorrectionRuleInput(row.conditions);
     return evidenceRule !== null && !(evidenceRule.question && !evidenceRule.toneException)
       && renderCorrectionRule(evidenceRule).length > 0;
   });
+  const plainEvidenceRows = eligiblePlainCommandRows(rows).filter((row) =>
+    getRepeatRows([row], event.observed_at, repeatWindow, includeRepeatWindowStart).length > 0,
+  );
+  const plainActionRows = distinctPlainCommandRows(plainEvidenceRows);
   const usableInputs = usableRuleInputs(rows);
   const mergedInput = mergeCorrectionRuleInputs(usableInputs);
   let generatedRuleText = "";
   if (mergedInput) generatedRuleText = renderCorrectionRule(mergedInput);
+  const recentPlainRows = getRepeatRows(plainActionRows, event.observed_at, repeatWindow, includeRepeatWindowStart);
+  if (!generatedRuleText) generatedRuleText = selectPlainCommandRuleText(recentPlainRows);
   const mergedConditions = ruleInputSnapshot(rows, usableInputs);
 
   const refreshedBundle = getBundle(db, bundleKey);
@@ -858,20 +972,31 @@ export function applyCorrectionEvidence(
   const conflictConditions = mergedInput
     ? mergedInput.conditions
     : ruleInputFromConditions(input.evidence.conditions).conditions;
-  const contradicted = input.ruleText
+  const hasContradictionRule = Boolean(input.ruleText) || shortModelRoute && Boolean(generatedRuleText);
+  const contradicted = hasContradictionRule
     ? stopContradictoryBundles(transaction, refreshedBundle, input.eventId, at, conflictConditions)
     : null;
   if (contradicted) return resultFromBundle(contradicted);
 
-  const evidenceCount = rows.length;
+  const plainEvidenceIds = new Set(plainEvidenceRows.map((row) => row.event_id));
+  const countedRows = shortModelRoute
+    ? plainActionRows
+    : rows.filter((row) => !plainEvidenceIds.has(row.event_id)).concat(plainActionRows);
+  const evidenceCount = countedRows.length;
   const hasUnappliedEvidence = inserted || evidenceCount > bundle.occurrence_count;
-  const occurrenceCount = Math.max(bundle.occurrence_count, evidenceCount);
-  const sessionRows = usableRows.length > 0 ? usableRows : rows;
-  const sessionCount = Math.max(bundle.session_count, new Set(sessionRows.map((row) => row.session_id_hash)).size);
-  const intensity = Math.max(bundle.intensity, calculateIntensity(usableRows.length > 0 ? usableRows : rows));
+  const proofRows = usableRows.concat(plainActionRows);
+  const sessionRows = proofRows.length > 0 ? proofRows : countedRows;
+  const freshRoutingCycle = bundle.status === "expired" && shortModelRoute;
+  const occurrenceCount = freshRoutingCycle ? evidenceCount : Math.max(bundle.occurrence_count, evidenceCount);
+  const observedSessionCount = new Set(sessionRows.map((row) => row.session_id_hash)).size;
+  const sessionCount = freshRoutingCycle ? observedSessionCount : Math.max(bundle.session_count, observedSessionCount);
+  let metricRows = countedRows;
+  if (usableRows.length > 0) metricRows = usableRows;
+  else if (plainActionRows.length > 0) metricRows = plainActionRows;
+  const intensity = freshRoutingCycle ? calculateIntensity(metricRows) : Math.max(bundle.intensity, calculateIntensity(metricRows));
   let firstSeenAt = bundle.first_seen_at;
   let lastSeenAt = bundle.last_seen_at;
-  const datedRows = usableRows.length > 0 ? usableRows : rows;
+  const datedRows = metricRows;
   if (datedRows.length > 0) {
     firstSeenAt = datedRows[0].observed_at;
     lastSeenAt = datedRows[datedRows.length - 1].observed_at;
@@ -879,8 +1004,12 @@ export function applyCorrectionEvidence(
 
   if (!hasUnappliedEvidence) return resultFromBundle(bundle);
 
-  const recentRows = getRepeatRows(usableRows, event.observed_at);
-  const repeatConfirmed = usableRows.length > 0 && recentRows.length >= 2;
+  const recentUsableRows = getRepeatRows(usableRows, event.observed_at, repeatWindow, includeRepeatWindowStart);
+  const recentProofRows = getRepeatRows(proofRows, event.observed_at, repeatWindow, includeRepeatWindowStart);
+  const plainRepeatConfirmed = plainActionRows.length > 0
+    && recentProofRows.length >= 2
+    && new Set(recentProofRows.map((row) => row.session_id_hash)).size >= 2;
+  const repeatConfirmed = usableRows.length > 0 && recentUsableRows.length >= 2 || plainRepeatConfirmed;
   const immediateConfirmed = input.ruleText.length > 0
     && (input.decision === "confirmed" || input.decision === "owner_confirmed");
   const ownerConfirmed = input.decision === "owner_confirmed" && input.ruleText.length > 0;
@@ -936,7 +1065,7 @@ export function applyCorrectionEvidence(
     continuationBasis,
     confirmedAt,
     version: bundle.version,
-    counterevidenceEventId: bundle.counterevidence_event_id,
+    counterevidenceEventId: retractionAt ? null : bundle.counterevidence_event_id,
     lastConfirmationAskedAt: bundle.last_confirmation_asked_at,
     confirmationState: bundle.confirmation_state,
   };
@@ -1037,6 +1166,46 @@ export function disputeCorrectionBundles(
     return transitionToTerminal(transaction, bundle, "disputed", input.eventId, input.at, "counterevidence_conflict");
   });
   return bundles.map(resultFromBundle);
+}
+
+export function disputeRecentModelRoutingBundles(
+  transaction: CorrectionStoreTransaction,
+  input: { eventId: string; at: string; targetModels: string[] },
+): CorrectionStoreResult[] {
+  assertTransaction(transaction);
+  parseTime(input.at, "model routing retraction time");
+  getEvent(transaction.db, input.eventId);
+  const retraction = transaction.db.prepare(`
+    SELECT session_id_hash, human_ordinal FROM owner_correction_events WHERE event_id = ?
+  `).get(input.eventId) as { session_id_hash: string; human_ordinal: number } | undefined;
+  if (!retraction) throw new Error("model routing retraction event was not found");
+  if (input.targetModels.length === 0) return [];
+
+  const priorBundles = transaction.db.prepare(`
+    SELECT DISTINCT b.bundle_key
+    FROM owner_correction_events basis
+    JOIN owner_correction_evidence evidence ON evidence.event_id = basis.event_id
+    JOIN owner_correction_bundles b ON b.bundle_key = evidence.bundle_key
+    WHERE basis.session_id_hash = ? AND basis.human_ordinal >= ? AND basis.human_ordinal < ?
+      AND b.topic_key = 'model_routing' AND b.status IN ('candidate','confirmed','expired')
+    ORDER BY b.bundle_key
+  `).all(
+    retraction.session_id_hash,
+    Math.max(0, retraction.human_ordinal - 5),
+    retraction.human_ordinal,
+  ) as Array<{ bundle_key: string }>;
+
+  const expired: CorrectionStoreResult[] = [];
+  for (const row of priorBundles) {
+    const bundle = getBundle(transaction.db, row.bundle_key);
+    if (!bundle) throw new Error("model routing bundle disappeared during retraction");
+    const ruleInput = parseCorrectionRuleInput(currentConditions(transaction.db, bundle));
+    const bundleModel = ruleInput?.requiredValues.model;
+    if (!bundleModel || !input.targetModels.some((targetModel) => sameModelName(targetModel, bundleModel))) continue;
+    const stopped = expirationVersion(transaction, bundle, "model_routing_retracted", input.at, input.eventId);
+    expired.push(resultFromBundle(stopped));
+  }
+  return expired;
 }
 
 export function getCorrectionVersionAt(

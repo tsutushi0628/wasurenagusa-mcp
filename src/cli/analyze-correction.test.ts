@@ -172,13 +172,23 @@ describe("analyze Stop correction recovery", () => {
     await analyze.main();
   }
 
+  async function runStopCorrection(sessionId: string, uuid: string, content: string, timestamp: string): Promise<void> {
+    const assistantTimestamp = new Date(Date.parse(timestamp) + 1000).toISOString();
+    const transcript = writeTranscript([
+      user(uuid, content, timestamp, sessionId),
+      assistant(`${uuid}-response`, "合成の応答", assistantTimestamp, sessionId),
+    ]);
+    attachStdin(transcript, { session_id: sessionId });
+    await runMain();
+  }
+
   function readCorrectionState() {
     const storage = SQLiteStorage.openExistingForHook(join(memoryPath, "memory.db"));
     try {
       return storage.runCorrectionTransaction(({ db }) => ({
         session: db.prepare("SELECT human_ordinal, transcript_offset FROM owner_correction_sessions").get(),
         events: db.prepare("SELECT event_id, human_ordinal, source_kind, previous_action FROM owner_correction_events ORDER BY human_ordinal").all(),
-        bundles: db.prepare("SELECT bundle_key, memory_id, rule_text, topic_key, status, visibility, occurrence_count, session_count FROM owner_correction_bundles ORDER BY bundle_key").all(),
+        bundles: db.prepare("SELECT bundle_key, memory_id, rule_text, topic_key, polarity, condition_key, status, visibility, occurrence_count, session_count, lifetime_kind, expires_at FROM owner_correction_bundles ORDER BY bundle_key").all(),
         evidence: db.prepare("SELECT detector_version, conditions FROM owner_correction_evidence ORDER BY event_id").all(),
         pending: db.prepare("SELECT receipt_id, matched_event_id FROM owner_correction_pending ORDER BY receipt_id").all(),
         memories: db.prepare("SELECT id, content, state FROM memories WHERE category = 'dont' ORDER BY id").all(),
@@ -218,7 +228,7 @@ describe("analyze Stop correction recovery", () => {
     expect(readCorrectionState()).toMatchObject({
       session: { human_ordinal: 2 },
       bundles: [{ bundle_key: expect.stringMatching(/^oc:v2:/u), rule_text: "毎回、質問に回答する", status: "confirmed" }],
-      evidence: [{ detector_version: "owner-correction-v2", conditions: expect.stringContaining('"version":2') }],
+      evidence: [{ detector_version: "owner-correction-v3", conditions: expect.stringContaining('"version":2') }],
       memories: [{ content: "毎回、質問に回答する" }],
     });
   });
@@ -282,7 +292,7 @@ describe("analyze Stop correction recovery", () => {
 
     expect(readCorrectionState()).toMatchObject({
       bundles: [{ rule_text: "オーナーへの応答は常体で書く", topic_key: "tone", status: "confirmed" }],
-      evidence: [{ detector_version: "owner-correction-v2" }],
+      evidence: [{ detector_version: "owner-correction-v3" }],
       pending: [{ matched_event_id: expect.any(String) }],
     });
   });
@@ -548,6 +558,101 @@ describe("analyze Stop correction recovery", () => {
     }
   });
 
+  it("一般方針だけをowner可視にし、unknownは素文の否定命令に限る", async () => {
+    const longNegativeCommand = `${"あ".repeat(41)}使うな`;
+    const ownerCases: Array<{
+      topicKey: string;
+      content: string;
+      visibility: "project" | "owner";
+      condition?: string;
+    }> = [
+      { topicKey: "verification", content: "今後、成果物を原本と照合して", visibility: "owner" },
+      { topicKey: "delegation_roles", content: "今後、実装はbackend-engineerに任せて", visibility: "owner" },
+      { topicKey: "storage_location", content: "今後、成果物をリポジトリ直下に置いて", visibility: "owner" },
+      { topicKey: "verification", content: "今日だけ成果物を原本と照合して", visibility: "project", condition: "task:" },
+      { topicKey: "storage_location", content: "今後、成果物は docs/requests の場合だけに保存して", visibility: "project", condition: "unparsed:" },
+      { topicKey: "design_components", content: "今後、CSS部品を再利用して", visibility: "project" },
+      { topicKey: "model_routing", content: "Codexを使って", visibility: "project" },
+      { topicKey: "model_routing", content: "今後、設計はClaudeで担当して", visibility: "project" },
+      { topicKey: "unknown", content: "今後、それを作成して", visibility: "project" },
+      { topicKey: "unknown", content: longNegativeCommand, visibility: "project", condition: "general" },
+    ];
+
+    for (const [index, item] of ownerCases.entries()) {
+      const timestamp = `2026-10-03T00:${String(index).padStart(2, "0")}:00.000Z`;
+      await runStopCorrection(`visibility-session-${index}`, `visibility-event-${index}`, item.content, timestamp);
+      const bundles = readCorrectionState().bundles.filter((candidate) => candidate.topic_key === item.topicKey);
+      const bundle = item.condition
+        ? bundles.find((candidate) => candidate.condition_key.includes(item.condition!))
+        : bundles[0];
+
+      expect(bundle).toMatchObject({ topic_key: item.topicKey, visibility: item.visibility });
+    }
+
+    await runStopCorrection("model-route-confirm-two", "model-route-confirm-two-event", "Codexを使って", "2026-10-03T00:10:00.000Z");
+    expect(readCorrectionState().bundles.find((bundle) => bundle.topic_key === "model_routing" && bundle.rule_text === "Codexを使って"))
+      .toMatchObject({ status: "confirmed", visibility: "owner", lifetime_kind: "routing", expires_at: "2026-10-04T00:10:00.000Z" });
+
+    const longNegativeEvidence = readCorrectionState().evidence.find((entry) => entry.conditions.includes(longNegativeCommand));
+    if (!longNegativeEvidence) throw new Error("synthetic unknown evidence was not stored");
+    expect(JSON.parse(longNegativeEvidence.conditions)).toMatchObject({ polarity: "negative", plainCommandEligible: false });
+
+    const negativeCommand = "その形式は使うな";
+    for (const [index, sessionId] of ["unknown-negative-one", "unknown-negative-two"].entries()) {
+      const timestamp = `2026-10-04T00:0${index}:00.000Z`;
+      await runStopCorrection(sessionId, `unknown-negative-${index}`, negativeCommand, timestamp);
+      if (index === 0) {
+        expect(readCorrectionState().bundles.find((candidate) => candidate.topic_key === "unknown" && candidate.polarity === "negative" && candidate.rule_text === negativeCommand))
+          .toMatchObject({ status: "candidate", visibility: "project", occurrence_count: 1, session_count: 1 });
+      }
+    }
+
+    const negativeUnknown = readCorrectionState().bundles.find((candidate) => candidate.topic_key === "unknown" && candidate.polarity === "negative" && candidate.rule_text === negativeCommand);
+    expect(negativeUnknown).toMatchObject({
+      topic_key: "unknown",
+      polarity: "negative",
+      rule_text: negativeCommand,
+      status: "confirmed",
+      visibility: "owner",
+      occurrence_count: 2,
+      session_count: 2,
+    });
+  });
+
+  it("disputes opposite-polarity short model routes in the same session", async () => {
+    const sessionId = "short-model-route-conflict";
+    const transcript = writeTranscript([
+      user("route-positive", "Codexを使って", "2026-10-04T00:00:00.000Z", sessionId),
+      assistant("route-positive-response", "合成の応答", "2026-10-04T00:00:01.000Z", sessionId),
+      user("route-negative", "Codexをやめて", "2026-10-04T00:01:00.000Z", sessionId),
+      assistant("route-negative-response", "合成の応答", "2026-10-04T00:01:01.000Z", sessionId),
+    ]);
+    attachStdin(transcript, { session_id: sessionId });
+
+    await runMain();
+
+    const routeBundles = readCorrectionState().bundles.filter((bundle) => bundle.topic_key === "model_routing");
+    expect(routeBundles).toHaveLength(2);
+    expect(routeBundles.map((bundle) => bundle.status)).toEqual(["disputed", "disputed"]);
+  });
+
+  it("expires a short model route after a same-session retraction within five human utterances", async () => {
+    const sessionId = "short-model-route-retraction";
+    const transcript = writeTranscript([
+      user("route-root", "Codexを使って", "2026-10-04T00:00:00.000Z", sessionId),
+      assistant("route-root-response", "合成の応答", "2026-10-04T00:00:01.000Z", sessionId),
+      user("route-retraction", "今回はCodexじゃない", "2026-10-04T00:01:00.000Z", sessionId),
+      assistant("route-retraction-response", "合成の応答", "2026-10-04T00:01:01.000Z", sessionId),
+    ]);
+    attachStdin(transcript, { session_id: sessionId });
+
+    await runMain();
+
+    expect(readCorrectionState().bundles).toMatchObject([
+      { topic_key: "model_routing", rule_text: "Codexを使って", status: "expired", lifetime_kind: "routing" },
+    ]);
+  });
+
   it("matches a queued command to its pending receipt and recovers the saved candidate", async () => {
     const sessionId = "fixture-session";
     const prompt = "今後は質問に答えてください";
@@ -592,7 +697,7 @@ describe("analyze Stop correction recovery", () => {
       session: { human_ordinal: 1 },
       events: [{ source_kind: "queued_command" }],
       bundles: [{ bundle_key: expect.stringMatching(/^oc:v2:/u), rule_text: "毎回、質問に回答する", status: "confirmed" }],
-      evidence: [{ detector_version: "owner-correction-v2", conditions: expect.stringContaining('"version":2') }],
+      evidence: [{ detector_version: "owner-correction-v3", conditions: expect.stringContaining('"version":2') }],
       pending: [{ matched_event_id: expect.any(String) }],
     });
   });

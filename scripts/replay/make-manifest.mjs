@@ -2,26 +2,36 @@
 
 import { createHash } from "node:crypto";
 import { open, mkdir, readdir, writeFile } from "node:fs/promises";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { extractHumanUtterance, jstDate } from "./lib/analysis.mjs";
+import { readSessionIndexForTranscripts, sessionIndexEntry, validateProjectName } from "./lib/session-project.mjs";
 import { readManifest } from "./lib/simulate-engine.mjs";
 
-const DATE_START = "2026-09-22";
-const DATE_END = "2026-10-02";
-const DEFAULT_EXCLUDE_PREFIXES = ["dccb7da4", "57b0207c"];
+const DATE_START = "2026-09-23";
+const DATE_END = "2026-10-05";
+const DEFAULT_EXCLUDE_PREFIXES = [];
+
+function validateDateRange(dateStart, dateEnd) {
+  const isValidDate = (value) => /^\d{4}-\d{2}-\d{2}$/u.test(value)
+    && !Number.isNaN(Date.parse(`${value}T00:00:00.000Z`))
+    && new Date(`${value}T00:00:00.000Z`).toISOString().slice(0, 10) === value;
+  if (!isValidDate(dateStart) || !isValidDate(dateEnd) || dateStart > dateEnd) {
+    throw new Error("invalid date range: use valid --from and --to dates in YYYY-MM-DD order");
+  }
+}
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
 function parseMakeManifestArguments(args) {
-  const options = { excludePrefixes: [...DEFAULT_EXCLUDE_PREFIXES] };
+  const options = { excludePrefixes: [...DEFAULT_EXCLUDE_PREFIXES], dateStart: DATE_START, dateEnd: DATE_END };
   let hasExcludePrefixArgument = false;
 
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
-    if (["--transcripts", "--out", "--exclude-prefix"].includes(argument)) {
+    if (["--transcripts", "--out", "--exclude-prefix", "--from", "--to", "--project"].includes(argument)) {
       const value = args[index + 1];
       if (typeof value !== "string" || value.length === 0 || value.startsWith("--")) {
         throw new Error(`${argument} requires a value`);
@@ -31,6 +41,12 @@ function parseMakeManifestArguments(args) {
         options.transcriptsDirectory = value;
       } else if (argument === "--out") {
         options.outputPath = value;
+      } else if (argument === "--from") {
+        options.dateStart = value;
+      } else if (argument === "--to") {
+        options.dateEnd = value;
+      } else if (argument === "--project") {
+        options.project = validateProjectName(value);
       } else {
         if (!hasExcludePrefixArgument) {
           options.excludePrefixes = [];
@@ -46,6 +62,7 @@ function parseMakeManifestArguments(args) {
   if (!options.transcriptsDirectory || !options.outputPath) {
     throw new Error("--transcripts <dir> and --out <path> are required");
   }
+  validateDateRange(options.dateStart, options.dateEnd);
   return options;
 }
 
@@ -81,7 +98,7 @@ async function readFixedSnapshot(filename) {
   }
 }
 
-function inspectSnapshot(snapshot, fallbackSessionId) {
+function inspectSnapshot(snapshot, fallbackSessionId, dateStart, dateEnd) {
   let sessionId = fallbackSessionId;
   let humanUtteranceCount = 0;
   let inPeriodHumanUtteranceCount = 0;
@@ -116,7 +133,7 @@ function inspectSnapshot(snapshot, fallbackSessionId) {
     }
     humanUtteranceCount += 1;
     const date = jstDate(event.timestamp);
-    if (date && date >= DATE_START && date <= DATE_END) {
+    if (date && date >= dateStart && date <= dateEnd) {
       inPeriodHumanUtteranceCount += 1;
     }
   }
@@ -124,14 +141,28 @@ function inspectSnapshot(snapshot, fallbackSessionId) {
   return { sessionId, humanUtteranceCount, inPeriodHumanUtteranceCount };
 }
 
-async function makeManifest({ transcriptsDirectory, outputPath, excludePrefixes = DEFAULT_EXCLUDE_PREFIXES }) {
+async function makeManifest({
+  transcriptsDirectory,
+  outputPath,
+  excludePrefixes = DEFAULT_EXCLUDE_PREFIXES,
+  dateStart = DATE_START,
+  dateEnd = DATE_END,
+  project,
+}) {
+  validateDateRange(dateStart, dateEnd);
   const transcriptsRoot = resolve(transcriptsDirectory);
   const manifestPath = resolve(outputPath);
-  const filenames = (await readdir(transcriptsRoot, { withFileTypes: true }))
+  const sessionIndex = project ? await readSessionIndexForTranscripts(transcriptsRoot, { required: true }) : null;
+  const allFilenames = (await readdir(transcriptsRoot, { withFileTypes: true }))
     .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
     .map((entry) => entry.name)
     .sort();
+  const launchDir = basename(transcriptsRoot);
+  const filenames = project
+    ? allFilenames.filter((filename) => sessionIndexEntry(sessionIndex, basename(filename, ".jsonl"), launchDir)?.project === project)
+    : allFilenames;
   if (filenames.length === 0) {
+    if (project) throw new Error(`transcripts directory contains no JSONL files for project: ${project}`);
     throw new Error("transcripts directory contains no JSONL files");
   }
   const files = [];
@@ -148,7 +179,7 @@ async function makeManifest({ transcriptsDirectory, outputPath, excludePrefixes 
     const fileId = basename(filename, ".jsonl");
     const sourcePath = resolve(transcriptsRoot, filename);
     const fixed = await readFixedSnapshot(sourcePath);
-    const parsed = inspectSnapshot(fixed.snapshot, fileId);
+    const parsed = inspectSnapshot(fixed.snapshot, fileId, dateStart, dateEnd);
     let disposition;
     if (excludePrefixes.some((prefix) => parsed.sessionId.startsWith(prefix))) {
       disposition = "excluded";
@@ -174,7 +205,7 @@ async function makeManifest({ transcriptsDirectory, outputPath, excludePrefixes 
         sessionId: parsed.sessionId,
         sessionHash: sha256(parsed.sessionId),
         fileId,
-        path: sourcePath,
+        path: relative(dirname(manifestPath), sourcePath),
         readEndByteOffset: fixed.readEndByteOffset,
         prefixSha256: fixed.prefixSha256,
       });
@@ -188,7 +219,7 @@ async function makeManifest({ transcriptsDirectory, outputPath, excludePrefixes 
     }
   }
 
-  const manifest = { version: 1, sessions, files, fileAudit };
+  const manifest = { version: 1, dateRangeJst: { start: dateStart, end: dateEnd }, sessions, files, fileAudit };
   await mkdir(dirname(manifestPath), { recursive: true });
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   const validated = await readManifest(manifestPath);

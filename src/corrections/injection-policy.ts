@@ -1,5 +1,8 @@
 import type Database from "better-sqlite3";
 import type { CorrectionRule } from "./render.js";
+import { CORRECTION_COMPLIANCE_SCHEMA_VERSION } from "../storage/correction-schema.js";
+import { getSchemaVersion } from "../storage/schema.js";
+import { isCorrectionComplianceEnabled } from "./compliance.js";
 import {
   retrieveCorrectionCandidates,
   type CorrectionRetrievalInput,
@@ -15,6 +18,7 @@ const FULL_REFRESH_LIMIT = 2;
 const RELATED_RULE_LIMIT = 2;
 const PROMPT_RULE_LIMIT = 3;
 const COOLDOWN_HUMAN_TURNS = 10;
+const COMPLIANCE_RESTORE_LIMIT = 3;
 
 export type CorrectionInjectionTrigger = "start" | "prompt" | "refresh" | "compact";
 
@@ -106,6 +110,91 @@ function readSessionHistory(storage: SQLiteStorage, input: CorrectionInjectionRe
     `).all(input.sessionIdHash, input.humanOrdinal) as CorrectionEvidencePosition[];
     return { injections, evidencePositions };
   });
+}
+
+function readComplianceRestoreRules(
+  storage: SQLiteStorage,
+  input: CorrectionInjectionRequest,
+): RetrievedCorrectionRule[] {
+  if (!isCorrectionComplianceEnabled()) return [];
+  if (input.trigger !== "prompt" && input.trigger !== "refresh") return [];
+
+  return storage.runCorrectionTransaction(({ db }) => {
+    if (getSchemaVersion(db as unknown as Database.Database) < CORRECTION_COMPLIANCE_SCHEMA_VERSION) return [];
+    return db.prepare(`
+      SELECT violation.bundle_key, violation.version, memory.title, version.rule_text, bundle.topic_key,
+        bundle.condition_key, bundle.visibility, bundle.project, bundle.scope, bundle.intensity,
+        bundle.session_count, bundle.last_seen_at, bundle.expires_at, bundle.lifetime_kind,
+        bundle.continuation_basis
+      FROM owner_correction_violations AS violation
+      JOIN owner_correction_bundles AS bundle
+        ON bundle.bundle_key = violation.bundle_key
+      JOIN owner_correction_versions AS version
+        ON version.bundle_key = violation.bundle_key AND version.version = violation.version
+      JOIN memories AS memory
+        ON memory.id = bundle.memory_id
+      WHERE violation.session_id_hash = ?
+        AND violation.human_ordinal < ?
+        AND bundle.status = 'confirmed'
+        AND bundle.version = violation.version
+        AND version.status = 'confirmed'
+        AND memory.state = 'active'
+        AND memory.category = 'dont'
+        AND (bundle.expires_at IS NULL OR bundle.expires_at > ?)
+        AND (
+          SELECT COUNT(DISTINCT reinjection.human_ordinal)
+          FROM owner_correction_injections AS reinjection
+          WHERE reinjection.session_id_hash = violation.session_id_hash
+            AND reinjection.bundle_key = violation.bundle_key
+            AND reinjection.version = violation.version
+            AND reinjection.human_ordinal > (
+              SELECT MIN(first_violation.human_ordinal)
+              FROM owner_correction_violations AS first_violation
+              WHERE first_violation.session_id_hash = violation.session_id_hash
+                AND first_violation.bundle_key = violation.bundle_key
+                AND first_violation.version = violation.version
+            )
+            AND reinjection.trigger IN ('prompt','refresh')
+            AND reinjection.body_included = 1
+            AND reinjection.stdout_status = 'emitted'
+        ) < 2
+      GROUP BY violation.bundle_key, violation.version
+      ORDER BY MAX(violation.detected_at) DESC, bundle.intensity DESC, violation.bundle_key
+      LIMIT ${COMPLIANCE_RESTORE_LIMIT}
+    `).all(input.sessionIdHash, input.humanOrdinal, input.at) as Array<{
+      bundle_key: string;
+      version: number;
+      title: string;
+      rule_text: string;
+      topic_key: string;
+      condition_key: string;
+      visibility: "owner" | "project";
+      project: string;
+      scope: string;
+      intensity: number;
+      session_count: number;
+      last_seen_at: string;
+      expires_at: string | null;
+      lifetime_kind: "explicit_continuing" | "inferred" | "task" | "routing";
+      continuation_basis: string;
+    }>;
+  }).map((row) => ({
+    bundleKey: row.bundle_key,
+    version: row.version,
+    title: row.title,
+    ruleText: row.rule_text,
+    topicKey: row.topic_key,
+    conditionKey: row.condition_key,
+    visibility: row.visibility,
+    project: row.project,
+    scope: row.scope,
+    intensity: row.intensity,
+    sessionCount: row.session_count,
+    lastSeenAt: row.last_seen_at,
+    expiresAt: row.expires_at,
+    lifetimeKind: row.lifetime_kind,
+    continuationBasis: row.continuation_basis,
+  }));
 }
 
 function wasEmitted(row: InjectionHistoryRow): boolean {
@@ -201,13 +290,18 @@ function requiredDeliveryRules(
   );
 }
 
-function makeCorrectionRule(rule: RetrievedCorrectionRule, delivery: CorrectionRule["delivery"]): CorrectionRule {
+function makeCorrectionRule(
+  rule: RetrievedCorrectionRule,
+  delivery: CorrectionRule["delivery"],
+  complianceViolation = false,
+): CorrectionRule {
   return {
     bundleKey: rule.bundleKey,
     version: rule.version,
     title: rule.title,
     ruleText: rule.ruleText,
     delivery,
+    complianceViolation,
   };
 }
 
@@ -249,6 +343,8 @@ export function selectCorrectionInjections(
 
   const retrieval = retrieveCorrectionCandidates(storage, input);
   const history = readSessionHistory(storage, input);
+  const complianceRestoreRules = readComplianceRestoreRules(storage, input);
+  const complianceRestoreKeys = new Set(complianceRestoreRules.map((rule) => injectionKey(rule.bundleKey, rule.version)));
   const alwaysOn = orderAlwaysOnByTopic(retrieval.alwaysOn);
   const deliveryRules = requiredDeliveryRules(alwaysOn, retrieval.projectRules);
   const successfulKeys = new Set(
@@ -258,11 +354,15 @@ export function selectCorrectionInjections(
   const unreached = unreachedRules(deliveryRules, history);
   const selected: CorrectionRule[] = [];
   const selectedKeys = new Set<string>();
-  const addRule = (rule: RetrievedCorrectionRule, delivery: CorrectionRule["delivery"]): boolean => {
+  const addRule = (
+    rule: RetrievedCorrectionRule,
+    delivery: CorrectionRule["delivery"],
+    complianceViolation = false,
+  ): boolean => {
     const key = injectionKey(rule.bundleKey, rule.version);
     if (selectedKeys.has(key)) return false;
     selectedKeys.add(key);
-    selected.push(makeCorrectionRule(rule, delivery));
+    selected.push(makeCorrectionRule(rule, delivery, complianceViolation));
     return true;
   };
   const hasAttemptForTrigger = history.injections.some((row) => row.trigger === input.trigger);
@@ -300,17 +400,23 @@ export function selectCorrectionInjections(
     return hasRecentCorrection(history, rule, latest);
   });
   const restorationCandidates = [
+    ...complianceRestoreRules,
     ...recentCorrections,
     ...deliveryRules.filter((rule) => !successfulKeys.has(injectionKey(rule.bundleKey, rule.version))),
   ].filter((rule, index, rules) => rules.findIndex((entry) => entry.bundleKey === rule.bundleKey && entry.version === rule.version) === index);
 
   const restorationOrder = restorationCandidates.filter((rule) =>
-    !isCooling(history, latestInjections, rule, true, input.humanOrdinal),
+    complianceRestoreKeys.has(injectionKey(rule.bundleKey, rule.version)) ||
+      !isCooling(history, latestInjections, rule, true, input.humanOrdinal),
   );
+  const restoreLimit = Math.max(RESTORE_RULE_LIMIT, complianceRestoreRules.length);
 
   if (input.trigger === "refresh") {
     if (restorationOrder.length > 0) {
-      for (const rule of restorationOrder.slice(0, RESTORE_RULE_LIMIT)) addRule(rule, "restore");
+      for (const rule of restorationOrder.slice(0, restoreLimit)) {
+        const complianceViolation = complianceRestoreKeys.has(injectionKey(rule.bundleKey, rule.version));
+        addRule(rule, "restore", complianceViolation);
+      }
       return buildSelection(selected, unreached, alwaysOn.length, retrieval.ftsCandidateCount);
     }
     if (isRefreshOrdinal(input.humanOrdinal)) {
@@ -322,7 +428,10 @@ export function selectCorrectionInjections(
     return buildSelection(selected, unreached, alwaysOn.length, retrieval.ftsCandidateCount);
   }
 
-  for (const rule of restorationOrder.slice(0, RESTORE_RULE_LIMIT)) addRule(rule, "restore");
+  for (const rule of restorationOrder.slice(0, restoreLimit)) {
+    const complianceViolation = complianceRestoreKeys.has(injectionKey(rule.bundleKey, rule.version));
+    addRule(rule, "restore", complianceViolation);
+  }
 
   if (isRefreshOrdinal(input.humanOrdinal) && selected.length < PROMPT_RULE_LIMIT) {
     const refreshRules = orderForRefresh(alwaysOn, latestInjections)
