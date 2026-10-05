@@ -1,8 +1,8 @@
 ---
 schema_version: 1
-verified_at: 2026-10-04T00:00:00Z
-verified_head: b25d316
-source_worklog: handoff-20260720-a1-atomicity-b2b4-foundation-shipped.md
+verified_at: 2026-10-05T22:48:30Z
+verified_head: 4ac88fb
+source_worklog: worklog-20261004-owner-correction-loop.md
 ---
 # wasurenagusa-mcp
 
@@ -24,11 +24,10 @@ source_worklog: handoff-20260720-a1-atomicity-b2b4-foundation-shipped.md
 - `.wasurenagusa/`: ランタイムデータ（記憶DB、設定、バックアップ、ログ）
 
 ## 4. 現在地
-- 焦点: オーナーが同じ注意を二度言わなくて済む「訂正の検出・保存・注入ループ」を実装し、2026-10-04 に本番反映（`647c9bd`・`b25d316`、npm 未公開）。中央ストアは schema v11、毎発話の注入を有効化。
-- 次の一手: 実際の会話で訂正の候補・確定の溜まり方を観察し、誤確定があれば `WASURENAGUSA_CORRECTION_LOOP=off` で止めて直す。
-- 残作業: (a) 過去会話の再生では言い直しの 2 割弱（学習用 13/70）に効き、未見 30 session では 0/29。分からない言葉・確認しろ・要約の型・モデル指定は未対応（設計書 `docs/spec-owner-correction-loop.md` 節 11）。(b) `src/cli/spec-update.ts` の unhandled rejection は既知。
-- オーナー未回答: 今の効き目で足りるか、改修を続けるか。忘却の自動アーカイブ安全網欠如への対処方針（2026-07-19 から未回答）。
-
+- 焦点: 訂正の検出・保存・注入ループは 2026-10-04 に本番反映済み（`647c9bd`・`b25d316`、その後「また」誤検出の修正 `fb1c410`、検査修正 `4ac88fb`）。改善ラウンド2（T1〜T11、設計 `docs/spec-improvement-round2.md`）は実装・DB 複製でのリハーサルまで済み、作業ツリーに未コミット。本番は schema v11 のまま。
+- 次の一手: オーナーの y/n を取ってラウンド2 を本番反映（schema v12）。反映前に `pnpm run build` を直接叩かない。反映後は実会話で候補・確定の溜まり方を観察し、誤確定があれば `WASURENAGUSA_CORRECTION_LOOP=off` で止めて直す。
+- 残作業: (a) ラウンド2 の本番反映・コミット・Push。(b) g1-foundation PT-01 が高負荷時だけ落ちる揺れ。(c) 分からない言葉・確認しろ・要約の型・モデル指定の未対応分（設計書 `docs/spec-owner-correction-loop.md` 節 11）。
+- オーナー未回答: ラウンド2 の本番反映 y/n。今の効き目で足りるか、改修を続けるか。忘却の自動アーカイブ安全網欠如への対処方針（2026-07-19 から未回答）。
 ## 5. 制約と注意事項
 - 本番DBの書き換え（忘却バックフィルの遡及処理等）はオーナー承認必須。
 - 依存関係管理はpnpm専用。`preinstall`でnpm/yarn installを拒否する（`cfea62d`でpnpm共有ストアへ移行）。
@@ -37,5 +36,5 @@ source_worklog: handoff-20260720-a1-atomicity-b2b4-foundation-shipped.md
 - `src/cli/spec-update.ts`のunhandled rejectionで`npm test`がexit 1になる（実テスト失敗ではない）。
 
 ## 6. 根拠となる最近の記録
-- [handoff-20260720-a1-atomicity-b2b4-foundation-shipped](findings/handoff-20260720-a1-atomicity-b2b4-foundation-shipped.md)
 - [worklog-20261004-owner-correction-loop](findings/worklog-20261004-owner-correction-loop.md)
+- [handoff-20260720-a1-atomicity-b2b4-foundation-shipped](findings/handoff-20260720-a1-atomicity-b2b4-foundation-shipped.md)
