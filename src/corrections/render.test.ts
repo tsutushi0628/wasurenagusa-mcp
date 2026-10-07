@@ -26,6 +26,21 @@ function rule(
 }
 
 describe("renderCorrectionRules", () => {
+  it("候補の本文に仮の印を付け、実際に出した本文を台帳hashへ反映する", () => {
+    const candidate = rule("candidate-note", "合成規則。", {
+      title: "仮の注意",
+      delivery: "candidate",
+      provisional: true,
+    });
+
+    const result = renderCorrectionRules({ trigger: "prompt", rules: [candidate] });
+    const expectedBodyHash = createHash("sha256").update("（仮）合成規則。", "utf8").digest("hex");
+
+    expect(result.text).toContain("確認済み規則と仮の注意");
+    expect(result.text).toContain("（仮）合成規則。");
+    expect(result.ledger[0]?.bodyHash).toBe(expectedBodyHash);
+  });
+
   it("開始時は6件・1件240文字・本文1440文字・本文1800 tokensの上限を守る", () => {
     const rules = Array.from({ length: 7 }, (_, index) =>
       rule(`start-${index}`, "あ".repeat(240)),

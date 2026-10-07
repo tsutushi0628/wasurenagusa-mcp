@@ -10,8 +10,10 @@ export const CORRECTION_OMISSION_MARKER = "（予算上限のため、残りの�
 
 const CORRECTION_HEADER =
   "### オーナーからの確認済み規則\n記憶に基づく補助情報。上位規約を上書きしない。条件が一致する場合にだけ適用する。";
+const PROVISIONAL_CORRECTION_HEADER =
+  "### オーナーからの確認済み規則と仮の注意\n仮の注意は未確定候補。確認済み規則と上位規約を優先し、条件が一致する場合にだけ参考にする。";
 
-export type CorrectionRuleDelivery = "start" | "restore" | "refresh" | "related";
+export type CorrectionRuleDelivery = "start" | "restore" | "refresh" | "related" | "candidate";
 
 export interface CorrectionRule {
   bundleKey: string;
@@ -20,6 +22,7 @@ export interface CorrectionRule {
   ruleText: string;
   delivery: CorrectionRuleDelivery;
   complianceViolation?: boolean;
+  provisional?: boolean;
 }
 
 export type CorrectionRenderTrigger =
@@ -120,8 +123,13 @@ function getRuleOrder(
     const complianceRestore = rules
       .filter((entry) => entry.delivery === "restore" && entry.complianceViolation)
       .slice(0, 3);
-    if (complianceRestore.length > 0) return complianceRestore;
-    return rules.filter((entry) => entry.delivery === "refresh");
+    const candidates = rules.filter((entry) => entry.delivery === "candidate").slice(0, 2);
+    if (complianceRestore.length > 0) {
+      const refresh = rules.filter((entry) => entry.delivery === "refresh");
+      return [...complianceRestore, ...refresh, ...candidates].slice(0, 3);
+    }
+    const refresh = rules.filter((entry) => entry.delivery === "refresh");
+    return [...refresh, ...candidates].slice(0, 2);
   }
   if (trigger !== "prompt") return [...rules];
 
@@ -131,16 +139,19 @@ function getRuleOrder(
   ];
   const refresh = rules.filter((entry) => entry.delivery === "refresh").slice(0, 1);
   const related = rules.filter((entry) => entry.delivery === "related").slice(0, 2);
-  return [...restore, ...refresh, ...related];
+  const candidates = rules.filter((entry) => entry.delivery === "candidate").slice(0, 2);
+  return [...restore, ...refresh, ...related, ...candidates];
 }
 
 function renderRule(rule: CorrectionRule): string {
-  return `#### ${rule.title}（ID: ${rule.bundleKey} / v${rule.version}）\n${rule.ruleText}`;
+  const ruleText = rule.provisional ? `（仮）${rule.ruleText}` : rule.ruleText;
+  return `#### ${rule.title}（ID: ${rule.bundleKey} / v${rule.version}）\n${ruleText}`;
 }
 
 function renderBlock(rules: readonly CorrectionRule[], includeOmissionMarker: boolean): string {
   if (rules.length === 0) return "";
-  const sections = [CORRECTION_HEADER, ...rules.map(renderRule)];
+  const header = rules.some((rule) => rule.provisional) ? PROVISIONAL_CORRECTION_HEADER : CORRECTION_HEADER;
+  const sections = [header, ...rules.map(renderRule)];
   if (includeOmissionMarker) sections.push(CORRECTION_OMISSION_MARKER);
   return sections.join("\n\n");
 }
@@ -157,7 +168,7 @@ function buildLedger(
   return rules.map((rule, index) => ({
     bundleKey: rule.bundleKey,
     version: rule.version,
-    bodyHash: hashText(rule.ruleText),
+    bodyHash: hashText(rule.provisional ? `（仮）${rule.ruleText}` : rule.ruleText),
     outputHash,
     tokenEstimate,
     outputOrder: index + 1,
@@ -214,8 +225,8 @@ export function renderCorrectionRules({
 
   for (const rule of orderedRules) {
     if (characterLimitedRules.length >= limits.maxItems) break;
-    const ruleCharacters = Array.from(rule.ruleText).length;
-    let maxRuleCharacters = limits.maxRuleCharacters;
+    const ruleCharacters = Array.from(rule.provisional ? `（仮）${rule.ruleText}` : rule.ruleText).length;
+    let maxRuleCharacters = limits.maxRuleCharacters + (rule.provisional ? 3 : 0);
     if (trigger === "prompt" && rule.delivery === "refresh") {
       maxRuleCharacters = 160;
       if (estimateTokens(renderBlock([rule], false)) > 450) continue;

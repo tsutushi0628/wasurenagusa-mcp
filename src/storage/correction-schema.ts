@@ -3,6 +3,7 @@ import { CURRENT_SCHEMA_VERSION, getSchemaVersion } from "./schema.js";
 
 export const CORRECTION_SCHEMA_VERSION = 11;
 export const CORRECTION_COMPLIANCE_SCHEMA_VERSION = 12;
+export const CORRECTION_PRINCIPLES_SCHEMA_VERSION = 13;
 
 export const CORRECTION_COMPLIANCE_DDL = `
 CREATE TABLE owner_correction_violations (
@@ -19,6 +20,77 @@ CREATE TABLE owner_correction_violations (
 CREATE INDEX idx_owner_correction_violations_session
     ON owner_correction_violations(session_id_hash, human_ordinal, bundle_key, version);
 `;
+
+export const CORRECTION_PRINCIPLES_DDL = `
+CREATE TABLE owner_correction_principle_members (
+    principle_key TEXT NOT NULL,
+    member_key TEXT NOT NULL,
+    attached_at TEXT NOT NULL,
+    attach_source TEXT NOT NULL CHECK (attach_source IN ('cluster','later_attach')),
+    PRIMARY KEY (principle_key, member_key),
+    FOREIGN KEY (principle_key) REFERENCES owner_correction_bundles(bundle_key),
+    FOREIGN KEY (member_key) REFERENCES owner_correction_bundles(bundle_key)
+);
+CREATE INDEX idx_owner_correction_principle_members_member
+    ON owner_correction_principle_members(member_key, principle_key);
+
+CREATE TABLE owner_correction_compliance_checks (
+    session_id_hash TEXT NOT NULL,
+    human_ordinal INTEGER NOT NULL CHECK (human_ordinal >= 0),
+    bundle_key TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version > 0),
+    checker TEXT NOT NULL CHECK (checker IN ('tone','document_delivery','expression_policy')),
+    is_compliant INTEGER NOT NULL CHECK (is_compliant IN (0,1)),
+    checked_at TEXT NOT NULL,
+    PRIMARY KEY (session_id_hash, human_ordinal, bundle_key, version, checker),
+    FOREIGN KEY (bundle_key, version)
+        REFERENCES owner_correction_versions(bundle_key, version)
+);
+
+CREATE TABLE owner_correction_strength_events (
+    bundle_key TEXT NOT NULL,
+    at TEXT NOT NULL,
+    from_intensity INTEGER NOT NULL CHECK (from_intensity BETWEEN 1 AND 5),
+    to_intensity INTEGER NOT NULL CHECK (to_intensity BETWEEN 1 AND 5),
+    delta INTEGER NOT NULL,
+    reason TEXT NOT NULL CHECK (reason IN ('failure','idle','graduation_revoke','manual')),
+    basis TEXT NOT NULL,
+    PRIMARY KEY (bundle_key, at, reason),
+    FOREIGN KEY (bundle_key) REFERENCES owner_correction_bundles(bundle_key)
+);
+
+CREATE TABLE owner_correction_graduations (
+    bundle_key TEXT NOT NULL,
+    graduated_at TEXT NOT NULL,
+    proposal_hash TEXT NOT NULL,
+    revoked_at TEXT,
+    revoke_reason TEXT,
+    PRIMARY KEY (bundle_key, graduated_at),
+    FOREIGN KEY (bundle_key) REFERENCES owner_correction_bundles(bundle_key)
+);
+
+CREATE TABLE owner_correction_abstraction_runs (
+    run_id TEXT PRIMARY KEY,
+    ran_at TEXT NOT NULL,
+    mode TEXT NOT NULL CHECK (mode IN ('shadow','on')),
+    calls INTEGER NOT NULL CHECK (calls >= 0),
+    groups INTEGER NOT NULL CHECK (groups >= 0),
+    adopted INTEGER NOT NULL CHECK (adopted >= 0),
+    rejected_guard INTEGER NOT NULL CHECK (rejected_guard >= 0),
+    rejected_none INTEGER NOT NULL CHECK (rejected_none >= 0),
+    skipped_reason TEXT,
+    quota_before_pct REAL CHECK (quota_before_pct BETWEEN 0 AND 100),
+    quota_after_pct REAL CHECK (quota_after_pct BETWEEN 0 AND 100)
+);
+`;
+
+export const CORRECTION_PRINCIPLES_TABLE_NAMES = [
+  "owner_correction_principle_members",
+  "owner_correction_compliance_checks",
+  "owner_correction_strength_events",
+  "owner_correction_graduations",
+  "owner_correction_abstraction_runs",
+] as const;
 
 export const CORRECTION_SCHEMA_DDL = `
 CREATE TABLE owner_correction_events (

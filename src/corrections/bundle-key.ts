@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { normalizeCorrectionRequiredValuesKey } from "./rule-template.js";
 
 export type CorrectionBundleDescriptor = {
   topicKey: string;
@@ -13,6 +14,16 @@ export type CorrectionBundleDescriptor = {
 };
 
 const DICE_THRESHOLD = 0.85;
+const OPTIONAL_LIMITER_WORD = /(?<=[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー])(?:だけ|のみ|しか|ばかり)(?=\s*(?:を|は|が|も|に|で|と|へ|から|まで|表示|出|見せ|書|答|使|説明|確認|維持|保存|提示|照合|まとめ|作成|実行|["、。！？!?]|$))/gu;
+const TOTALITY_WORD = /(?:全部|すべて|全て|あらゆる|全件|全量|丸ごと)/u;
+
+function hasTotalityWord(descriptor: CorrectionBundleDescriptor): boolean {
+  return TOTALITY_WORD.test(descriptor.normalizedText.normalize("NFKC"));
+}
+
+export function removeOptionalLimiterWords(value: string): string {
+  return value.replace(OPTIONAL_LIMITER_WORD, "");
+}
 
 function normalizedCharacters(value: string): string[] {
   return Array.from(value.normalize("NFKC").replace(/\s+/gu, " ").trim());
@@ -24,6 +35,32 @@ function normalizedExactText(value: string): string {
     .replace(/[。．.!！?？、,]+$/u, "")
     .trim()
     .toLocaleLowerCase("en-US");
+}
+
+function normalizedBundleText(descriptor: CorrectionBundleDescriptor): string {
+  const normalized = descriptor.normalizedText.normalize("NFKC").replace(/\s+/gu, " ").trim();
+  if (descriptor.topicKey === "unknown" || descriptor.topicKey === "model_routing" || descriptor.plainCommandEligible) {
+    return normalized;
+  }
+  if (descriptor.conditionKey.split(";").includes("modifier:shika-negative")) return normalized;
+  return removeOptionalLimiterWords(normalized);
+}
+
+function normalizedRequiredValuesKey(descriptor: CorrectionBundleDescriptor): string | undefined {
+  if (typeof descriptor.requiredValuesKey !== "string") return undefined;
+  if (groupsByExpressionTarget(descriptor)) {
+    return normalizeCorrectionRequiredValuesKey(
+      descriptor.requiredValuesKey,
+      descriptor.topicKey,
+      descriptor.actionKey,
+      descriptor.polarity,
+    );
+  }
+  if (descriptor.topicKey === "unknown" || descriptor.topicKey === "model_routing"
+    || descriptor.conditionKey.split(";").includes("modifier:shika-negative")) {
+    return descriptor.requiredValuesKey;
+  }
+  return removeOptionalLimiterWords(descriptor.requiredValuesKey.normalize("NFKC"));
 }
 
 function bigramCounts(value: string): Map<string, number> {
@@ -58,7 +95,14 @@ function sameDimensions(left: CorrectionBundleDescriptor, right: CorrectionBundl
   return left.topicKey === right.topicKey
     && left.actionKey === right.actionKey
     && left.polarity === right.polarity
-    && left.conditionKey === right.conditionKey;
+    && left.conditionKey === right.conditionKey
+    && hasTotalityWord(left) === hasTotalityWord(right);
+}
+
+function groupsByExpressionTarget(descriptor: CorrectionBundleDescriptor): boolean {
+  return descriptor.topicKey === "expression_policy"
+    && descriptor.actionKey === "use_terms"
+    && descriptor.polarity === "negative";
 }
 
 export function haveSameBundleKey(
@@ -66,13 +110,17 @@ export function haveSameBundleKey(
   right: CorrectionBundleDescriptor,
 ): boolean {
   if (!sameDimensions(left, right)) return false;
+  if (groupsByExpressionTarget(left)) {
+    return normalizedRequiredValuesKey(left) !== undefined
+      && normalizedRequiredValuesKey(left) === normalizedRequiredValuesKey(right);
+  }
   if (left.plainCommandEligible || right.plainCommandEligible) {
     if (!left.plainCommandEligible || !right.plainCommandEligible) return false;
     if (left.topicKey === "unknown" || left.topicKey === "model_routing") {
       return normalizedExactText(left.normalizedText) === normalizedExactText(right.normalizedText);
     }
-    return typeof left.requiredValuesKey === "string"
-      && left.requiredValuesKey === right.requiredValuesKey;
+    return normalizedRequiredValuesKey(left) !== undefined
+      && normalizedRequiredValuesKey(left) === normalizedRequiredValuesKey(right);
   }
   if (left.topicKey === "unknown" || right.topicKey === "unknown") {
     return normalizedExactText(left.normalizedText) === normalizedExactText(right.normalizedText);
@@ -80,7 +128,7 @@ export function haveSameBundleKey(
   if (!left.conditionKnown || !right.conditionKnown) {
     return normalizedExactText(left.normalizedText) === normalizedExactText(right.normalizedText);
   }
-  return diceCoefficient(left.normalizedText, right.normalizedText) >= DICE_THRESHOLD;
+  return diceCoefficient(normalizedBundleText(left), normalizedBundleText(right)) >= DICE_THRESHOLD;
 }
 
 function hashKey(value: string): string {
@@ -95,9 +143,15 @@ export function createBundleKey(
   if (matching?.bundleKey) return matching.bundleKey;
   let normalizedText = candidate.topicKey === "unknown" || candidate.topicKey === "model_routing"
     ? normalizedExactText(candidate.normalizedText)
-    : candidate.normalizedText.normalize("NFKC").replace(/\s+/gu, " ").trim();
-  if (candidate.plainCommandEligible && candidate.topicKey !== "unknown" && candidate.topicKey !== "model_routing") {
-    normalizedText = `plain-values:${candidate.requiredValuesKey ?? ""}`;
+    : normalizedBundleText(candidate);
+  const expressionTargetKey = groupsByExpressionTarget(candidate) ? normalizedRequiredValuesKey(candidate) : undefined;
+  if (expressionTargetKey !== undefined) {
+    normalizedText = `expression-target:${expressionTargetKey}`;
+  } else if (candidate.plainCommandEligible && candidate.topicKey !== "unknown" && candidate.topicKey !== "model_routing") {
+    normalizedText = `plain-values:${normalizedRequiredValuesKey(candidate) ?? ""}`;
+  }
+  if (candidate.topicKey !== "unknown" && candidate.topicKey !== "model_routing" && hasTotalityWord(candidate)) {
+    normalizedText = `totality:all:${normalizedText}`;
   }
   const identity = [
     candidate.topicKey,

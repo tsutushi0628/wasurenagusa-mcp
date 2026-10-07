@@ -9,6 +9,9 @@ import { computeContentHash } from "./content-hash.js";
 import {
   CORRECTION_COMPLIANCE_DDL,
   CORRECTION_COMPLIANCE_SCHEMA_VERSION,
+  CORRECTION_PRINCIPLES_DDL,
+  CORRECTION_PRINCIPLES_SCHEMA_VERSION,
+  CORRECTION_PRINCIPLES_TABLE_NAMES,
   CORRECTION_SCHEMA_VERSION,
   CORRECTION_TABLE_NAMES,
   initializeCorrectionSchema,
@@ -331,7 +334,7 @@ export function migrateV4ToV5(db: Database.Database): void {
 }
 
 /**
- * 移行前バックアップ（migrateV5ToV6専用）。
+ * 同期移行前バックアップ。
  *
  * scripts/backup-store.ts の全量バックアップ（better-sqlite3のオンラインbackup() API）は
  * Promise を返す非同期APIのため、同期の migrate*系関数群からは呼べない
@@ -343,7 +346,7 @@ export function migrateV4ToV5(db: Database.Database): void {
  * 反映させてから、そのファイルを同期的にコピーする。コピー失敗（ディレクトリ作成不能等）は
  * そのままthrowし、呼び出し元は後続のALTER TABLEへ進まない（fail-loud、移行中止）。
  */
-function backupBeforeMigration(db: Database.Database, memoryPath: string, prefix: string): void {
+export function backupBeforeMigration(db: Database.Database, memoryPath: string, prefix: string): void {
   const dbFilePath = db.name;
   if (!dbFilePath || dbFilePath === ":memory:") {
     // インメモリDB（テストの一部）はファイルバックアップ対象外
@@ -650,6 +653,51 @@ export function migrateV11ToV12(db: Database.Database): void {
     ).run(CORRECTION_COMPLIANCE_SCHEMA_VERSION);
   });
   transaction();
+}
+
+export function migrateV12ToV13(
+  db: Database.Database,
+  apply = true,
+): { schemaVersion: number; ddlCount: number } {
+  const schemaVersion = getSchemaVersion(db);
+  if (schemaVersion !== CORRECTION_COMPLIANCE_SCHEMA_VERSION) {
+    throw new Error("owner correction principles schema requires schema version 12");
+  }
+
+  const requiredTables = [...CORRECTION_TABLE_NAMES, "owner_correction_violations"];
+  const requiredPlaceholders = requiredTables.map(() => "?").join(", ");
+  const requiredTableCount = db.prepare(
+    "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name IN (" +
+      requiredPlaceholders + ")",
+  ).get(...requiredTables) as { count: number };
+  if (requiredTableCount.count !== requiredTables.length) {
+    throw new Error("schema version 12 is missing owner correction tables");
+  }
+
+  const targetPlaceholders = CORRECTION_PRINCIPLES_TABLE_NAMES.map(() => "?").join(", ");
+  const targetTableCount = db.prepare(
+    "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name IN (" +
+      targetPlaceholders + ")",
+  ).get(...CORRECTION_PRINCIPLES_TABLE_NAMES) as { count: number };
+  const memberIndex = db.prepare(
+    "SELECT 1 AS present FROM sqlite_master WHERE type = 'index' AND name = ?",
+  ).get("idx_owner_correction_principle_members_member");
+  if (targetTableCount.count !== 0 || memberIndex) {
+    throw new Error("schema version 12 has partial owner correction principles tables");
+  }
+
+  const ddlCount = CORRECTION_PRINCIPLES_TABLE_NAMES.length + 1;
+  if (!apply) return { schemaVersion, ddlCount };
+
+  db.pragma("foreign_keys = ON");
+  const transaction = db.transaction(() => {
+    db.exec(CORRECTION_PRINCIPLES_DDL);
+    db.prepare(
+      "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, datetime('now'))",
+    ).run(CORRECTION_PRINCIPLES_SCHEMA_VERSION);
+  });
+  transaction();
+  return { schemaVersion: getSchemaVersion(db), ddlCount };
 }
 
 /**

@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { copyFile as copyFilePromise } from "node:fs/promises";
 import { Writable } from "node:stream";
@@ -50,6 +51,71 @@ describe("会話記録アーカイブ", () => {
 
     expect(packageJson.files).toContain("scripts/maintenance/archive-transcripts.mjs");
     expect(packageJson.files).toContain("scripts/replay/lib/session-project.mjs");
+  });
+
+  it("dry-runはコピー予定件数をproject別に表示し、archiveを作らない", () => {
+    const scratch = createScratchDirectory();
+    const projectDirectory = join(scratch, "wasurenagusa-mcp");
+    const homeDirectory = join(scratch, "home");
+    const sourceDirectory = join(scratch, "transcripts");
+    const firebaseProject = join(homeDirectory, "projects", "firebase-kit");
+    const writtenPath = join(firebaseProject, "synthetic.ts");
+    mkdirSync(projectDirectory, { recursive: true });
+    mkdirSync(sourceDirectory, { recursive: true });
+    mkdirSync(firebaseProject, { recursive: true });
+    writeFileSync(writtenPath, "synthetic project fixture\n");
+    writeFileSync(join(sourceDirectory, "firebase-session.jsonl"), JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", name: "Write", input: { file_path: writtenPath } }] },
+    }) + "\n");
+    writeFileSync(join(sourceDirectory, "fallback-session.jsonl"), JSON.stringify({
+      type: "user",
+      message: { content: [{ type: "text", text: "synthetic transcript fixture" }] },
+    }) + "\n");
+
+    const result = spawnSync(process.execPath, [
+      join(process.cwd(), "scripts/maintenance/archive-transcripts.mjs"),
+      "--project-root",
+      projectDirectory,
+      "--source",
+      sourceDirectory,
+      "--dry-run",
+    ], {
+      encoding: "utf8",
+      env: { ...process.env, HOME: homeDirectory },
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("project=firebase-kit plannedCopies=1");
+    expect(result.stdout).toContain("project=wasurenagusa-mcp plannedCopies=1");
+    expect(result.stdout).not.toContain("synthetic transcript fixture");
+    expect(() => statSync(join(projectDirectory, ".wasurenagusa"))).toThrow();
+  });
+
+  it("CLI失敗時は合成fixtureのErrorメッセージとstackを表示する", () => {
+    const scratch = createScratchDirectory();
+    const projectDirectory = join(scratch, "wasurenagusa-mcp");
+    const sourceDirectory = join(scratch, "transcripts");
+    const destinationDirectory = join(projectDirectory, ".wasurenagusa", "transcripts-archive", "wasurenagusa-mcp");
+    mkdirSync(sourceDirectory, { recursive: true });
+    mkdirSync(join(destinationDirectory, "session.jsonl"), { recursive: true });
+    writeFileSync(join(sourceDirectory, "session.jsonl"), "synthetic transcript fixture\n");
+
+    const result = spawnSync(process.execPath, [
+      join(process.cwd(), "scripts/maintenance/archive-transcripts.mjs"),
+      "--project-root",
+      projectDirectory,
+      "--source",
+      sourceDirectory,
+      "--dry-run",
+    ], {
+      encoding: "utf8",
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("archive target is not a regular file");
+    expect(result.stderr).toContain("at readDestinationStat");
+    expect(result.stderr).not.toContain("synthetic transcript fixture");
   });
 
   it("コピー中に原本が変わったファイルを飛ばし、他フォルダとindex更新を続ける", async () => {
@@ -223,7 +289,9 @@ describe("会話記録アーカイブ", () => {
     const dryRunOutput = formatAllArchiveSummary(dryRun, true);
     expect(dryRunOutput).toContain("launchDir=firebase-kit plannedCopies=2 copied=0");
     expect(dryRunOutput).toContain("project=firebase-kit sessions=1");
+    expect(dryRunOutput).toContain("project=firebase-kit sessions=1 plannedCopies=1");
     expect(dryRunOutput).toContain("project=wasurenagusa-mcp sessions=1");
+    expect(dryRunOutput).toContain("project=wasurenagusa-mcp sessions=1 plannedCopies=1");
     expect(dryRunOutput).toContain("launchProject=firebase-kit project=firebase-kit sessions=1");
     expect(dryRunOutput).toContain("launchProject=firebase-kit project=wasurenagusa-mcp sessions=1");
     expect(dryRunOutput).toContain("project=legacy-launch sessions=1");
@@ -316,7 +384,12 @@ describe("会話記録アーカイブ", () => {
 
     const result = await archiveTranscripts({ projectDirectory, sourceDirectory, dryRun: true });
 
-    expect(result).toEqual({ plannedCount: 0, copiedCount: 0, skippedCount: 0 });
+    expect(result).toMatchObject({
+      plannedCount: 0,
+      copiedCount: 0,
+      skippedCount: 0,
+      plannedProjectCounts: { [basename(projectDirectory)]: 0 },
+    });
     expect(() => statSync(join(projectDirectory, ".wasurenagusa"))).toThrow();
   });
 

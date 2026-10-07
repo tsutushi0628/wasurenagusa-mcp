@@ -228,7 +228,7 @@ describe("analyze Stop correction recovery", () => {
     expect(readCorrectionState()).toMatchObject({
       session: { human_ordinal: 2 },
       bundles: [{ bundle_key: expect.stringMatching(/^oc:v2:/u), rule_text: "毎回、質問に回答する", status: "confirmed" }],
-      evidence: [{ detector_version: "owner-correction-v3", conditions: expect.stringContaining('"version":2') }],
+      evidence: [{ detector_version: "owner-correction-v4", conditions: expect.stringContaining('"version":2') }],
       memories: [{ content: "毎回、質問に回答する" }],
     });
   });
@@ -292,7 +292,7 @@ describe("analyze Stop correction recovery", () => {
 
     expect(readCorrectionState()).toMatchObject({
       bundles: [{ rule_text: "オーナーへの応答は常体で書く", topic_key: "tone", status: "confirmed" }],
-      evidence: [{ detector_version: "owner-correction-v3" }],
+      evidence: [{ detector_version: "owner-correction-v4" }],
       pending: [{ matched_event_id: expect.any(String) }],
     });
   });
@@ -381,6 +381,49 @@ describe("analyze Stop correction recovery", () => {
     }
     expect(stdoutChunks.join("")).toContain(termsRule.bundle_key);
     expect(stdoutChunks.join("")).not.toContain(answerRule.bundle_key);
+  });
+
+  it("schema v12相当のDBでも合成pr規則IDの取消を反映する", async () => {
+    const principleKey = `pr:v1:${"d".repeat(64)}`;
+    const ruleText = "合成原則";
+    const createdAt = "2026-10-03T00:00:01.000Z";
+    const database = new Database(join(memoryPath, "memory.db"));
+    database.exec(`
+      DROP TABLE IF EXISTS owner_correction_principle_members;
+      DROP TABLE IF EXISTS owner_correction_strength_events;
+      DROP TABLE IF EXISTS owner_correction_graduations;
+      DROP TABLE IF EXISTS owner_correction_abstraction_runs;
+    `);
+    database.prepare(`
+      INSERT INTO owner_correction_bundles (
+        bundle_key, rule_text, topic_key, polarity, condition_key, project, scope, visibility,
+        status, intensity, occurrence_count, session_count, first_seen_at, last_seen_at, expires_at,
+        lifetime_kind, continuation_basis, confirmed_at, version, counterevidence_event_id,
+        last_confirmation_asked_at, confirmation_state
+      ) VALUES (?, ?, 'principle', 'negative', 'general', 'owner', 'owner', 'owner',
+        'confirmed', 1, 2, 2, ?, ?, NULL, 'inferred', 'principle_abstraction', ?, 1,
+        NULL, NULL, 'none')
+    `).run(principleKey, ruleText, createdAt, createdAt, createdAt);
+    database.prepare(`
+      INSERT INTO owner_correction_versions (
+        bundle_key, version, rule_text, body_hash, conditions, condition_key, polarity,
+        visibility, status, confirmed_at, expires_at, lifetime_kind, continuation_basis,
+        evidence_event_ids, effective_from, change_reason
+      ) VALUES (?, 1, ?, 'synthetic-hash', '{}', 'general', 'negative', 'owner',
+        'confirmed', ?, NULL, 'inferred', 'principle_abstraction', '[]', ?, 'synthetic')
+    `).run(principleKey, ruleText, createdAt, createdAt);
+    database.close();
+
+    const sessionId = "cancel-principle-session";
+    const transcript = writeTranscript([
+      user("human-pr-cancel", `規則ID: ${principleKey} を取り消して`, createdAt, sessionId),
+      assistant("assistant-pr-cancel", "取り消しました。", "2026-10-03T00:00:02.000Z", sessionId),
+    ]);
+    attachStdin(transcript, { session_id: sessionId });
+    await runMain();
+
+    expect(readCorrectionState().bundles.find((bundle) => bundle.bundle_key === principleKey))
+      .toMatchObject({ status: "rejected" });
   });
 
   it("WASURENAGUSA_CORRECTION_LOOP未設定のv10でも開始索引を出す", async () => {
@@ -697,7 +740,7 @@ describe("analyze Stop correction recovery", () => {
       session: { human_ordinal: 1 },
       events: [{ source_kind: "queued_command" }],
       bundles: [{ bundle_key: expect.stringMatching(/^oc:v2:/u), rule_text: "毎回、質問に回答する", status: "confirmed" }],
-      evidence: [{ detector_version: "owner-correction-v3", conditions: expect.stringContaining('"version":2') }],
+      evidence: [{ detector_version: "owner-correction-v4", conditions: expect.stringContaining('"version":2') }],
       pending: [{ matched_event_id: expect.any(String) }],
     });
   });

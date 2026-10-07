@@ -59,7 +59,11 @@ const entryArb: fc.Arbitrary<PlannedEntry> = fc.record({
   resurrectionAttempts: fc.integer({ min: 0, max: 2 }),
 });
 
-const sequenceArb = fc.array(entryArb, { minLength: 1, maxLength: 6 });
+const sequenceArb = fc.uniqueArray(entryArb, {
+  selector: (entry) => entry.suffix,
+  minLength: 1,
+  maxLength: 6,
+});
 
 /** テスト用フィクスチャ一式。runOne() 呼び出しごとに使い捨てのSQLite DBを作る。 */
 function withFreshStorage<T>(fn: (storage: SQLiteStorage, rawDb: Database.Database) => T): T {

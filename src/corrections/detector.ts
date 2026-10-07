@@ -1,12 +1,20 @@
 import { createHash } from "node:crypto";
-import { createBundleKey, haveSameBundleKey, type CorrectionBundleDescriptor } from "./bundle-key.js";
+import {
+  createBundleKey,
+  haveSameBundleKey,
+  removeOptionalLimiterWords,
+  type CorrectionBundleDescriptor,
+} from "./bundle-key.js";
 import { removeQuotedAndInjectedContent, type OwnerEvent } from "./events.js";
 import {
   correctionConditionKey,
   correctionRequiredValuesKey,
   hasCorrectionPredicate,
   hasUnrepresentedRuleMeaning,
+  hasGenericNegativeCommand,
+  isAttributiveExpressionModifier,
   isConsultationQuestion,
+  matchExpressionTarget,
   renderCorrectionRule,
   renderTypedCorrectionRule,
   type CorrectionRuleInput,
@@ -45,7 +53,7 @@ type TopicMatch = {
   actionKnown: boolean;
 };
 
-const REPEAT_CUE = /(?:再度|再び|繰り返し|前にも|以前にも|前回|(?:前|以前)(?:にも|も|に).{0,12}(?:言|伝|指示))/u;
+const REPEAT_CUE = /(?:再度|再び|繰り返し|前にも|以前にも|前回|(?:前|以前)(?:にも|も|に).{0,12}(?:言|伝|指示)|だから)/u;
 // 「また」は「もう一つ」「または」の意味でも使うので、語の頭にあり、後ろに今起きている状態・過去の述語が続くときだけ反復とみなす
 const REPEAT_MATA = /(?:^|[^\p{Script=Hiragana}])また(?![はいねがぐげご])[^。！？!?]{0,24}?(?:い|た|だ|てる|ている|てた|ていた|ない|違う)(?:ので|から|じゃん|よ|ぞ|ね|って|[。、,！!？?\s]|$)/u;
 const PAST_ACTION = /(?:した|していた|している|なった|使った|出した|変えた|保存した|言った|伝えた)/u;
@@ -53,10 +61,11 @@ const MISMATCH = /(?:違う|誤り|無視|守っていない)/u;
 const TECHNICAL_CAUSE = /(?:原因|エラー|障害|例外|バグ|不具合|失敗)/iu;
 const CONTINUING = /(?:今後|毎回|常に|次から)/u;
 const DEADLINE = /(?:今回だけ|この作業だけ|今日だけ|一時的)/u;
-const UNKNOWN_CONDITION = /(?:場合|とき|時|なら|以外|に限り|限り|条件|だけ|のみ|ただし|除く|除外)/u;
+const UNKNOWN_CONDITION = /(?:場合|とき|時|なら|以外|に限り|限り|条件|だけ|のみ|しか|ばかり|ただし|除く|除外)/u;
 const KNOWN_NUMERIC_CONDITION = /\d+\s*(?:字|文字|件|回|分|時間|日|%|％)\s*(?:以内|以下|以上|未満|まで)/u;
 const NUMERIC_CONDITIONS = /\d+\s*(?:字|文字|件|回|分|時間|日|%|％)\s*(?:以内|以下|以上|未満|まで)/gu;
 const KNOWN_CONDITION_SCOPE = /(?:今回だけ|この作業だけ|今日だけ|一時的)/gu;
+const NEGATIVE_SHIKA_EMPHASIS = /しか[^。！？!?]{0,40}?(?:なかった|ませんでした|ません|ない|ぬ|ず)/u;
 const THIRD_PARTY = /(?:開発者|同僚|第三者|別の人|他の人|ほかの人|利用者|ユーザー|相手)(?:に(?:は|も)?|が|は)/u;
 const EXAMPLE_CONTEXT = /(?:否定例|技術サンプル|コード例|禁止形)/u;
 const BROAD_ACTION = /(?:答え|回答して|返事して|待(?:つ|って)|止(?:まる|め|めて)|再開|出(?:す|して|せ)|示(?:す|して|せ)|表示して|見せ|使(?:う|って|え)|説明して|置換して|言い換|避け|控え|制限して|解除して|まとめて|短くして|維持して|再利用して|変更して|変えて|確認して|検証して|照合して|保存して|配置して|保持して|保管して|担当して|任せて|委譲して|割り当て|回す|実行|付(?:け|けて)|書(?:く|いて)|作成して|対応して)/u;
@@ -91,8 +100,18 @@ const NEGATIVE_ACTION = /(?:ないで|しない|さない|わない|するな|(?
 const NON_DIRECTIVE_STATEMENT = /(?:予定|つもり|計画)(?:です|だ|である|している|しています)?[。！？!?]*$/u;
 const SELF_ACTION_SUBJECT = /(?:私は|私が|自分は|自分が)/u;
 const EXPLICIT_COMMAND_ENDING = /(?:て|で|ください|下さい|しろ|せよ|なさい|するな|しないで|ないで|やめ(?:て|ろ)|(?:使|出|示|提示|表示|見せ)(?:うな|すな)|使う|答えろ|出せ|示せ|止まれ|使え|こと)(?:[。！？!?])?$/u;
+const R3_PATTERN = /(?:変な|きしょい|キモい|気色悪い|おまえが定義した|俺のわからない|わからない)(?:言葉|日本語|表現|呼称)|って(?:何|なに)\?|ってなに|いみ(?:が)?わからん|意味(?:が)?わからん|意味不明|主語を(?:はぶくな|つけ)/u;
 
 type RouteAssignment = { key: string; model: string };
+type ExpressionTarget = { term?: string; modifierUnparsed: boolean };
+
+function hasNegativeAction(sentence: string): boolean {
+  return NEGATIVE_ACTION.test(sentence) || hasGenericNegativeCommand(sentence);
+}
+
+function hasExplicitCommandEnding(sentence: string): boolean {
+  return EXPLICIT_COMMAND_ENDING.test(sentence) || hasGenericNegativeCommand(sentence);
+}
 
 function routeAssignments(sentence: string): RouteAssignment[] | null {
   const tasks = ROUTE_TASKS.flatMap(({ key, pattern }) => {
@@ -164,11 +183,27 @@ function trimCommandPrefix(value: string): string {
   return value.replace(/^(?:(?:今後|毎回|常に|次から)は?|今回だけは?|この作業だけは?|今日だけは?)\s*/u, "").trim();
 }
 
+function extractExpressionTarget(sentence: string, preserveModifier: boolean): ExpressionTarget {
+  const targetMatch = matchExpressionTarget(sentence);
+  if (!targetMatch) return { modifierUnparsed: false };
+  if (!preserveModifier) return { term: targetMatch[0], modifierUnparsed: false };
+  const targetIndex = targetMatch.index ?? 0;
+  let modifier = sentence.slice(0, targetIndex).replace(/^.*[、,。！？!?]/u, "");
+  modifier = modifier.replace(/^.*(?:今後|毎回|常に|次から|今回だけ|この作業だけ|今日だけ)(?:は|、)?/u, "");
+  modifier = modifier.replace(/^[、,]\s*/u, "").trim();
+  if (!modifier) return { term: targetMatch[0], modifierUnparsed: false };
+  const term = `${modifier}${targetMatch[0]}`;
+  if (Array.from(term).length > 160) return { modifierUnparsed: true };
+  if (!isAttributiveExpressionModifier(modifier)) return { term, modifierUnparsed: true };
+  return { term, modifierUnparsed: false };
+}
+
 function requiredValues(
   sentence: string,
   topic: TopicMatch,
   toneException: boolean,
   routeAssignment?: RouteAssignment,
+  expressionTarget?: ExpressionTarget,
 ): Record<string, string> {
   const values: Record<string, string> = {};
   if (topic.topicKey === "tone") {
@@ -205,8 +240,8 @@ function requiredValues(
   }
 
   if (topic.topicKey === "expression_policy") {
-    const term = sentence.match(/略号|略語|比喩|用語|言葉/u)?.[0];
-    if (term) values.term = term;
+    const target = expressionTarget ?? { term: matchExpressionTarget(sentence)?.[0], modifierUnparsed: false };
+    if (target.term) values.term = target.term;
     const replacement = sentence.match(/([^、。！？!?]+?)を([^、。！？!?]+?)に(?:置換|置き換|言い換)/u);
     if (replacement) {
       const sourceExpression = trimCommandPrefix(replacement[1]);
@@ -395,7 +430,7 @@ function matchesTopic(sentence: string): TopicMatch | null {
     };
   }
 
-  if (BROAD_ACTION.test(sentence)) {
+  if (BROAD_ACTION.test(sentence) || hasGenericNegativeCommand(sentence)) {
     return { topicKey: "unknown", targetKey: "unknown", actionKey: "unknown", actionKnown: true };
   }
   return null;
@@ -417,14 +452,18 @@ function conditionDescriptor(sentence: string, topicKey: string): {
     const limit = `limit:${numericCondition}`;
     if (!conditionParts.includes(limit)) conditionParts.push(limit);
   }
-  const unrecognizedConditionText = sentence
+  const withoutNegativeShika = sentence.replace(NEGATIVE_SHIKA_EMPHASIS, " ");
+  if (withoutNegativeShika !== sentence) conditionParts.push("modifier:shika-negative");
+  const unrecognizedConditionText = withoutNegativeShika
     .replace(KNOWN_CONDITION_SCOPE, " ")
-    .replace(NUMERIC_CONDITIONS, " ");
+    .replace(NUMERIC_CONDITIONS, " ")
+    .replace(/\s+/gu, " ");
+  const parsedConditionText = removeOptionalLimiterWords(unrecognizedConditionText);
   NUMERIC_CONDITIONS.lastIndex = 0;
-  if (UNKNOWN_CONDITION.test(unrecognizedConditionText)) {
+  if (UNKNOWN_CONDITION.test(parsedConditionText)) {
     conditionKnown = false;
-    const conditionText = unrecognizedConditionText
-      .match(/[^、。！？!?]*(?:場合|とき|時|なら|以外|に限り|限り|条件|だけ|のみ|ただし|除く|除外)[^、。！？!?]*/u)?.[0]?.trim();
+    const conditionText = parsedConditionText
+      .match(/[^、。！？!?]*(?:場合|とき|時|なら|以外|に限り|限り|条件|だけ|のみ|しか|ばかり|ただし|除く|除外)[^、。！？!?]*/u)?.[0]?.trim();
     conditionParts.push(`unparsed:${conditionText ?? "condition"}`);
   }
 
@@ -453,6 +492,93 @@ function hasPoliteEnding(value: string): boolean {
   return sentences.some((sentence) => /(?:です|ます|でした|ました|ません)$/u.test(sentence));
 }
 
+function detectUnclearReaction(
+  sentence: string,
+  context: DetectionContext,
+  event: OwnerEvent,
+): CorrectionCandidate | null {
+  const previousAssistantText = context.previousAssistantText?.trim() ?? "";
+  const sameSession = event.sessionId === undefined || context.previousAssistantSessionId === undefined
+    || event.sessionId === context.previousAssistantSessionId;
+  if (!sameSession) return null;
+
+  const normalizedReactionText = sentence.replace(/って何だ(?=[?？])/gu, "って何").replace(/？/gu, "?");
+  const match = R3_PATTERN.exec(normalizedReactionText);
+  if (!match) return null;
+  const matchedText = match[0];
+  const isUnclearReaction = matchedText.startsWith("って")
+    || matchedText.includes("わからん")
+    || matchedText === "意味不明";
+  if (!isUnclearReaction) return null;
+
+  if (matchedText === "意味不明") {
+    const isStandalone = normalizedReactionText.replace(/[?]$/u, "").trim() === "意味不明"
+      && event.text.trim() === sentence.trim();
+    const isShortQuestion = Array.from(event.text).length < 40 && /[?？]/u.test(sentence);
+    if (!isStandalone && !isShortQuestion) return null;
+  }
+
+  if (!previousAssistantText) {
+    const segmentStart = event.text.indexOf(sentence);
+    if (segmentStart < 0 || segmentStart + match.index >= 120) return null;
+  }
+
+  if (matchedText.startsWith("って")) {
+    const subject = sentence.slice(0, match.index).trim();
+    const hasUnclearFollowup = /わかりづらい/u.test(event.text);
+    if (subject && !/^(?:それ|これ|あれ)$/u.test(subject) && !hasUnclearFollowup) return null;
+  }
+
+  const condition = conditionDescriptor(sentence, "unknown");
+  const ruleInput: CorrectionRuleInput = {
+    version: 2,
+    topicKey: "unknown",
+    actionKey: "unclear_reaction",
+    polarity: "negative",
+    requiredValues: {},
+    conditions: condition.conditions,
+    boundaryKey: condition.conditionKey,
+    lifetimeKind: condition.lifetimeKind,
+    continuationBasis: "inferred-repeat",
+    directive: false,
+    plainCommandEligible: false,
+    question: /[?？]|って(?:何|なに)/u.test(sentence),
+    toneException: false,
+    conditionKnown: condition.conditionKnown,
+    commandText: "",
+  };
+  const normalizedText = sentence.normalize("NFKC").replace(/\s+/gu, " ").trim();
+  const descriptor: CorrectionBundleDescriptor = {
+    topicKey: "unknown",
+    actionKey: "unclear_reaction",
+    polarity: "negative",
+    conditionKey: correctionConditionKey(ruleInput),
+    normalizedText,
+    conditionKnown: condition.conditionKnown,
+    plainCommandEligible: false,
+    requiredValuesKey: correctionRequiredValuesKey(ruleInput),
+  };
+
+  return {
+    ...descriptor,
+    score: 2,
+    status: "candidate",
+    source: "utterance_detection",
+    ruleText: "",
+    ruleInput,
+    actionKnown: false,
+    lifetimeKind: condition.lifetimeKind,
+    sourceType: event.sourceType,
+    ...(event.sessionId ? { sessionId: event.sessionId } : {}),
+    ...(event.uuid ? { eventUuid: event.uuid } : {}),
+    ...(event.position !== undefined ? { sourcePosition: event.position } : {}),
+    ...(event.order !== undefined ? { eventOrder: event.order } : {}),
+    ...(event.availableOrder !== undefined ? { availableOrder: event.availableOrder } : {}),
+    ...(event.availableAt !== undefined ? { availableAt: event.availableAt } : {}),
+    ...(event.transcriptByteOffset !== undefined ? { transcriptByteOffset: event.transcriptByteOffset } : {}),
+  };
+}
+
 function scoreSentence(sentence: string, topic: TopicMatch, context: DetectionContext, allowB9ToneException: boolean): {
   score: number;
   hasCorrectionSignal: boolean;
@@ -474,10 +600,10 @@ function scoreSentence(sentence: string, topic: TopicMatch, context: DetectionCo
   const pastActionScore = hasPastQuestion || hasMismatch ? 2 : 0;
   const continuing = CONTINUING.test(sentence) && !DEADLINE.test(sentence);
   const continuingScore = continuing ? 2 : 0;
-  const hasContinuingCommand = continuing && EXPLICIT_COMMAND_ENDING.test(sentence)
+  const hasContinuingCommand = continuing && hasExplicitCommandEnding(sentence)
     && !NON_DIRECTIVE_STATEMENT.test(sentence)
     && !SELF_ACTION_SUBJECT.test(sentence);
-  const actionScore = topic.actionKnown || NEGATIVE_ACTION.test(sentence) ? 2 : 0;
+  const actionScore = topic.actionKnown || hasNegativeAction(sentence) ? 2 : 0;
   const previousText = context.previousAssistantText ?? "";
   const previousAction = `${previousText} ${context.previousAssistantToolName ?? ""}`;
   const targetPatterns: Record<string, RegExp> = {
@@ -548,6 +674,8 @@ function detectSentence(
     || /^(?:という例|例として|引用|引用文|過去の指示)/u.test(sentence)
     || NON_DIRECTIVE_STATEMENT.test(sentence)
     || SELF_ACTION_SUBJECT.test(sentence)) return null;
+  const unclearReaction = detectUnclearReaction(sentence, context, event);
+  if (unclearReaction) return unclearReaction;
   const topic = matchesTopic(sentence);
   if (!topic) return null;
   const toneQuestion = topic.topicKey === "tone"
@@ -565,33 +693,37 @@ function detectSentence(
     && condition.conditionKnown
     && condition.lifetimeKind !== "task"
     && hasPoliteEnding(sessionContext.previousAssistantText ?? "");
-  const hasBehavior = topic.actionKnown || toneQuestion || BROAD_ACTION.test(sentence) || GENERAL_VERB.test(sentence) || NEGATIVE_ACTION.test(sentence);
+  const hasBehavior = topic.actionKnown || toneQuestion || BROAD_ACTION.test(sentence) || GENERAL_VERB.test(sentence)
+    || hasNegativeAction(sentence);
   if (!hasBehavior) return null;
 
   const scored = scoreSentence(sentence, topic, sessionContext, specialTone);
-  const negative = NEGATIVE_ACTION.test(sentence);
+  const negative = hasNegativeAction(sentence);
   const tonePolarity = explicitTonePolarity(sentence, topic);
   const polarity = specialTone ? "positive" : tonePolarity ?? (negative ? "negative" : "positive");
   const actionKnown = topic.actionKnown || specialTone;
   const actionKey = specialTone ? "use_casual" : topic.actionKey;
   const topicForRule = specialTone ? { ...topic, actionKey: "use_casual" } : topic;
+  const extractedExpressionTarget = topicForRule.topicKey === "expression_policy"
+    ? extractExpressionTarget(sentence, actionKey === "use_terms" && polarity === "negative")
+    : { modifierUnparsed: false };
   const ruleConditionKnown = condition.conditionKnown && !event.hasSensitiveValue && !event.isPasteCandidate;
   const looksLikeQuestion = /[?？]|(?:ですか|でしょうか|べきか|相談|どう思う|したい)/u.test(sentence);
   const normalizedCommand = sentence.normalize("NFKC").replace(/\s+/gu, " ").trim();
-  const hasCorrectionMark = scored.hasCorrectionSignal || NEGATIVE_ACTION.test(sentence) || scored.hasContinuingCommand;
-  const directive = (hasCorrectionMark && EXPLICIT_COMMAND_ENDING.test(sentence) && hasCorrectionPredicate(sentence)
+  const hasCorrectionMark = scored.hasCorrectionSignal || hasNegativeAction(sentence) || scored.hasContinuingCommand;
+  const directive = (hasCorrectionMark && hasExplicitCommandEnding(sentence) && hasCorrectionPredicate(sentence)
     && !isConsultationQuestion(normalizedCommand) && tonePolarity !== null) || specialTone;
   let commandText = "";
   if (!event.hasSensitiveValue && !event.isPasteCandidate && Array.from(normalizedCommand).length <= 240) {
     commandText = normalizedCommand;
   }
   const requiredRuleValues = event.hasSensitiveValue || event.isPasteCandidate
-    ? {} : requiredValues(sentence, topicForRule, specialTone);
+    ? {} : requiredValues(sentence, topicForRule, specialTone, undefined, extractedExpressionTarget);
   const hasRequiredRuleValues = Object.values(requiredRuleValues).some((value) => value.length > 0);
   const hasModelName = new RegExp(MODEL_NAME.source, "iu").test(normalizedCommand);
   const tasklessModelRoute = topic.topicKey === "model_routing" && routeAssignments(normalizedCommand) === null;
   const plainCommandEligible = Array.from(normalizedCommand).length <= 40
-    && EXPLICIT_COMMAND_ENDING.test(normalizedCommand)
+    && hasExplicitCommandEnding(normalizedCommand)
     && hasCorrectionPredicate(normalizedCommand)
     && !looksLikeQuestion
     && !isConsultationQuestion(normalizedCommand)
@@ -600,11 +732,11 @@ function detectSentence(
     && !THIRD_PARTY.test(normalizedCommand)
     && !EXAMPLE_CONTEXT.test(normalizedCommand)
     && (topic.topicKey === "unknown"
-      ? NEGATIVE_ACTION.test(normalizedCommand)
+      ? hasNegativeAction(normalizedCommand)
       : topic.topicKey === "model_routing"
         ? Boolean(requiredRuleValues.model) && hasModelName
           && (tasklessModelRoute || Boolean(requiredRuleValues.workType))
-        : hasRequiredRuleValues);
+        : hasRequiredRuleValues || extractedExpressionTarget.modifierUnparsed);
   const plainModelRoute = tasklessModelRoute && plainCommandEligible;
   const input: CorrectionRuleInput = {
     version: 2,
@@ -625,7 +757,8 @@ function detectSentence(
     conditionKnown: ruleConditionKnown,
     commandText,
   };
-  if (hasUnrepresentedRuleMeaning(input)) input.directive = false;
+  if (extractedExpressionTarget.modifierUnparsed) input.directive = false;
+  else if (hasUnrepresentedRuleMeaning(input)) input.directive = false;
   const typedRuleText = renderTypedCorrectionRule(input);
   const ruleInput = { ...input };
   if (typedRuleText.length > 0) delete ruleInput.commandText;

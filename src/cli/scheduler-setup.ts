@@ -9,9 +9,9 @@
  */
 
 import { execSync } from "child_process";
-import { existsSync } from "fs";
+import { accessSync, constants, existsSync, statSync } from "fs";
 import { mkdir, readFile, writeFile, unlink, stat } from "fs/promises";
-import { dirname, join, resolve } from "path";
+import { delimiter, dirname, isAbsolute, join, resolve } from "path";
 import { homedir, platform } from "os";
 import { fileURLToPath, pathToFileURL } from "url";
 
@@ -19,7 +19,16 @@ const PLIST_LABEL = "com.wasurenagusa.consolidate";
 const PLIST_FILENAME = `${PLIST_LABEL}.plist`;
 const ARCHIVE_PLIST_LABEL = "com.wasurenagusa.archive-transcripts";
 const ARCHIVE_PLIST_FILENAME = `${ARCHIVE_PLIST_LABEL}.plist`;
+const STRENGTH_PLIST_LABEL = "com.wasurenagusa.correction-strength";
+const STRENGTH_PLIST_FILENAME = `${STRENGTH_PLIST_LABEL}.plist`;
+const ABSTRACTION_PLIST_LABEL = "com.wasurenagusa.correction-abstraction";
+const GRADUATION_PLIST_LABEL = "com.wasurenagusa.correction-graduation";
+const GRADUATION_PLIST_FILENAME = "com.wasurenagusa.correction-graduation.plist";
+const ABSTRACTION_PLIST_FILENAME = `${ABSTRACTION_PLIST_LABEL}.plist`;
 const CRONTAB_MARKER = "# wasurenagusa-consolidate-all";
+const STRENGTH_CRONTAB_MARKER = "# wasurenagusa-correction-strength";
+const ABSTRACTION_CRONTAB_MARKER = "# wasurenagusa-correction-abstraction";
+const GRADUATION_CRONTAB_MARKER = "# wasurenagusa-correction-graduation";
 
 function log(message: string): void {
   process.stderr.write(message + "\n");
@@ -31,6 +40,18 @@ function getPlistPath(): string {
 
 function getArchivePlistPath(): string {
   return join(homedir(), "Library", "LaunchAgents", ARCHIVE_PLIST_FILENAME);
+}
+
+function getStrengthPlistPath(): string {
+  return join(homedir(), "Library", "LaunchAgents", STRENGTH_PLIST_FILENAME);
+}
+
+function getAbstractionPlistPath(): string {
+  return join(homedir(), "Library", "LaunchAgents", ABSTRACTION_PLIST_FILENAME);
+}
+
+function getGraduationPlistPath(): string {
+  return join(homedir(), "Library", "LaunchAgents", GRADUATION_PLIST_FILENAME);
 }
 
 function getLogDir(): string {
@@ -54,6 +75,59 @@ function getPackageRoot(): string {
 
 function getArchiveTranscriptsPath(): string {
   return join(getPackageRoot(), "scripts", "maintenance", "archive-transcripts.mjs");
+}
+
+function getStrengthJobPath(): string {
+  const __filename = fileURLToPath(import.meta.url);
+  return join(dirname(__filename), "strength-job.js");
+}
+
+function getAbstractionJobPath(): string {
+  const __filename = fileURLToPath(import.meta.url);
+  return join(dirname(__filename), "abstract-principles.js");
+}
+
+function getGraduationJobPath(): string {
+  const __filename = fileURLToPath(import.meta.url);
+  return join(dirname(__filename), "graduation-export.js");
+}
+
+export function resolveCodexBinaryPath(env: NodeJS.ProcessEnv = process.env): string {
+  const configuredPath = env.WASURENAGUSA_CODEX_BIN?.trim();
+  if (configuredPath !== undefined && configuredPath !== "") {
+    if (!isAbsolute(configuredPath)) throw new Error("WASURENAGUSA_CODEX_BIN must be an absolute executable path");
+    try {
+      if (!statSync(configuredPath).isFile()) throw new Error("not a file");
+      accessSync(configuredPath, constants.X_OK);
+      return configuredPath;
+    } catch {
+      throw new Error("WASURENAGUSA_CODEX_BIN is not an executable file");
+    }
+  }
+
+  for (const directory of (env.PATH ?? "").split(delimiter).filter(Boolean)) {
+    const candidate = resolve(directory, "codex");
+    try {
+      if (!statSync(candidate).isFile()) continue;
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      continue;
+    }
+  }
+  throw new Error("codex executable was not found in PATH");
+}
+
+function getDefaultAbstractionQuotaCommand(): string {
+  return resolve(getPackageRoot(), "..", "firebase-kit", ".claude", "hooks", "scripts", "codex-quota.py");
+}
+
+function resolveAbstractionQuotaCommand(env: NodeJS.ProcessEnv = process.env): string {
+  return env.WASURENAGUSA_CODEX_QUOTA_CMD?.trim() || getDefaultAbstractionQuotaCommand();
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function escapeXml(value: string): string {
@@ -89,6 +163,148 @@ export function buildArchivePlistXml(nodePath: string, scriptPath: string, logPa
   <string>${escapeXml(logPath)}</string>
 </dict>
 </plist>`;
+}
+
+export function buildStrengthPlistXml(
+  nodePath: string,
+  scriptPath: string,
+  logPath: string,
+): string {
+  const workingDirectory = resolve(dirname(scriptPath), "..", "..");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${escapeXml(STRENGTH_PLIST_LABEL)}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${escapeXml(nodePath)}</string>
+    <string>${escapeXml(scriptPath)}</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>${escapeXml(workingDirectory)}</string>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>4</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>${escapeXml(logPath)}</string>
+  <key>StandardErrorPath</key>
+  <string>${escapeXml(logPath)}</string>
+</dict>
+</plist>`;
+}
+
+export function buildGraduationPlistXml(
+  nodePath: string,
+  scriptPath: string,
+  logPath: string,
+): string {
+  const workingDirectory = resolve(dirname(scriptPath), "..", "..");
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    '<plist version="1.0">',
+    '<dict>',
+    '  <key>Label</key>',
+    '  <string>' + escapeXml(GRADUATION_PLIST_LABEL) + '</string>',
+    '  <key>ProgramArguments</key>',
+    '  <array>',
+    '    <string>' + escapeXml(nodePath) + '</string>',
+    '    <string>' + escapeXml(scriptPath) + '</string>',
+    '  </array>',
+    '  <key>WorkingDirectory</key>',
+    '  <string>' + escapeXml(workingDirectory) + '</string>',
+    '  <key>StartCalendarInterval</key>',
+    '  <dict>',
+    '    <key>Hour</key>',
+    '    <integer>6</integer>',
+    '    <key>Minute</key>',
+    '    <integer>0</integer>',
+    '  </dict>',
+    '  <key>StandardOutPath</key>',
+    '  <string>' + escapeXml(logPath) + '</string>',
+    '  <key>StandardErrorPath</key>',
+    '  <string>' + escapeXml(logPath) + '</string>',
+    '</dict>',
+    '</plist>',
+  ].join("\n");
+}
+
+export function buildAbstractionPlistXml(
+  nodePath: string,
+  scriptPath: string,
+  logPath: string,
+  codexPath: string,
+  quotaCommand: string,
+  homePath: string,
+  pathValue: string,
+): string {
+  const workingDirectory = resolve(dirname(scriptPath), "..", "..");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${escapeXml(ABSTRACTION_PLIST_LABEL)}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${escapeXml(nodePath)}</string>
+    <string>${escapeXml(scriptPath)}</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>${escapeXml(workingDirectory)}</string>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>5</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>${escapeXml(logPath)}</string>
+  <key>StandardErrorPath</key>
+  <string>${escapeXml(logPath)}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>${escapeXml(homePath)}</string>
+    <key>PATH</key>
+    <string>${escapeXml(pathValue)}</string>
+    <key>WASURENAGUSA_CODEX_BIN</key>
+    <string>${escapeXml(codexPath)}</string>
+    <key>WASURENAGUSA_CODEX_QUOTA_CMD</key>
+    <string>${escapeXml(quotaCommand)}</string>
+  </dict>
+</dict>
+</plist>`;
+}
+
+export async function writeAbstractionPlist(
+  plistPath: string,
+  input: {
+    nodePath: string;
+    scriptPath: string;
+    logPath: string;
+    codexPath: string;
+    quotaCommand: string;
+    homePath: string;
+    pathValue: string;
+  },
+): Promise<void> {
+  await writeFile(plistPath, buildAbstractionPlistXml(
+    input.nodePath,
+    input.scriptPath,
+    input.logPath,
+    input.codexPath,
+    input.quotaCommand,
+    input.homePath,
+    input.pathValue,
+  ), "utf-8");
 }
 
 function buildPlistXml(nodePath: string, scriptPath: string, logPath: string): string {
@@ -165,6 +381,23 @@ async function installMacOS(): Promise<void> {
     log(`ERROR: archive-transcripts.mjs not found at ${archiveScriptPath}`);
     process.exit(1);
   }
+  const strengthScriptPath = getStrengthJobPath();
+  if (!existsSync(strengthScriptPath)) {
+    log(`ERROR: strength-job.js not found at ${strengthScriptPath}`);
+    process.exit(1);
+  }
+  const abstractionScriptPath = getAbstractionJobPath();
+  if (!existsSync(abstractionScriptPath)) {
+    log(`ERROR: abstract-principles.js not found at ${abstractionScriptPath}`);
+    process.exit(1);
+  }
+  const graduationScriptPath = getGraduationJobPath();
+  if (!existsSync(graduationScriptPath)) {
+    log("ERROR: graduation-export.js not found at " + graduationScriptPath);
+    process.exit(1);
+  }
+  const codexPath = resolveCodexBinaryPath();
+  const quotaCommand = resolveAbstractionQuotaCommand();
 
   const nodePath = process.execPath;
   const logDir = getLogDir();
@@ -222,15 +455,92 @@ async function installMacOS(): Promise<void> {
     log(`Plist was written to ${archivePlistPath}. You may need to load it manually.`);
   }
 
+  const strengthPlistPath = getStrengthPlistPath();
+  const strengthLogPath = join(logDir, "strength-job.log");
+  if (existsSync(strengthPlistPath)) {
+    try {
+      execSync(`launchctl unload "${strengthPlistPath}"`, { stdio: "ignore" });
+    } catch {
+    }
+  }
+  const strengthPlistContent = buildStrengthPlistXml(nodePath, strengthScriptPath, strengthLogPath);
+  await writeFile(strengthPlistPath, strengthPlistContent, "utf-8");
+  try {
+    execSync(`launchctl load "${strengthPlistPath}"`);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`WARNING: launchctl load failed: ${message}`);
+    log(`Plist was written to ${strengthPlistPath}. You may need to load it manually.`);
+  }
+
+  const graduationPlistPath = getGraduationPlistPath();
+  const graduationLogPath = join(logDir, "graduation-export.log");
+  if (existsSync(graduationPlistPath)) {
+    try {
+      execSync("launchctl unload \"" + graduationPlistPath + "\"", { stdio: "ignore" });
+    } catch {
+    }
+  }
+  const graduationPlistContent = buildGraduationPlistXml(
+    nodePath,
+    graduationScriptPath,
+    graduationLogPath,
+  );
+  await writeFile(graduationPlistPath, graduationPlistContent, "utf-8");
+  try {
+    execSync("launchctl load \"" + graduationPlistPath + "\"");
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    log("WARNING: launchctl load failed: " + message);
+    log("Plist was written to " + graduationPlistPath + ". You may need to load it manually.");
+  }
+  log("Installed graduation job: " + graduationPlistPath);
+  log("Graduation schedule: Daily at 06:00");
+
+  const abstractionPlistPath = getAbstractionPlistPath();
+  const abstractionLogPath = join(logDir, "abstract-principles.log");
+  if (existsSync(abstractionPlistPath)) {
+    try {
+      execSync(`launchctl unload "${abstractionPlistPath}"`, { stdio: "ignore" });
+    } catch {
+    }
+  }
+  await writeAbstractionPlist(abstractionPlistPath, {
+    nodePath,
+    scriptPath: abstractionScriptPath,
+    logPath: abstractionLogPath,
+    codexPath,
+    quotaCommand,
+    homePath: homedir(),
+    pathValue: process.env.PATH ?? "",
+  });
+  try {
+    execSync(`launchctl load "${abstractionPlistPath}"`);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`WARNING: launchctl load failed: ${message}`);
+    log(`Plist was written to ${abstractionPlistPath}. You may need to load it manually.`);
+  }
+
   log(`Installed: ${plistPath}`);
   log(`Schedule: Daily at 02:00`);
   log(`Installed archive job: ${archivePlistPath}`);
   log(`Archive schedule: Daily at 03:00`);
+  log(`Installed strength job: ${strengthPlistPath}`);
+  log(`Strength schedule: Daily at 04:00`);
+  log(`Installed abstraction job: ${abstractionPlistPath}`);
+  log(`Abstraction schedule: Daily at 05:00`);
   log(`Log: ${logPath}`);
 }
 
 async function uninstallMacOS(): Promise<void> {
-  const plistPaths = [getPlistPath(), getArchivePlistPath()];
+  const plistPaths = [
+    getPlistPath(),
+    getArchivePlistPath(),
+    getStrengthPlistPath(),
+    getAbstractionPlistPath(),
+    getGraduationPlistPath(),
+  ];
   if (!plistPaths.some((plistPath) => existsSync(plistPath))) {
     log("Not installed (plist not found).");
     return;
@@ -252,7 +562,16 @@ async function uninstallMacOS(): Promise<void> {
 async function statusMacOS(): Promise<void> {
   const plistPath = getPlistPath();
   const archivePlistPath = getArchivePlistPath();
-  for (const [label, path] of [["consolidate", plistPath], ["archive-transcripts", archivePlistPath]] as const) {
+  const strengthPlistPath = getStrengthPlistPath();
+  const abstractionPlistPath = getAbstractionPlistPath();
+  const graduationPlistPath = getGraduationPlistPath();
+  for (const [label, path] of [
+    ["consolidate", plistPath],
+    ["archive-transcripts", archivePlistPath],
+    ["correction-strength", strengthPlistPath],
+    ["correction-abstraction", abstractionPlistPath],
+    ["correction-graduation", graduationPlistPath],
+  ] as const) {
     log(`${label} status: ${existsSync(path) ? `INSTALLED (${path})` : "NOT installed"}`);
   }
 
@@ -281,6 +600,32 @@ function getCrontabEntry(): string {
   return `0 2 * * * ${nodePath} ${scriptPath} >> ${logPath} 2>&1 ${CRONTAB_MARKER}`;
 }
 
+function getStrengthCrontabEntry(): string {
+  const nodePath = process.execPath;
+  const scriptPath = getStrengthJobPath();
+  const logPath = join(getLogDir(), "strength-job.log");
+  return `0 4 * * * ${nodePath} ${scriptPath} >> ${logPath} 2>&1 ${STRENGTH_CRONTAB_MARKER}`;
+}
+
+function getAbstractionCrontabEntry(
+  codexPath: string,
+  quotaCommand: string,
+): string {
+  const nodePath = process.execPath;
+  const scriptPath = getAbstractionJobPath();
+  const logPath = join(getLogDir(), "abstract-principles.log");
+  const pathValue = process.env.PATH ?? "";
+  return `0 5 * * * HOME=${shellQuote(homedir())} PATH=${shellQuote(pathValue)} WASURENAGUSA_CODEX_BIN=${shellQuote(codexPath)} WASURENAGUSA_CODEX_QUOTA_CMD=${shellQuote(quotaCommand)} ${shellQuote(nodePath)} ${shellQuote(scriptPath)} >> ${shellQuote(logPath)} 2>&1 ${ABSTRACTION_CRONTAB_MARKER}`;
+}
+
+function getGraduationCrontabEntry(): string {
+  const nodePath = process.execPath;
+  const scriptPath = getGraduationJobPath();
+  const logPath = join(getLogDir(), "graduation-export.log");
+  return "0 6 * * * " + shellQuote(nodePath) + " " + shellQuote(scriptPath) + " >> " + shellQuote(logPath) +
+    " 2>&1 " + GRADUATION_CRONTAB_MARKER;
+}
+
 function getCurrentCrontab(): string {
   try {
     return execSync("crontab -l 2>/dev/null", { encoding: "utf-8" });
@@ -290,12 +635,29 @@ function getCurrentCrontab(): string {
 }
 
 async function installLinux(): Promise<void> {
+  const graduationScriptPath = getGraduationJobPath();
+  if (!existsSync(graduationScriptPath)) {
+    log("ERROR: graduation-export.js not found at " + graduationScriptPath);
+    process.exit(1);
+  }
   const scriptPath = getConsolidateAllJsPath();
   if (!existsSync(scriptPath)) {
     log(`ERROR: consolidate-all.js not found at ${scriptPath}`);
     log("Run 'npm run build' first.");
     process.exit(1);
   }
+  const strengthScriptPath = getStrengthJobPath();
+  if (!existsSync(strengthScriptPath)) {
+    log(`ERROR: strength-job.js not found at ${strengthScriptPath}`);
+    process.exit(1);
+  }
+  const abstractionScriptPath = getAbstractionJobPath();
+  if (!existsSync(abstractionScriptPath)) {
+    log(`ERROR: abstract-principles.js not found at ${abstractionScriptPath}`);
+    process.exit(1);
+  }
+  const codexPath = resolveCodexBinaryPath();
+  const quotaCommand = resolveAbstractionQuotaCommand();
 
   // ログディレクトリ作成
   const logDir = getLogDir();
@@ -305,8 +667,13 @@ async function installLinux(): Promise<void> {
 
   // 既にインストール済みなら置換
   const lines = currentCrontab.split("\n");
-  const filtered = lines.filter((line) => !line.includes(CRONTAB_MARKER));
+  const filtered = lines.filter((line) => !line.includes(CRONTAB_MARKER)
+    && !line.includes(STRENGTH_CRONTAB_MARKER) && !line.includes(ABSTRACTION_CRONTAB_MARKER)
+    && !line.includes(GRADUATION_CRONTAB_MARKER));
   filtered.push(getCrontabEntry());
+  filtered.push(getStrengthCrontabEntry());
+  filtered.push(getAbstractionCrontabEntry(codexPath, quotaCommand));
+  filtered.push(getGraduationCrontabEntry());
 
   // 末尾の空行を1つだけ残す
   const newCrontab = filtered.filter((line, i) => {
@@ -318,19 +685,26 @@ async function installLinux(): Promise<void> {
 
   log("Installed crontab entry.");
   log("Schedule: Daily at 02:00");
+  log("Strength schedule: Daily at 04:00");
+  log("Abstraction schedule: Daily at 05:00");
+  log("Graduation schedule: Daily at 06:00");
   log(`Log: ${getLogPath()}`);
 }
 
 async function uninstallLinux(): Promise<void> {
   const currentCrontab = getCurrentCrontab();
 
-  if (!currentCrontab.includes(CRONTAB_MARKER)) {
+  if (!currentCrontab.includes(CRONTAB_MARKER) && !currentCrontab.includes(STRENGTH_CRONTAB_MARKER)
+    && !currentCrontab.includes(ABSTRACTION_CRONTAB_MARKER)
+    && !currentCrontab.includes(GRADUATION_CRONTAB_MARKER)) {
     log("Not installed (crontab entry not found).");
     return;
   }
 
   const lines = currentCrontab.split("\n");
-  const filtered = lines.filter((line) => !line.includes(CRONTAB_MARKER));
+  const filtered = lines.filter((line) => !line.includes(CRONTAB_MARKER)
+    && !line.includes(STRENGTH_CRONTAB_MARKER) && !line.includes(ABSTRACTION_CRONTAB_MARKER)
+    && !line.includes(GRADUATION_CRONTAB_MARKER));
   const newCrontab = filtered.join("\n");
 
   execSync("crontab -", { input: newCrontab });
@@ -339,14 +713,24 @@ async function uninstallLinux(): Promise<void> {
 
 async function statusLinux(): Promise<void> {
   const currentCrontab = getCurrentCrontab();
+  const consolidateInstalled = currentCrontab.includes(CRONTAB_MARKER);
+  const strengthInstalled = currentCrontab.includes(STRENGTH_CRONTAB_MARKER);
+  const abstractionInstalled = currentCrontab.includes(ABSTRACTION_CRONTAB_MARKER);
+  const graduationInstalled = currentCrontab.includes(GRADUATION_CRONTAB_MARKER);
 
-  if (!currentCrontab.includes(CRONTAB_MARKER)) {
+  if (!consolidateInstalled && !strengthInstalled && !abstractionInstalled && !graduationInstalled) {
     log("Status: NOT installed");
     return;
   }
 
-  log("Status: INSTALLED");
-  log("Schedule: Daily at 02:00 (crontab)");
+  log(`consolidate status: ${consolidateInstalled ? "INSTALLED" : "NOT installed"}`);
+  log(`correction-strength status: ${strengthInstalled ? "INSTALLED" : "NOT installed"}`);
+  log(`correction-abstraction status: ${abstractionInstalled ? "INSTALLED" : "NOT installed"}`);
+  if (consolidateInstalled) log("Schedule: Daily at 02:00 (crontab)");
+  if (strengthInstalled) log("Strength schedule: Daily at 04:00 (crontab)");
+  log("correction-graduation status: " + (graduationInstalled ? "INSTALLED" : "NOT installed"));
+  if (abstractionInstalled) log("Abstraction schedule: Daily at 05:00 (crontab)");
+  if (graduationInstalled) log("Graduation schedule: Daily at 06:00 (crontab)");
 
   const logPath = getLogPath();
   if (existsSync(logPath)) {

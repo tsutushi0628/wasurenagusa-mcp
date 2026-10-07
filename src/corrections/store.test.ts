@@ -4,6 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { initializeCorrectionSchema } from "../storage/correction-schema.js";
+import { migrateV11ToV12, migrateV12ToV13 } from "../storage/migration.js";
 import { SQLiteStorage } from "../storage/sqlite.js";
 import { createBundleKey } from "./bundle-key.js";
 import { detectOwnerCorrections } from "./detector.js";
@@ -43,6 +44,8 @@ describe("correction evidence store", () => {
 
     const db = new Database(dbPath);
     initializeCorrectionSchema(db);
+    migrateV11ToV12(db);
+    migrateV12ToV13(db);
     db.close();
 
     storage = new SQLiteStorage(dbPath);
@@ -390,6 +393,47 @@ describe("correction evidence store", () => {
     expect(readBundle().evidence).toHaveLength(2);
     expect(readBundle().memories).toHaveLength(1);
     expect(readBundle().bundle).toMatchObject({ status: "confirmed", visibility: "owner", expires_at: null, intensity: 5 });
+  });
+
+  it("強度イベントの調整を後続根拠へ加算し、memory強度にも同じ値を写す", () => {
+    const firstAt = iso(0);
+    addEvent("strength-base-one", "strength-session-one", firstAt);
+    const first = apply(observation("strength-base-one", firstAt, {
+      decision: "confirmed",
+      lifetimeKind: "explicit_continuing",
+      continuationBasis: "explicit-continuing-command",
+      visibility: "owner",
+      evidence: { source: "utterance_detection", score: 0, detectorVersion: "fixture-v2", conditions: "", polarity: "positive" },
+    }));
+
+    storage.runCorrectionTransaction(({ db }) => {
+      db.prepare(`
+        INSERT INTO owner_correction_strength_events (
+          bundle_key, at, from_intensity, to_intensity, delta, reason, basis
+        ) VALUES (?, ?, 1, 2, 1, 'failure', '{"mode":"on","signal":"failure"}')
+      `).run(first.bundleKey, iso(DAY_MS));
+      db.prepare("UPDATE owner_correction_bundles SET intensity = 2 WHERE bundle_key = ?").run(first.bundleKey);
+      db.prepare(`
+        UPDATE memories SET intensity = 2
+        WHERE id = (SELECT memory_id FROM owner_correction_bundles WHERE bundle_key = ?)
+      `).run(first.bundleKey);
+    });
+
+    const secondAt = iso(DAY_MS + 1000);
+    addEvent("strength-base-two", "strength-session-two", secondAt);
+    const second = apply(observation("strength-base-two", secondAt, {
+      lifetimeKind: "explicit_continuing",
+      continuationBasis: "explicit-continuing-command",
+      visibility: "owner",
+      evidence: { source: "utterance_detection", score: 6, detectorVersion: "fixture-v2", conditions: "", polarity: "positive" },
+    }));
+
+    expect(second.intensity).toBe(5);
+    expect(readBundle(first.bundleKey).memories[0]).toMatchObject({ intensity: 5 });
+    const strengthBasis = storage.runCorrectionTransaction(({ db }) => db.prepare(`
+      SELECT basis FROM owner_correction_strength_events WHERE bundle_key = ?
+    `).get(first.bundleKey) as { basis: string });
+    expect(JSON.parse(strengthBasis.basis)).toMatchObject({ baseIntensity: 5 });
   });
 
   it("推定規則は同一sessionの反復で確定し、別sessionからowner可視になる", () => {
@@ -1059,6 +1103,16 @@ describe("correction evidence store", () => {
     const secondAt = iso(2 * 60 * 60 * 1000);
     addEvent("route-expiry-two", "route-expiry-session-two", secondAt);
     const confirmed = apply({ ...detectedObservation(command, "route-expiry-session-two", "route-expiry-two", secondAt, "owner-correction-v3"), visibility: "owner" });
+    const confirmedBundle = readBundle(confirmed.bundleKey).bundle;
+    storage.runCorrectionTransaction(({ db }) => {
+      db.prepare(`
+        INSERT INTO owner_correction_strength_events (
+          bundle_key, at, from_intensity, to_intensity, delta, reason, basis
+        ) VALUES (?, ?, ?, 5, ?, 'failure', '{"mode":"on","signal":"failure"}')
+      `).run(confirmed.bundleKey, iso(3 * 60 * 60 * 1000), confirmedBundle.intensity,
+        5 - confirmedBundle.intensity);
+      db.prepare("UPDATE owner_correction_bundles SET intensity = 5 WHERE bundle_key = ?").run(confirmed.bundleKey);
+    });
     const expiredAt = iso(26 * 60 * 60 * 1000);
     storage.runCorrectionTransaction(({ db, save }) => expireCorrectionBundles({ db, save }, expiredAt));
 
@@ -1069,6 +1123,8 @@ describe("correction evidence store", () => {
     expect(confirmed.status).toBe("confirmed");
     expect(reopened.bundleKey).toBe(confirmed.bundleKey);
     expect(reopened).toMatchObject({ status: "candidate", occurrenceCount: 1, sessionCount: 1 });
+    const reopenedEvidence = readBundle(confirmed.bundleKey).evidence.find((row: { event_id: string }) => row.event_id === "route-expiry-three");
+    expect(reopened.intensity).toBe(1 + Math.floor(reopenedEvidence.score / 2));
     expect(readBundle(confirmed.bundleKey).memories[0]).toMatchObject({ state: "archived" });
   });
 });

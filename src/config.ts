@@ -169,6 +169,14 @@ export function getMemoryPath(projectRoot: string, homeDir: string = homedir()):
   return resolveHookStore(projectRoot, import.meta.url, startupMemoryDir, homeDir);
 }
 
+export function getCliMemoryDirectory(projectRoot: string): string {
+  const configuredMemoryDirectory = process.env.WASURENAGUSA_MEMORY_PATH;
+  if (configuredMemoryDirectory === undefined || configuredMemoryDirectory === "") {
+    return getMemoryPath(projectRoot);
+  }
+  return resolveHookStore(projectRoot, import.meta.url, configuredMemoryDirectory);
+}
+
 /**
  * 埋め込みモデルのキャッシュ先を解決する（タスク1.13、R-B8）。
  *

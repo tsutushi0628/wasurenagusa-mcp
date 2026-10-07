@@ -3,9 +3,11 @@ import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
-import { migrateV10ToV11, migrateV11ToV12 } from "../storage/migration.js";
+import { migrateV10ToV11, migrateV11ToV12, migrateV12ToV13 } from "../storage/migration.js";
 import { SQLiteStorage } from "../storage/sqlite.js";
+import { serializeCorrectionRuleInput } from "./rule-template.js";
 import {
+  assessCorrectionCompliance,
   findCorrectionComplianceViolations,
   getLatestAssistantText,
   isCorrectionComplianceEnabled,
@@ -36,6 +38,25 @@ const expressionRule: ComplianceRule = {
   ruleText: "工程略号は使わない",
   polarity: "negative",
 };
+
+function toneRuleConditions(conditionKey: string, audience = "owner", conditions: string[] = []): string {
+  return serializeCorrectionRuleInput({
+    version: 2,
+    topicKey: "tone",
+    actionKey: "use_casual",
+    polarity: "positive",
+    requiredValues: { audience, style: "常体" },
+    conditions,
+    boundaryKey: conditionKey,
+    lifetimeKind: "inferred",
+    continuationBasis: "synthetic-fixture",
+    directive: true,
+    plainCommandEligible: false,
+    question: false,
+    toneException: false,
+    conditionKnown: true,
+  });
+}
 
 const cases: Array<{
   name: string;
@@ -106,6 +127,17 @@ const cases: Array<{
 ];
 
 describe("確定規則の遵守検査", () => {
+  const sourceDocument = Array.from({ length: 4 }, (_, paragraphIndex) =>
+    Array.from({ length: 8 }, (_, sentenceIndex) =>
+      `第${paragraphIndex + 1}段落の${sentenceIndex + 1}項では、背景、手順、判断理由、確認結果を順に記録する。`,
+    ).join("")
+  ).join("\n\n");
+  const longSummary = Array.from({ length: 4 }, (_, paragraphIndex) =>
+    Array.from({ length: 2 }, (_, sentenceIndex) =>
+      `要約段落${paragraphIndex + 1}の要点${sentenceIndex + 1}では、` + "方針と結果を整理して伝える。".repeat(10),
+    ).join("")
+  ).join("\n\n");
+
   it.each(cases)("$name", ({ text, rules, expected }) => {
     const violations = findCorrectionComplianceViolations(text, rules);
     expect(violations.map((violation) => violation.checker)).toEqual(expected);
@@ -119,6 +151,67 @@ describe("確定規則の遵守検査", () => {
     ];
 
     expect(findCorrectionComplianceViolations("確認しました。対応します。（中略）P7", oppositeRules)).toEqual([]);
+  });
+
+  it("違反なしと証拠ありを分け、短い要約は全文遵守の証拠にしない", () => {
+    const shortSummary = "要点は三つ。手続きの遅れと対応方針を簡潔にまとめた。";
+
+    expect(assessCorrectionCompliance(shortSummary, [documentRule])).toEqual([{
+      bundleKey: documentRule.bundleKey,
+      version: documentRule.version,
+      checker: "document_delivery",
+      outcome: "unproven",
+    }]);
+    expect(findCorrectionComplianceViolations(shortSummary, [documentRule])).toEqual([]);
+  });
+
+  it("照合元がない長い要約は全文遵守の証拠にしない", () => {
+    expect(longSummary.replace(/\s/gu, "").length).toBeGreaterThanOrEqual(1000);
+    expect(assessCorrectionCompliance(longSummary, [documentRule])).toEqual([{
+      bundleKey: documentRule.bundleKey,
+      version: documentRule.version,
+      checker: "document_delivery",
+      outcome: "unproven",
+    }]);
+  });
+
+  it("照合元がある要約は全文遵守にしない", () => {
+    expect(assessCorrectionCompliance(longSummary, [documentRule], sourceDocument)).toEqual([{
+      bundleKey: documentRule.bundleKey,
+      version: documentRule.version,
+      checker: "document_delivery",
+      outcome: "violation",
+    }]);
+  });
+
+  it("照合元の全文を応答が含む場合だけ全文遵守の証拠にする", () => {
+    expect(assessCorrectionCompliance(sourceDocument, [documentRule], sourceDocument)).toEqual([{
+      bundleKey: documentRule.bundleKey,
+      version: documentRule.version,
+      checker: "document_delivery",
+      outcome: "compliant",
+    }]);
+  });
+
+  it("常体の明示文末と略号のない実質回答を証拠にし、短い断片は証拠にしない", () => {
+    expect(assessCorrectionCompliance("今後は常体で回答する。", [toneRule])).toEqual([{
+      bundleKey: toneRule.bundleKey,
+      version: toneRule.version,
+      checker: "tone",
+      outcome: "compliant",
+    }]);
+    expect(assessCorrectionCompliance("工程の順序を確認する。", [expressionRule])).toEqual([{
+      bundleKey: expressionRule.bundleKey,
+      version: expressionRule.version,
+      checker: "expression_policy",
+      outcome: "compliant",
+    }]);
+    expect(assessCorrectionCompliance("了解。", [expressionRule])).toEqual([{
+      bundleKey: expressionRule.bundleKey,
+      version: expressionRule.version,
+      checker: "expression_policy",
+      outcome: "unproven",
+    }]);
   });
 
   it("遵守検査は既定で有効、環境変数offで無効", () => {
@@ -232,6 +325,231 @@ describe("確定規則の遵守検査", () => {
       expect(persistCorrectionComplianceViolations(storage, input)).toEqual([]);
       expect(storage.connection.prepare("SELECT bundle_key, checker FROM owner_correction_violations").all())
         .toEqual([{ bundle_key: "emitted-confirmed", checker: "tone" }]);
+    } finally {
+      storage.close();
+      if (previousValue === undefined) delete process.env.WASURENAGUSA_CORRECTION_COMPLIANCE;
+      else process.env.WASURENAGUSA_CORRECTION_COMPLIANCE = previousValue;
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("根拠追加だけの版更新では旧注入規則を検査し、規則変更後は外す", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "correction-compliance-version-store-"));
+    const dbPath = join(tempDir, "memory.db");
+    const initialStorage = new SQLiteStorage(dbPath);
+    initialStorage.initialize();
+    initialStorage.close();
+    const setupDb = new Database(dbPath);
+    migrateV10ToV11(setupDb);
+    migrateV11ToV12(setupDb);
+    setupDb.close();
+    const storage = SQLiteStorage.openExistingForHook(dbPath, { mode: "correction" });
+    const previousValue = process.env.WASURENAGUSA_CORRECTION_COMPLIANCE;
+    process.env.WASURENAGUSA_CORRECTION_COMPLIANCE = "on";
+
+    try {
+      storage.runCorrectionTransaction(({ db, save }) => {
+        const insertVersionedRule = (
+          bundleKey: string,
+          sessionIdHash: string,
+          currentRuleText: string,
+          currentBodyHash: string,
+        ): void => {
+          const initialRuleText = "回答は常体で書く";
+          const memory = save({
+            category: "dont",
+            title: "Synthetic " + bundleKey,
+            content: currentRuleText,
+            tags: ["synthetic"],
+            project: "fixture-project",
+            scope: "general",
+            intensity: 3,
+          });
+          db.prepare(`
+            INSERT INTO owner_correction_bundles (
+              bundle_key, memory_id, rule_text, topic_key, polarity, condition_key, project, scope,
+              visibility, status, intensity, occurrence_count, session_count, first_seen_at, last_seen_at,
+              expires_at, lifetime_kind, continuation_basis, confirmed_at, version, counterevidence_event_id,
+              last_confirmation_asked_at, confirmation_state
+            ) VALUES (?, ?, ?, 'tone', 'positive', 'general', 'fixture-project', 'general', 'owner',
+              'confirmed', 3, 2, 2, '2026-10-01T00:00:00.000Z', '2026-10-02T00:00:00.000Z',
+              '2026-10-10T00:00:00.000Z', 'explicit_continuing', 'synthetic',
+              '2026-10-01T00:00:00.000Z', 2, NULL, NULL, 'none')
+          `).run(bundleKey, memory.id, currentRuleText);
+          db.prepare(`
+            INSERT INTO owner_correction_versions (
+              bundle_key, version, rule_text, body_hash, conditions, condition_key, polarity, visibility,
+              status, confirmed_at, expires_at, lifetime_kind, continuation_basis, evidence_event_ids,
+              effective_from, change_reason
+            ) VALUES (?, 1, ?, 'synthetic-rule-hash', 'synthetic-conditions', 'general', 'positive', 'owner',
+              'confirmed', '2026-10-01T00:00:00.000Z', '2026-10-04T00:00:00.000Z',
+              'explicit_continuing', 'synthetic', '["event-one"]', '2026-10-01T00:00:00.000Z', 'synthetic')
+          `).run(bundleKey, initialRuleText);
+          db.prepare(`
+            INSERT INTO owner_correction_versions (
+              bundle_key, version, rule_text, body_hash, conditions, condition_key, polarity, visibility,
+              status, confirmed_at, expires_at, lifetime_kind, continuation_basis, evidence_event_ids,
+              effective_from, change_reason
+            ) VALUES (?, 2, ?, ?, 'synthetic-conditions', 'general', 'positive', 'owner', 'confirmed',
+              '2026-10-01T00:00:00.000Z', '2026-10-10T00:00:00.000Z', 'explicit_continuing', 'synthetic',
+              '["event-one","event-two"]', '2026-10-02T00:00:00.000Z', 'bundle_updated')
+          `).run(bundleKey, currentRuleText, currentBodyHash);
+          db.prepare(`
+            INSERT INTO owner_correction_injections (
+              session_id_hash, compact_epoch, bundle_key, version, human_ordinal, trigger, emitted_at,
+              output_order, body_hash, output_hash, token_estimate, body_included, stdout_status
+            ) VALUES (?, 0, ?, 1, 1, 'start', '2026-10-02T00:00:00.000Z', 1,
+              'synthetic-output-body', 'synthetic-output', 20, 1, 'emitted')
+          `).run(sessionIdHash, bundleKey);
+        };
+
+        insertVersionedRule("same-meaning", "synthetic-same-session", "回答は常体で書く", "synthetic-rule-hash");
+        insertVersionedRule("changed-meaning", "synthetic-changed-session", "回答は短く書く", "synthetic-changed-rule-hash");
+      });
+
+      const input = {
+        humanOrdinal: 2,
+        assistantText: "確認しました。対応します。",
+        detectedAt: "2026-10-03T00:00:00.000Z",
+      };
+      expect(persistCorrectionComplianceViolations(storage, {
+        ...input,
+        sessionIdHash: "synthetic-same-session",
+      })).toEqual([{ bundleKey: "same-meaning", version: 1, checker: "tone" }]);
+      expect(persistCorrectionComplianceViolations(storage, {
+        ...input,
+        sessionIdHash: "synthetic-changed-session",
+      })).toEqual([]);
+    } finally {
+      storage.close();
+      if (previousValue === undefined) delete process.env.WASURENAGUSA_CORRECTION_COMPLIANCE;
+      else process.env.WASURENAGUSA_CORRECTION_COMPLIANCE = previousValue;
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("原則は構成元のtopicと検査可能な条件を引き継ぐ", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "correction-compliance-principle-"));
+    const dbPath = join(tempDir, "memory.db");
+    const initialStorage = new SQLiteStorage(dbPath);
+    initialStorage.initialize();
+    initialStorage.close();
+    const setupDb = new Database(dbPath);
+    migrateV10ToV11(setupDb);
+    migrateV11ToV12(setupDb);
+    migrateV12ToV13(setupDb);
+    setupDb.close();
+    const storage = SQLiteStorage.openExistingForHook(dbPath, { mode: "correction" });
+    const previousValue = process.env.WASURENAGUSA_CORRECTION_COMPLIANCE;
+    process.env.WASURENAGUSA_CORRECTION_COMPLIANCE = "on";
+
+    try {
+      storage.runCorrectionTransaction(({ db, save }) => {
+        const insertRule = (input: {
+          bundleKey: string;
+          topicKey: string;
+          ruleText: string;
+          conditionKey: string;
+          conditions: string;
+        }): void => {
+          const at = "2026-10-01T00:00:00.000Z";
+          const lifetimeKind = input.conditionKey.startsWith("task:") ? "task" : "inferred";
+          const memory = save({
+            category: "dont",
+            title: "Synthetic " + input.bundleKey,
+            content: input.ruleText,
+            tags: ["synthetic"],
+            project: "owner",
+            scope: "owner",
+            intensity: 3,
+          });
+          db.prepare("INSERT INTO owner_correction_bundles (bundle_key, memory_id, rule_text, topic_key, polarity, condition_key, project, scope, visibility, status, intensity, occurrence_count, session_count, first_seen_at, last_seen_at, expires_at, lifetime_kind, continuation_basis, confirmed_at, version, counterevidence_event_id, last_confirmation_asked_at, confirmation_state) VALUES (?, ?, ?, ?, 'positive', ?, 'owner', 'owner', 'owner', 'confirmed', 3, 1, 1, ?, ?, NULL, ?, 'synthetic', ?, 1, NULL, NULL, 'none')").run(
+            input.bundleKey,
+            memory.id,
+            input.ruleText,
+            input.topicKey,
+            input.conditionKey,
+            at,
+            at,
+            lifetimeKind,
+            at,
+          );
+          db.prepare("INSERT INTO owner_correction_versions (bundle_key, version, rule_text, body_hash, conditions, condition_key, polarity, visibility, status, confirmed_at, expires_at, lifetime_kind, continuation_basis, evidence_event_ids, effective_from, change_reason) VALUES (?, 1, ?, ?, ?, ?, 'positive', 'owner', 'confirmed', ?, NULL, ?, 'synthetic', '[]', ?, 'synthetic-fixture')").run(
+            input.bundleKey,
+            input.ruleText,
+            "synthetic-body-" + input.bundleKey,
+            input.conditions,
+            input.conditionKey,
+            at,
+            lifetimeKind,
+            at,
+          );
+        };
+        const insertPrinciple = (
+          principleKey: string,
+          sourceKey: string,
+          conditionKey: string,
+          audience = "owner",
+          sourceRuleText = "回答は常体で書く",
+          sourceConditions: string[] = [],
+        ): void => {
+          insertRule({
+            bundleKey: sourceKey,
+            topicKey: "tone",
+            ruleText: sourceRuleText,
+            conditionKey,
+            conditions: toneRuleConditions(conditionKey, audience, sourceConditions),
+          });
+          insertRule({
+            bundleKey: principleKey,
+            topicKey: "principle",
+            ruleText: "同じ書き方を続ける",
+            conditionKey: "general",
+            conditions: "[]",
+          });
+          db.prepare("INSERT INTO owner_correction_principle_members (principle_key, member_key, attached_at, attach_source) VALUES (?, ?, '2026-10-01T00:00:00.000Z', 'cluster')").run(principleKey, sourceKey);
+          db.prepare("INSERT INTO owner_correction_injections (session_id_hash, compact_epoch, bundle_key, version, human_ordinal, trigger, emitted_at, output_order, body_hash, output_hash, token_estimate, body_included, stdout_status) VALUES (?, 0, ?, 1, 1, 'start', '2026-10-01T00:00:00.000Z', 1, 'synthetic-body', 'synthetic-output', 20, 1, 'emitted')").run("synthetic-session-" + sourceKey, principleKey);
+        };
+
+        insertPrinciple("pr:v1:synthetic-general-principle", "synthetic-general-source", "general");
+        insertPrinciple(
+          "pr:v1:synthetic-client-principle",
+          "synthetic-client-source",
+          "general;audience:client",
+          "client",
+          "顧客向けの回答は常体で書く",
+        );
+        insertPrinciple(
+          "pr:v1:synthetic-conditioned-principle",
+          "synthetic-conditioned-source",
+          "general",
+          "owner",
+          "報告は常体で書く",
+          ["報告作成時"],
+        );
+      });
+
+      const input = {
+        humanOrdinal: 2,
+        assistantText: "確認しました。対応します。",
+        detectedAt: "2026-10-01T00:00:01.000Z",
+      };
+      expect(persistCorrectionComplianceViolations(storage, {
+        ...input,
+        sessionIdHash: "synthetic-session-synthetic-general-source",
+      })).toEqual([{
+        bundleKey: "pr:v1:synthetic-general-principle",
+        version: 1,
+        checker: "tone",
+      }]);
+      expect(persistCorrectionComplianceViolations(storage, {
+        ...input,
+        sessionIdHash: "synthetic-session-synthetic-client-source",
+      })).toEqual([]);
+      expect(persistCorrectionComplianceViolations(storage, {
+        ...input,
+        sessionIdHash: "synthetic-session-synthetic-conditioned-source",
+      })).toEqual([]);
     } finally {
       storage.close();
       if (previousValue === undefined) delete process.env.WASURENAGUSA_CORRECTION_COMPLIANCE;

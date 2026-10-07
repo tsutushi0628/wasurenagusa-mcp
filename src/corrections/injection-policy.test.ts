@@ -1,12 +1,18 @@
 import Database from "better-sqlite3";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { initializeCorrectionSchema } from "../storage/correction-schema.js";
-import { migrateV11ToV12 } from "../storage/migration.js";
+import { migrateV11ToV12, migrateV12ToV13 } from "../storage/migration.js";
 import { SQLiteStorage } from "../storage/sqlite.js";
+import { detectOwnerCorrections } from "./detector.js";
+import { extractOwnerEvent } from "./events.js";
+import { createCorrectionGraduationProposal } from "./graduation.js";
 import { selectCorrectionInjections, type CorrectionInjectionRequest } from "./injection-policy.js";
+import { renderCorrectionRules } from "./render.js";
+import { correctionConditionKey, serializeCorrectionRuleInput } from "./rule-template.js";
+import { applyCorrectionEvidence, cancelCorrectionBundle, disputeCorrectionBundles, storedBundleKey } from "./store.js";
 
 interface RuleInput {
   bundleKey: string;
@@ -24,8 +30,24 @@ describe("owner correction injection policy", () => {
   let tempDir: string;
   let dbPath: string;
   let storage: SQLiteStorage;
+  let previousGraduationMode: string | undefined;
+  let previousGraduationKnowledgePath: string | undefined;
+  let previousPrinciplesMode: string | undefined;
+  let previousStrengthMode: string | undefined;
+  let previousCorrectionReinjectMode: string | undefined;
+  let previousCorrectionComplianceMode: string | undefined;
+  let previousCandidateInjectMode: string | undefined;
+  let previousOwnerScopeBehaviorMode: string | undefined;
 
   beforeEach(() => {
+    previousGraduationMode = process.env.WASURENAGUSA_GRADUATION;
+    previousGraduationKnowledgePath = process.env.WASURENAGUSA_JEV_KNOWLEDGE_PATH;
+    previousPrinciplesMode = process.env.WASURENAGUSA_PRINCIPLES;
+    previousStrengthMode = process.env.WASURENAGUSA_STRENGTH;
+    previousCorrectionReinjectMode = process.env.WASURENAGUSA_CORRECTION_REINJECT;
+    previousCorrectionComplianceMode = process.env.WASURENAGUSA_CORRECTION_COMPLIANCE;
+    previousCandidateInjectMode = process.env.WASURENAGUSA_CANDIDATE_INJECT;
+    previousOwnerScopeBehaviorMode = process.env.WASURENAGUSA_OWNER_SCOPE_BEHAVIOR;
     tempDir = mkdtempSync(join(tmpdir(), "correction-injection-policy-"));
     dbPath = join(tempDir, "memory.db");
     const initialStorage = new SQLiteStorage(dbPath);
@@ -42,7 +64,32 @@ describe("owner correction injection policy", () => {
   afterEach(() => {
     storage.close();
     rmSync(tempDir, { recursive: true, force: true });
+    if (previousGraduationMode === undefined) delete process.env.WASURENAGUSA_GRADUATION;
+    else process.env.WASURENAGUSA_GRADUATION = previousGraduationMode;
+    if (previousGraduationKnowledgePath === undefined) delete process.env.WASURENAGUSA_JEV_KNOWLEDGE_PATH;
+    else process.env.WASURENAGUSA_JEV_KNOWLEDGE_PATH = previousGraduationKnowledgePath;
+    if (previousPrinciplesMode === undefined) delete process.env.WASURENAGUSA_PRINCIPLES;
+    else process.env.WASURENAGUSA_PRINCIPLES = previousPrinciplesMode;
+    if (previousStrengthMode === undefined) delete process.env.WASURENAGUSA_STRENGTH;
+    else process.env.WASURENAGUSA_STRENGTH = previousStrengthMode;
+    if (previousCorrectionReinjectMode === undefined) delete process.env.WASURENAGUSA_CORRECTION_REINJECT;
+    else process.env.WASURENAGUSA_CORRECTION_REINJECT = previousCorrectionReinjectMode;
+    if (previousCorrectionComplianceMode === undefined) delete process.env.WASURENAGUSA_CORRECTION_COMPLIANCE;
+    else process.env.WASURENAGUSA_CORRECTION_COMPLIANCE = previousCorrectionComplianceMode;
+    if (previousCandidateInjectMode === undefined) delete process.env.WASURENAGUSA_CANDIDATE_INJECT;
+    else process.env.WASURENAGUSA_CANDIDATE_INJECT = previousCandidateInjectMode;
+    if (previousOwnerScopeBehaviorMode === undefined) delete process.env.WASURENAGUSA_OWNER_SCOPE_BEHAVIOR;
+    else process.env.WASURENAGUSA_OWNER_SCOPE_BEHAVIOR = previousOwnerScopeBehaviorMode;
   });
+
+  function migrateToV13(): void {
+    storage.close();
+    const db = new Database(dbPath);
+    migrateV12ToV13(db);
+    db.close();
+    storage = new SQLiteStorage(dbPath);
+    storage.initialize();
+  }
 
   function addRule(input: RuleInput): void {
     storage.runCorrectionTransaction(({ db, save }) => {
@@ -91,6 +138,78 @@ describe("owner correction injection policy", () => {
     });
   }
 
+  function addDetectedCandidate(
+    suffix: string,
+    detectorVersion = "owner-correction-v4",
+    project = "fixture-project",
+    scope = "backend",
+    visibility: "project" | "owner" = "project",
+  ): string {
+    const at = "2026-10-03T00:00:00.000Z";
+    const eventId = `synthetic-candidate-${suffix}`;
+    const sessionId = `synthetic-candidate-session-${suffix}`;
+    const limit = 100 + (Number(suffix.match(/\d+/u)?.[0]) || 0);
+    const text = `今後は特定の場合だけ回答を${limit}文字以内にして`;
+    const ownerEvent = extractOwnerEvent({
+      type: "user",
+      origin: { kind: "human" },
+      sessionId,
+      uuid: eventId,
+      timestamp: at,
+      message: { content: text },
+    });
+    if (!ownerEvent) throw new Error("synthetic owner event was not extracted");
+    const detected = detectOwnerCorrections(ownerEvent)[0];
+    if (!detected || detected.status !== "candidate" || !detected.ruleText) {
+      throw new Error("synthetic rule candidate was not detected");
+    }
+
+    return storage.runCorrectionTransaction(({ db, save }) => {
+      db.prepare(`
+        INSERT INTO owner_correction_events (
+          event_id, session_id_hash, source_uuid_hash, human_ordinal, observed_at, available_at,
+          source_kind, excerpt, previous_action, action_first_locator_hash, action_last_locator_hash,
+          project, scope, raw_text_hash, source_locator_hash, processed_at
+        ) VALUES (?, ?, NULL, 1, ?, ?, 'user', '合成発話', 'action_unknown', NULL, NULL,
+          ?, ?, 'synthetic-raw-hash', ?, ?)
+      `).run(eventId, sessionId, at, at, project, scope, `locator-${eventId}`, at);
+      const result = applyCorrectionEvidence({ db, save }, {
+        eventId,
+        at,
+        bundleKey: detected.bundleKey,
+        ruleText: detected.ruleText,
+        topicKey: detected.topicKey,
+        polarity: detected.polarity,
+        conditionKey: correctionConditionKey(detected.ruleInput),
+        visibility,
+        decision: "candidate",
+        lifetimeKind: detected.lifetimeKind,
+        continuationBasis: detected.ruleInput.continuationBasis,
+        evidence: {
+          source: detected.source,
+          score: detected.score,
+          detectorVersion,
+          conditions: serializeCorrectionRuleInput(detected.ruleInput),
+          polarity: detected.polarity,
+        },
+      });
+      return result.bundleKey;
+    });
+  }
+
+  function addEvent(eventId: string, at: string): void {
+    storage.runCorrectionTransaction(({ db }) => {
+      db.prepare(`
+        INSERT INTO owner_correction_events (
+          event_id, session_id_hash, source_uuid_hash, human_ordinal, observed_at, available_at,
+          source_kind, excerpt, previous_action, action_first_locator_hash, action_last_locator_hash,
+          project, scope, raw_text_hash, source_locator_hash, processed_at
+        ) VALUES (?, 'synthetic-followup-session', NULL, 1, ?, ?, 'user', '合成発話', 'action_unknown', NULL, NULL,
+          'fixture-project', 'backend', 'synthetic-raw-hash', ?, ?)
+      `).run(eventId, at, at, `locator-${eventId}`, at);
+    });
+  }
+
   function addEmission(
     bundleKey: string,
     input: {
@@ -123,7 +242,11 @@ describe("owner correction injection policy", () => {
     });
   }
 
-  function addCorrectionEvidence(bundleKey: string, humanOrdinal: number): void {
+  function addCorrectionEvidence(
+    bundleKey: string,
+    humanOrdinal: number,
+    source: "utterance_detection" | "request_repeat" | "legacy_import" = "utterance_detection",
+  ): void {
     storage.runCorrectionTransaction(({ db }) => {
       const eventId = `synthetic-correction-${bundleKey}-${humanOrdinal}`;
       const at = "2026-10-03T00:00:00.000Z";
@@ -138,8 +261,8 @@ describe("owner correction injection policy", () => {
       db.prepare(`
         INSERT INTO owner_correction_evidence (
           event_id, bundle_key, source, score, detector_version, conditions, polarity
-        ) VALUES (?, ?, 'request_repeat', 2, 'fixture-v1', '[]', 'negative')
-      `).run(eventId, bundleKey);
+        ) VALUES (?, ?, ?, 2, 'fixture-v1', '[]', 'negative')
+      `).run(eventId, bundleKey, source);
     });
   }
 
@@ -170,6 +293,316 @@ describe("owner correction injection policy", () => {
       ...overrides,
     };
   }
+
+  function detectSyntheticCandidates(text: string) {
+    const ownerEvent = extractOwnerEvent({
+      type: "user",
+      origin: { kind: "human" },
+      sessionId: "synthetic-session",
+      uuid: "synthetic-correction-detection",
+      timestamp: "2026-10-03T00:00:00.000Z",
+      message: { content: text },
+    });
+    if (!ownerEvent) throw new Error("synthetic owner event was not extracted");
+    return detectOwnerCorrections(ownerEvent);
+  }
+
+  it("初回検出したv4候補を次sessionのSessionStartと関連発話へ仮注入し、既定offでは出さない", () => {
+    process.env.WASURENAGUSA_OWNER_SCOPE_BEHAVIOR = "off";
+    const bundleKey = addDetectedCandidate("first-detection");
+    delete process.env.WASURENAGUSA_CANDIDATE_INJECT;
+
+    const disabled = selectCorrectionInjections(storage, request({
+      sessionIdHash: "synthetic-next-session-off",
+      humanOrdinal: 0,
+      trigger: "start",
+    }));
+    expect(disabled.rules.map((rule) => rule.bundleKey)).not.toContain(bundleKey);
+
+    process.env.WASURENAGUSA_CANDIDATE_INJECT = "on";
+    const start = selectCorrectionInjections(storage, request({
+      sessionIdHash: "synthetic-next-session-start",
+      humanOrdinal: 0,
+      trigger: "start",
+    }));
+    const startRender = renderCorrectionRules({ trigger: "start", rules: start.rules, budgetTokens: 8000 });
+    expect(start.rules.map((rule) => rule.bundleKey)).toContain(bundleKey);
+    expect(startRender.text).toContain("（仮）");
+
+    const followup = selectCorrectionInjections(storage, request({
+      sessionIdHash: "synthetic-next-session-prompt",
+      humanOrdinal: 1,
+      trigger: "prompt",
+      query: "回答を100文字以内にする",
+    }));
+    expect(followup.rules.map((rule) => rule.bundleKey)).toContain(bundleKey);
+
+    const refresh = selectCorrectionInjections(storage, request({
+      sessionIdHash: "synthetic-next-session-refresh",
+      humanOrdinal: 31,
+      trigger: "refresh",
+      query: "回答を100文字以内にする",
+    }));
+    expect(refresh.rules.map((rule) => rule.bundleKey)).toContain(bundleKey);
+    expect(renderCorrectionRules({ trigger: "refresh", rules: refresh.rules }).text).toContain("（仮）");
+  });
+
+  it("取消・disputed・v3候補を出さず、同じ可視範囲の候補だけを選ぶ", () => {
+    process.env.WASURENAGUSA_CANDIDATE_INJECT = "on";
+    process.env.WASURENAGUSA_OWNER_SCOPE_BEHAVIOR = "off";
+    const activeKey = addDetectedCandidate("active-10");
+    const cancelledKey = addDetectedCandidate("cancelled-1");
+    const beforeCancellation = selectCorrectionInjections(storage, request({
+      sessionIdHash: "synthetic-before-cancellation",
+      humanOrdinal: 0,
+      trigger: "start",
+    }));
+    expect(beforeCancellation.rules.map((rule) => rule.bundleKey)).toContain(cancelledKey);
+    addEvent("synthetic-candidate-cancel-event", "2026-10-03T00:00:00.000Z");
+    storage.runCorrectionTransaction((transaction) => cancelCorrectionBundle(transaction, {
+      bundleKey: cancelledKey,
+      eventId: "synthetic-candidate-cancel-event",
+      at: "2026-10-03T00:00:00.000Z",
+    }));
+
+    const disputedKey = addDetectedCandidate("disputed-2");
+    const conflictKey = addDetectedCandidate("conflict-3");
+    addEvent("synthetic-candidate-dispute-event", "2026-10-03T00:00:00.000Z");
+    storage.runCorrectionTransaction((transaction) => disputeCorrectionBundles(transaction, {
+      bundleKeys: [disputedKey, conflictKey],
+      eventId: "synthetic-candidate-dispute-event",
+      at: "2026-10-03T00:00:00.000Z",
+    }));
+
+    const oldKey = addDetectedCandidate("old-4", "owner-correction-v3");
+    const otherProjectKey = addDetectedCandidate("other-project-5", "owner-correction-v4", "another-project");
+    const otherScopeKey = addDetectedCandidate("other-scope-6", "owner-correction-v4", "fixture-project", "frontend");
+    const ownerKey = addDetectedCandidate("owner-visible-7", "owner-correction-v4", "another-project", "backend", "owner");
+    const selected = selectCorrectionInjections(storage, request({
+      sessionIdHash: "synthetic-next-session-filtering",
+      humanOrdinal: 0,
+      trigger: "start",
+    }));
+
+    expect(selected.rules.map((rule) => rule.bundleKey)).toContain(activeKey);
+    expect(selected.rules.map((rule) => rule.bundleKey)).toContain(ownerKey);
+    expect(selected.rules.map((rule) => rule.bundleKey)).not.toContain(cancelledKey);
+    expect(selected.rules.map((rule) => rule.bundleKey)).not.toContain(disputedKey);
+    expect(selected.rules.map((rule) => rule.bundleKey)).not.toContain(oldKey);
+    expect(selected.rules.map((rule) => rule.bundleKey)).not.toContain(otherProjectKey);
+    expect(selected.rules.map((rule) => rule.bundleKey)).not.toContain(otherScopeKey);
+  });
+
+  it("候補は開始時6件の確認済み規則を押し出さない", () => {
+    process.env.WASURENAGUSA_CANDIDATE_INJECT = "on";
+    process.env.WASURENAGUSA_OWNER_SCOPE_BEHAVIOR = "off";
+    const candidateKey = addDetectedCandidate("low-priority-8");
+    for (let index = 0; index < 6; index += 1) {
+      addRule({ bundleKey: `confirmed-${index}`, topicKey: "verification", intensity: 1 });
+    }
+    const selected = selectCorrectionInjections(storage, request({
+      sessionIdHash: "synthetic-next-session-priority",
+      humanOrdinal: 0,
+      trigger: "start",
+    }));
+
+    expect(selected.rules).toHaveLength(6);
+    expect(selected.rules.map((rule) => rule.bundleKey)).not.toContain(candidateKey);
+    expect(selected.rules.every((rule) => rule.bundleKey.startsWith("confirmed-"))).toBe(true);
+  });
+
+  it("提案だけでは配送を止めず、Jev受取後にprompt・refreshから外し、startには残す", () => {
+    migrateToV13();
+    process.env.WASURENAGUSA_GRADUATION = "on";
+    process.env.WASURENAGUSA_PRINCIPLES = "on";
+    delete process.env.WASURENAGUSA_JEV_KNOWLEDGE_PATH;
+    const principleKey = `pr:v1:${"c".repeat(64)}`;
+    const memberKey = `oc:v2:${"d".repeat(64)}`;
+    addRule({ bundleKey: principleKey, topicKey: "principle", lastSeenAt: "2026-09-28T00:00:00.000Z" });
+    const complianceMemberKey = "oc:v2:" + "e".repeat(64);
+    addRule({
+      bundleKey: complianceMemberKey,
+      topicKey: "expression_policy",
+      ruleText: "略号を使わない合成規則",
+      lastSeenAt: "2026-09-28T00:00:00.000Z",
+    });
+    addRule({ bundleKey: memberKey, topicKey: "verification", lastSeenAt: "2026-09-28T00:00:00.000Z" });
+    storage.runCorrectionTransaction(({ db }) => {
+      db.prepare(`
+        INSERT INTO owner_correction_principle_members (
+          principle_key, member_key, attached_at, attach_source
+        ) VALUES (?, ?, '2026-09-28T00:00:00.000Z', 'cluster')
+      `).run(principleKey, memberKey);
+      db.prepare(`
+        INSERT INTO owner_correction_strength_events (
+          bundle_key, at, from_intensity, to_intensity, delta, reason, basis
+        ) VALUES (?, '2026-10-01T00:00:00.000Z', 3, 3, 0, 'manual', ?)
+      `).run(principleKey, JSON.stringify({ signal: "settled", sessionCount: 5, dayCount: 3 }));
+    });
+    storage.runCorrectionTransaction(({ db }) => {
+      db.prepare("INSERT INTO owner_correction_principle_members (principle_key, member_key, attached_at, attach_source) VALUES (?, ?, '2026-09-28T00:00:00.000Z', 'cluster')").run(principleKey, complianceMemberKey);
+    });
+    const proposal = createCorrectionGraduationProposal(storage, {
+      at: "2026-10-07T00:00:00.000Z",
+      sourceHead: "f".repeat(40),
+    });
+    expect(proposal?.principles.map((principle) => principle.principle_key)).toContain(principleKey);
+
+    const knowledgePath = join(tempDir, "jev-knowledge.json");
+    writeFileSync(knowledgePath, JSON.stringify({ version: 1, cards: [] }), "utf8");
+    process.env.WASURENAGUSA_JEV_KNOWLEDGE_PATH = knowledgePath;
+    const pendingPrompt = selectCorrectionInjections(storage, request({
+      at: "2026-10-08T00:00:00.000Z",
+      trigger: "prompt",
+      humanOrdinal: 1,
+    }));
+    const pendingRefresh = selectCorrectionInjections(storage, request({
+      at: "2026-10-08T00:00:00.000Z",
+      trigger: "refresh",
+      humanOrdinal: 31,
+    }));
+    expect(pendingPrompt.rules.map((rule) => rule.bundleKey)).toContain(principleKey);
+    expect(pendingRefresh.rules.map((rule) => rule.bundleKey)).toContain(principleKey);
+
+    writeFileSync(knowledgePath, JSON.stringify({
+      version: 1,
+      cards: [{ id: "g-synthetic", evidence_ids: [principleKey] }],
+    }), "utf8");
+
+    const prompt = selectCorrectionInjections(storage, request({
+      at: "2026-10-08T00:00:00.000Z",
+      trigger: "prompt",
+      humanOrdinal: 1,
+    }));
+    const refresh = selectCorrectionInjections(storage, request({
+      at: "2026-10-08T00:00:00.000Z",
+      trigger: "refresh",
+      humanOrdinal: 31,
+    }));
+    const start = selectCorrectionInjections(storage, request({
+      at: "2026-10-08T00:00:00.000Z",
+      trigger: "start",
+      humanOrdinal: 0,
+    }));
+
+    expect(prompt.rules.map((rule) => rule.bundleKey)).not.toContain(principleKey);
+    expect(refresh.rules.map((rule) => rule.bundleKey)).not.toContain(principleKey);
+    expect(start.rules.map((rule) => rule.bundleKey)).toContain(principleKey);
+  });
+
+  it("schema v12では卒業表を参照せず既存の注入を続ける", () => {
+    process.env.WASURENAGUSA_GRADUATION = "on";
+    process.env.WASURENAGUSA_JEV_KNOWLEDGE_PATH = join(tempDir, "missing-jev-knowledge.json");
+    addRule({ bundleKey: "schema-v12-rule", topicKey: "verification" });
+
+    const result = selectCorrectionInjections(storage, request({ trigger: "start", humanOrdinal: 0 }));
+
+    expect(result.rules.map((rule) => rule.bundleKey)).toContain("schema-v12-rule");
+  });
+
+  it("schema v12では強度補正表を参照せず既存の注入を続ける", () => {
+    process.env.WASURENAGUSA_STRENGTH = "off";
+    addRule({ bundleKey: "schema-v12-strength-rule", topicKey: "verification" });
+
+    const result = selectCorrectionInjections(storage, request({ trigger: "start", humanOrdinal: 0 }));
+
+    expect(result.rules.map((rule) => rule.bundleKey)).toContain("schema-v12-strength-rule");
+  });
+
+  it("強度offでは保存済み補正を除いて並べ、onへ戻すと補正順位を戻す", () => {
+    migrateToV13();
+    addRule({ bundleKey: "strength-adjusted-rule", topicKey: "verification", intensity: 2 });
+    addRule({ bundleKey: "base-stronger-rule", topicKey: "verification", intensity: 4 });
+    storage.runCorrectionTransaction(({ db }) => {
+      const bundle = db.prepare(`
+        SELECT memory_id FROM owner_correction_bundles WHERE bundle_key = ?
+      `).get("strength-adjusted-rule") as { memory_id: string };
+      db.prepare("UPDATE owner_correction_bundles SET intensity = 5 WHERE bundle_key = ?")
+        .run("strength-adjusted-rule");
+      db.prepare("UPDATE memories SET intensity = 5 WHERE id = ?").run(bundle.memory_id);
+      db.prepare(`
+        INSERT INTO owner_correction_strength_events (
+          bundle_key, at, from_intensity, to_intensity, delta, reason, basis
+        ) VALUES (?, '2026-10-02T00:00:00.000Z', 2, 5, 3, 'failure', '{"baseIntensity":2}')
+      `).run("strength-adjusted-rule");
+    });
+    expect(storage.runCorrectionTransaction(({ db }) => db.prepare(
+      "SELECT intensity FROM owner_correction_bundles WHERE bundle_key = ?",
+    ).get("strength-adjusted-rule") as { intensity: number }).intensity).toBe(5);
+
+    process.env.WASURENAGUSA_STRENGTH = "off";
+    const offResult = selectCorrectionInjections(storage, request({ trigger: "start", humanOrdinal: 0 }));
+    expect(offResult.rules.map((rule) => rule.bundleKey)).toEqual([
+      "base-stronger-rule",
+      "strength-adjusted-rule",
+    ]);
+
+    process.env.WASURENAGUSA_STRENGTH = "on";
+    const onResult = selectCorrectionInjections(storage, request({ trigger: "start", humanOrdinal: 0 }));
+    expect(onResult.rules.map((rule) => rule.bundleKey)).toEqual([
+      "strength-adjusted-rule",
+      "base-stronger-rule",
+    ]);
+  });
+
+  it("卒業後に新根拠が届いた発話では取消してprompt注入へ戻す", () => {
+    migrateToV13();
+    process.env.WASURENAGUSA_GRADUATION = "on";
+    addRule({ bundleKey: "graduation-revoked", topicKey: "verification" });
+    storage.runCorrectionTransaction(({ db }) => {
+      db.prepare(`
+        INSERT INTO owner_correction_graduations (bundle_key, graduated_at, proposal_hash)
+        VALUES (?, '2026-10-02T00:00:00.000Z', 'synthetic-proposal-hash')
+      `).run("graduation-revoked");
+    });
+    addCorrectionEvidence("graduation-revoked", 1);
+
+    const result = selectCorrectionInjections(storage, request({
+      at: "2026-10-04T00:00:00.000Z",
+      trigger: "prompt",
+      humanOrdinal: 2,
+    }));
+    const graduation = storage.runCorrectionTransaction(({ db }) => db.prepare(`
+      SELECT revoked_at FROM owner_correction_graduations WHERE bundle_key = ?
+    `).get("graduation-revoked") as { revoked_at: string | null });
+
+    expect(graduation.revoked_at).toBe("2026-10-04T00:00:00.000Z");
+    expect(result.rules.map((rule) => rule.bundleKey)).toContain("graduation-revoked");
+  });
+
+  it("卒業offではJev反映済みの原則をprompt注入へ戻す", () => {
+    migrateToV13();
+    process.env.WASURENAGUSA_GRADUATION = "on";
+    process.env.WASURENAGUSA_PRINCIPLES = "on";
+    const principleKey = `pr:v1:${"a".repeat(64)}`;
+    const memberKey = `oc:v2:${"b".repeat(64)}`;
+    addRule({ bundleKey: principleKey, topicKey: "principle" });
+    addRule({ bundleKey: memberKey, topicKey: "verification" });
+    storage.runCorrectionTransaction(({ db }) => {
+      db.prepare(`
+        INSERT INTO owner_correction_principle_members (
+          principle_key, member_key, attached_at, attach_source
+        ) VALUES (?, ?, '2026-10-02T00:00:00.000Z', 'cluster')
+      `).run(principleKey, memberKey);
+      db.prepare(`
+        INSERT INTO owner_correction_graduations (bundle_key, graduated_at, proposal_hash)
+        VALUES (?, '2026-10-02T00:00:00.000Z', 'synthetic-proposal-hash')
+      `).run(principleKey);
+    });
+    const knowledgePath = join(tempDir, "jev-knowledge.json");
+    writeFileSync(knowledgePath, JSON.stringify({
+      version: 1,
+      cards: [{ id: "g-synthetic", evidence_ids: [principleKey] }],
+    }), "utf8");
+    process.env.WASURENAGUSA_JEV_KNOWLEDGE_PATH = knowledgePath;
+
+    const graduated = selectCorrectionInjections(storage, request({ humanOrdinal: 1, trigger: "prompt" }));
+    process.env.WASURENAGUSA_GRADUATION = "off";
+    const restored = selectCorrectionInjections(storage, request({ humanOrdinal: 1, trigger: "prompt" }));
+
+    expect(graduated.rules.map((rule) => rule.bundleKey)).not.toContain(principleKey);
+    expect(restored.rules.map((rule) => rule.bundleKey)).toContain(principleKey);
+  });
 
   it("開始時にtopicごとに巡回し、6件を超える常時規則を未到達にする", () => {
     addRule({ bundleKey: "design-first", topicKey: "design_components", intensity: 5 });
@@ -255,6 +688,7 @@ describe("owner correction injection policy", () => {
     addEmission("refresh-one", { humanOrdinal: 0, outputOrder: 1 });
     addEmission("refresh-two", { humanOrdinal: 0, outputOrder: 2 });
     addEmission("cooling-project", { humanOrdinal: 1, trigger: "prompt" });
+    process.env.WASURENAGUSA_CORRECTION_REINJECT = "off";
 
     const at30 = selectCorrectionInjections(storage, request({ humanOrdinal: 30 }));
     const at31 = selectCorrectionInjections(storage, request({ humanOrdinal: 31 }));
@@ -299,15 +733,30 @@ describe("owner correction injection policy", () => {
     expect(result.rules[2]).toMatchObject({ bundleKey: "related-project", delivery: "related" });
   });
 
-  it("同一束への再訂正は10発話冷却を解除する", () => {
+  it("reinjection offではrequest_repeat根拠で従来どおり10発話冷却を解除する", () => {
+    process.env.WASURENAGUSA_CORRECTION_REINJECT = "off";
     addRule({ bundleKey: "reconfirmed-rule", topicKey: "tone" });
     addEmission("reconfirmed-rule", { humanOrdinal: 1 });
-    addCorrectionEvidence("reconfirmed-rule", 2);
+    addCorrectionEvidence("reconfirmed-rule", 2, "request_repeat");
 
     const result = selectCorrectionInjections(storage, request({ humanOrdinal: 2 }));
 
     expect(result.rules).toEqual([expect.objectContaining({
       bundleKey: "reconfirmed-rule",
+      delivery: "restore",
+    })]);
+  });
+
+  it("reinjection onでは一致したutterance_detection根拠で10発話冷却を解除する", () => {
+    process.env.WASURENAGUSA_CORRECTION_REINJECT = "on";
+    addRule({ bundleKey: "reconfirmed-rule-on", topicKey: "tone" });
+    addEmission("reconfirmed-rule-on", { humanOrdinal: 1 });
+    addCorrectionEvidence("reconfirmed-rule-on", 2, "utterance_detection");
+
+    const result = selectCorrectionInjections(storage, request({ humanOrdinal: 2 }));
+
+    expect(result.rules).toEqual([expect.objectContaining({
+      bundleKey: "reconfirmed-rule-on",
       delivery: "restore",
     })]);
   });
@@ -326,12 +775,356 @@ describe("owner correction injection policy", () => {
   it("常時規則も関連分から再提示でき、10発話冷却と束版重複除去を守る", () => {
     addRule({ bundleKey: "always-related", topicKey: "document_delivery", ruleText: "全文提示の条件を守る合成規則" });
     addEmission("always-related", { humanOrdinal: 1, trigger: "prompt" });
+    process.env.WASURENAGUSA_CORRECTION_REINJECT = "off";
 
     const cooled = selectCorrectionInjections(storage, request({ query: "全文提示", humanOrdinal: 11 }));
     const afterCooldown = selectCorrectionInjections(storage, request({ query: "全文提示", humanOrdinal: 12 }));
 
     expect(cooled.rules.map((rule) => rule.bundleKey)).not.toContain("always-related");
     expect(afterCooldown.rules.map((rule) => rule.bundleKey)).toContain("always-related");
+  });
+
+  it("既定onでも話題一致だけでは冷却中の確定束を再注入しない", () => {
+    addRule({ bundleKey: "repeated-related", topicKey: "document_delivery", ruleText: "全文提示の条件を守る合成規則" });
+    addEmission("repeated-related", { humanOrdinal: 1, trigger: "prompt" });
+    delete process.env.WASURENAGUSA_CORRECTION_REINJECT;
+
+    const result = selectCorrectionInjections(storage, request({ query: "全文提示", humanOrdinal: 2 }));
+
+    expect(result.rules.map((rule) => rule.bundleKey)).not.toContain("repeated-related");
+  });
+
+  it("『だから全文出せって』だけが全文注意の冷却を解除し、保存場所の質問は解除しない", () => {
+    const initial = detectSyntheticCandidates("全文出して")[0];
+    const correction = detectSyntheticCandidates("だから全文出せって").find((candidate) =>
+      candidate.source === "utterance_detection",
+    );
+    if (!initial?.bundleKey || !correction?.bundleKey) throw new Error("synthetic correction bundle was not detected");
+    expect(correction.bundleKey).toBe(initial.bundleKey);
+    const storedKey = storedBundleKey(
+      initial.bundleKey,
+      "fixture-project",
+      "backend",
+      "synthetic-session",
+      initial.lifetimeKind,
+      "project",
+    );
+    addRule({
+      bundleKey: storedKey,
+      topicKey: "document_delivery",
+      ruleText: "文章は全文を表示する",
+      visibility: "project",
+    });
+    addEmission(storedKey, { humanOrdinal: 1, trigger: "prompt" });
+
+    const corrected = selectCorrectionInjections(storage, request({
+      query: "だから全文出せって",
+      humanOrdinal: 2,
+      detectedStoredCorrectionBundleKeys: [storedKey],
+    }));
+    const unrelated = detectSyntheticCandidates("文書の保存場所は？");
+    const unrelatedCorrectionBundleKeys = unrelated.flatMap((candidate) => {
+      if (candidate.source !== "utterance_detection" || !candidate.bundleKey) return [];
+      return [candidate.bundleKey];
+    });
+    const askedLocation = selectCorrectionInjections(storage, request({
+      query: "文書の保存場所は？",
+      humanOrdinal: 2,
+      detectedStoredCorrectionBundleKeys: unrelatedCorrectionBundleKeys,
+    }));
+
+    expect(corrected.rules.map((rule) => rule.bundleKey)).toContain(storedKey);
+    expect(corrected.correctionMatchedReinjectionKeys).toContain(`${storedKey}:1`);
+    expect(unrelated).toEqual([]);
+    expect(askedLocation.rules.map((rule) => rule.bundleKey)).not.toContain(storedKey);
+  });
+
+  it("同じ話題の別注意を訂正したとき、その束だけ冷却を解除する", () => {
+    const fullText = detectSyntheticCandidates("全文出して")[0];
+    const externalDocument = detectSyntheticCandidates("今後は社外向け文書は全文を出して")[0];
+    const correction = detectSyntheticCandidates("前にも言った、今後は社外向け文書は全文を出せ")
+      .find((candidate) => candidate.source === "utterance_detection");
+    if (!fullText?.bundleKey || !externalDocument?.bundleKey || !correction?.bundleKey) {
+      throw new Error("synthetic correction bundles were not detected");
+    }
+    expect(correction.bundleKey).toBe(externalDocument.bundleKey);
+    expect(correction.bundleKey).not.toBe(fullText.bundleKey);
+    const fullTextStoredKey = storedBundleKey(
+      fullText.bundleKey,
+      "fixture-project",
+      "backend",
+      "synthetic-session",
+      fullText.lifetimeKind,
+      "project",
+    );
+    const externalStoredKey = storedBundleKey(
+      externalDocument.bundleKey,
+      "fixture-project",
+      "backend",
+      "synthetic-session",
+      externalDocument.lifetimeKind,
+      "project",
+    );
+    addRule({
+      bundleKey: fullTextStoredKey,
+      topicKey: "document_delivery",
+      ruleText: "文章は全文を表示する",
+      visibility: "project",
+    });
+    addRule({
+      bundleKey: externalStoredKey,
+      topicKey: "document_delivery",
+      ruleText: "社外向け文書は毎回全文を表示する",
+      visibility: "project",
+    });
+    addEmission(fullTextStoredKey, { humanOrdinal: 1, trigger: "prompt" });
+    addEmission(externalStoredKey, { humanOrdinal: 1, trigger: "prompt", outputOrder: 2 });
+
+    const result = selectCorrectionInjections(storage, request({
+      query: "前にも言った、今後は社外向け文書は全文を出せ",
+      humanOrdinal: 2,
+      detectedStoredCorrectionBundleKeys: [externalStoredKey],
+    }));
+
+    expect(result.rules.map((rule) => rule.bundleKey)).toEqual([externalStoredKey]);
+    expect(result.correctionMatchedReinjectionKeys).toEqual([`${externalStoredKey}:1`]);
+  });
+
+  it.each([
+    { mode: "shadow", state: "candidate", shouldReinject: false },
+    { mode: "off", state: "confirmed", shouldReinject: false },
+    { mode: "on", state: "candidate", shouldReinject: false },
+    { mode: "on", state: "cancelled", shouldReinject: false },
+    { mode: "on", state: "confirmed", shouldReinject: true },
+  ] as const)("原則構成員による冷却解除は有効なon原則だけに限る ($mode/$state)", (scenario) => {
+    migrateToV13();
+    process.env.WASURENAGUSA_PRINCIPLES = scenario.mode;
+    process.env.WASURENAGUSA_CORRECTION_REINJECT = "on";
+    process.env.WASURENAGUSA_OWNER_SCOPE_BEHAVIOR = "off";
+    const memberA = `oc:v2:${"a".repeat(64)}`;
+    const memberB = `oc:v2:${"b".repeat(64)}`;
+    const principleKey = `pr:v1:${"c".repeat(64)}`;
+    const sharedRuleText = "文章は毎回全文で表示する合成規則";
+    addRule({ bundleKey: memberA, topicKey: "document_delivery", ruleText: sharedRuleText, visibility: "project" });
+    addRule({ bundleKey: memberB, topicKey: "document_delivery", ruleText: sharedRuleText, visibility: "project" });
+    addRule({ bundleKey: principleKey, topicKey: "principle", ruleText: sharedRuleText, visibility: "project" });
+    storage.runCorrectionTransaction(({ db }) => {
+      db.prepare(`
+        INSERT INTO owner_correction_principle_members (
+          principle_key, member_key, attached_at, attach_source
+        ) VALUES (?, ?, '2026-10-02T00:00:00.000Z', 'cluster')
+      `).run(principleKey, memberA);
+      db.prepare(`
+        INSERT INTO owner_correction_principle_members (
+          principle_key, member_key, attached_at, attach_source
+        ) VALUES (?, ?, '2026-10-02T00:00:00.000Z', 'cluster')
+      `).run(principleKey, memberB);
+      if (scenario.state === "candidate") {
+        db.prepare("UPDATE owner_correction_bundles SET status = 'candidate' WHERE bundle_key = ?").run(principleKey);
+        db.prepare("UPDATE owner_correction_versions SET status = 'candidate' WHERE bundle_key = ?").run(principleKey);
+      }
+    });
+    if (scenario.state === "cancelled") {
+      const eventId = "synthetic-principle-cancellation";
+      addEvent(eventId, "2026-10-03T00:00:00.000Z");
+      storage.runCorrectionTransaction((transaction) => cancelCorrectionBundle(transaction, {
+        bundleKey: principleKey,
+        eventId,
+        at: "2026-10-03T00:00:00.000Z",
+      }));
+    }
+    addEmission(memberA, { humanOrdinal: 1, trigger: "prompt" });
+    addCorrectionEvidence(memberB, 2);
+
+    const result = selectCorrectionInjections(storage, request({
+      query: "だから全文出せって",
+      humanOrdinal: 2,
+      detectedStoredCorrectionBundleKeys: [memberB],
+    }));
+
+    expect(result.rules.map((rule) => rule.bundleKey).includes(memberA)).toBe(scenario.shouldReinject);
+    expect(result.correctionMatchedReinjectionKeys.includes(`${memberA}:1`)).toBe(scenario.shouldReinject);
+  });
+
+  it("同じ原則の構成元への訂正は原則束の冷却を解除する", () => {
+    migrateToV13();
+    process.env.WASURENAGUSA_PRINCIPLES = "on";
+    const member = detectSyntheticCandidates("だから全文出せって").find((candidate) =>
+      candidate.source === "utterance_detection",
+    );
+    if (!member?.bundleKey) throw new Error("synthetic principle member was not detected");
+    const memberStoredKey = storedBundleKey(
+      member.bundleKey,
+      "fixture-project",
+      "backend",
+      "synthetic-session",
+      member.lifetimeKind,
+      "project",
+    );
+    const principleKey = `pr:v1:${"a".repeat(64)}`;
+    addRule({
+      bundleKey: principleKey,
+      topicKey: "document_delivery",
+      ruleText: "文章は毎回全文を表示する",
+      visibility: "project",
+    });
+    addRule({
+      bundleKey: memberStoredKey,
+      topicKey: "document_delivery",
+      ruleText: "文章は全文を表示する",
+      visibility: "project",
+    });
+    storage.runCorrectionTransaction(({ db }) => {
+      db.prepare(`
+        INSERT INTO owner_correction_principle_members (
+          principle_key, member_key, attached_at, attach_source
+        ) VALUES (?, ?, '2026-10-02T00:00:00.000Z', 'cluster')
+      `).run(principleKey, memberStoredKey);
+    });
+    addEmission(principleKey, { humanOrdinal: 1, trigger: "prompt" });
+
+    const result = selectCorrectionInjections(storage, request({
+      query: "だから全文出せって",
+      humanOrdinal: 2,
+      detectedStoredCorrectionBundleKeys: [memberStoredKey],
+    }));
+
+    expect(result.rules.map((rule) => rule.bundleKey)).toContain(principleKey);
+    expect(result.rules.map((rule) => rule.bundleKey)).not.toContain(memberStoredKey);
+    expect(result.correctionMatchedReinjectionKeys).toContain(`${principleKey}:1`);
+  });
+
+  it("無関係な話題では冷却中の確定束を再注入しない", () => {
+    addRule({ bundleKey: "unrelated-confirmed", topicKey: "document_delivery", ruleText: "全文提示の条件を守る合成規則" });
+    addEmission("unrelated-confirmed", { humanOrdinal: 1, trigger: "prompt" });
+
+    const result = selectCorrectionInjections(storage, request({ query: "無関係な合成検索語", humanOrdinal: 2 }));
+
+    expect(result.rules.map((rule) => rule.bundleKey)).not.toContain("unrelated-confirmed");
+  });
+
+  it("環境変数offでは関連一致も従来どおり10発話冷却する", () => {
+    addRule({ bundleKey: "disabled-reinjection", topicKey: "document_delivery", ruleText: "全文提示の条件を守る合成規則" });
+    addEmission("disabled-reinjection", { humanOrdinal: 1, trigger: "prompt" });
+    process.env.WASURENAGUSA_CORRECTION_REINJECT = " OFF ";
+
+    const duringCooldown = selectCorrectionInjections(storage, request({ query: "全文提示", humanOrdinal: 11 }));
+    const afterCooldown = selectCorrectionInjections(storage, request({ query: "全文提示", humanOrdinal: 12 }));
+
+    expect(duringCooldown.rules.map((rule) => rule.bundleKey)).not.toContain("disabled-reinjection");
+    expect(afterCooldown.rules.map((rule) => rule.bundleKey)).toContain("disabled-reinjection");
+  });
+
+  it("定期refreshでも冷却中の関連一致を同じ発話に再注入し、周期枠を保つ", () => {
+    addRule({ bundleKey: "refresh-related", topicKey: "document_delivery", ruleText: "全文提示の条件を守る合成規則", visibility: "project" });
+    addRule({ bundleKey: "refresh-routine", topicKey: "verification", ruleText: "出典を確認する合成規則" });
+    addEmission("refresh-related", { humanOrdinal: 21, trigger: "prompt" });
+    addEmission("refresh-routine", { humanOrdinal: 0, trigger: "start" });
+    addCorrectionEvidence("refresh-related", 31);
+    delete process.env.WASURENAGUSA_CORRECTION_REINJECT;
+
+    const selection = selectCorrectionInjections(storage, request({
+      query: "全文提示",
+      trigger: "refresh",
+      humanOrdinal: 31,
+    }));
+    selection.rules.forEach((rule, index) => addEmission(rule.bundleKey, {
+      humanOrdinal: 31,
+      trigger: "refresh",
+      outputOrder: index + 1,
+    }));
+    const retry = selectCorrectionInjections(storage, request({
+      query: "全文提示",
+      trigger: "refresh",
+      humanOrdinal: 31,
+    }));
+    const rendered = renderCorrectionRules({ trigger: "refresh", rules: selection.rules, budgetTokens: 8000 });
+
+    expect(selection.rules).toEqual([
+      expect.objectContaining({ bundleKey: "refresh-related", delivery: "refresh" }),
+      expect.objectContaining({ bundleKey: "refresh-routine", delivery: "refresh" }),
+    ]);
+    expect(retry.rules.map((rule) => rule.bundleKey)).not.toContain("refresh-related");
+    expect(rendered.includedRules.map((rule) => rule.bundleKey)).toEqual([
+      "refresh-related",
+      "refresh-routine",
+    ]);
+    expect(rendered.tokenCount).toBeLessThanOrEqual(800);
+  });
+
+  it("refreshの復元候補と冷却中の関連一致は2件枠内で関連一致を先に選ぶ", () => {
+    addRule({ bundleKey: "refresh-related-cap", topicKey: "document_delivery", ruleText: "全文提示の条件を守る合成規則", visibility: "project" });
+    addRule({ bundleKey: "refresh-restore-a", topicKey: "tone" });
+    addRule({ bundleKey: "refresh-restore-b", topicKey: "verification" });
+    addEmission("refresh-related-cap", { humanOrdinal: 21, trigger: "prompt" });
+    addCorrectionEvidence("refresh-related-cap", 31);
+    delete process.env.WASURENAGUSA_CORRECTION_REINJECT;
+
+    const selection = selectCorrectionInjections(storage, request({
+      query: "全文提示",
+      trigger: "refresh",
+      humanOrdinal: 31,
+    }));
+
+    expect(selection.rules).toEqual([
+      expect.objectContaining({ bundleKey: "refresh-related-cap", delivery: "refresh" }),
+      expect.objectContaining({ bundleKey: "refresh-restore-a", delivery: "restore" }),
+    ]);
+    expect(selection.rules).toHaveLength(2);
+  });
+
+  it("refreshではcompliance復元を先にし、関連一致を既存2件枠内で次に選ぶ", () => {
+    addRule({ bundleKey: "refresh-compliance-priority", topicKey: "tone", ruleText: "常体で回答する" });
+    addRule({ bundleKey: "refresh-related-after-compliance", topicKey: "document_delivery", ruleText: "全文提示の条件を守る合成規則", visibility: "project" });
+    addRule({ bundleKey: "refresh-restore-after-related", topicKey: "verification" });
+    addEmission("refresh-compliance-priority", { humanOrdinal: 1, trigger: "start" });
+    addComplianceViolation("refresh-compliance-priority", 2);
+    addEmission("refresh-related-after-compliance", { humanOrdinal: 21, trigger: "prompt" });
+    addCorrectionEvidence("refresh-related-after-compliance", 31);
+    process.env.WASURENAGUSA_CORRECTION_COMPLIANCE = "on";
+    delete process.env.WASURENAGUSA_CORRECTION_REINJECT;
+
+    const selection = selectCorrectionInjections(storage, request({
+      query: "全文提示",
+      trigger: "refresh",
+      humanOrdinal: 31,
+    }));
+    const rendered = renderCorrectionRules({ trigger: "refresh", rules: selection.rules, budgetTokens: 8000 });
+
+    expect(selection.rules).toEqual([
+      expect.objectContaining({
+        bundleKey: "refresh-compliance-priority",
+        delivery: "restore",
+        complianceViolation: true,
+      }),
+      expect.objectContaining({ bundleKey: "refresh-related-after-compliance", delivery: "refresh" }),
+    ]);
+    expect(selection.rules).toHaveLength(2);
+    expect(rendered.includedRules.map((rule) => rule.bundleKey)).toEqual([
+      "refresh-compliance-priority",
+      "refresh-related-after-compliance",
+    ]);
+    expect(rendered.tokenCount).toBeLessThanOrEqual(800);
+  });
+
+  it("関連再注入の最終本文は発話の800 token上限を超えない", () => {
+    const longRuleText = "全文提示の条件を守る合成規則" + "あ".repeat(220);
+    addRule({ bundleKey: "budget-related-a", topicKey: "document_delivery", ruleText: longRuleText, visibility: "project" });
+    addRule({ bundleKey: "budget-related-b", topicKey: "document_delivery", ruleText: longRuleText, visibility: "project" });
+    addRule({ bundleKey: "budget-related-c", topicKey: "document_delivery", ruleText: longRuleText, visibility: "project" });
+    addEmission("budget-related-a", { humanOrdinal: 1, trigger: "prompt" });
+    addEmission("budget-related-b", { humanOrdinal: 1, trigger: "prompt" });
+    addEmission("budget-related-c", { humanOrdinal: 1, trigger: "prompt" });
+    addCorrectionEvidence("budget-related-a", 2);
+    addCorrectionEvidence("budget-related-b", 2);
+    addCorrectionEvidence("budget-related-c", 2);
+
+    const selection = selectCorrectionInjections(storage, request({ query: "全文提示", humanOrdinal: 2 }));
+    const rendered = renderCorrectionRules({ trigger: "prompt", rules: selection.rules, budgetTokens: 8000 });
+
+    expect(selection.rules.filter((rule) => rule.delivery === "related")).toHaveLength(2);
+    expect(rendered.tokenCount).toBeLessThanOrEqual(800);
+    expect(rendered.includedRules.every((rule) => rule.ruleText.length <= 240)).toBe(true);
   });
 
   it("同一束版が未到達復元と関連検索に重複しても1件だけ選ぶ", () => {

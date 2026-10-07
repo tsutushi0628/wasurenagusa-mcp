@@ -83,7 +83,32 @@ const PAST_CORRECTION_REFERENCE = /(?:前回|前(?:にも|も|に)|以前(?:に�
 const REPRIMAND_MARKER = /(?:もう)?(?:何回|何度)(?:も)?(?:言わせる|言わす|言ったら|言った|伝えさせる)(?:(?:んだ|の)?(?:よね|よ|でしょう|かな)?)/gu;
 const REPEAT_ADVERB = /(?:再度|再び|繰り返し)/gu;
 const ALSO_CUE = /(^|[、,\s])また(?=$|[、,\s]|[\p{Script=Han}\p{Script=Katakana}])/gu;
+const EXPRESSION_TARGET = /略号|略語|比喩|用語|言葉/u;
+const ATTRIBUTIVE_MODIFIER = /^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー]+(?:な|い|の|た|ない|らしい|っぽい)$/u;
+const OWNER_UNCLEAR_EXPRESSION_CLASS = "\u0000owner-unclear:";
+const OWNER_UNCLEAR_EXPRESSION_MODIFIERS = new Set([
+  "変な",
+  "俺のわからない",
+  "俺の分からない",
+  "私のわからない",
+  "私の分からない",
+  "僕のわからない",
+  "僕の分からない",
+  "知らない",
+  "わからない",
+  "分からない",
+  "意味不明な",
+  "意味不明の",
+  "意味がわからない",
+  "意味が分からない",
+  "意味のわからない",
+  "意味の分からない",
+  "理解できない",
+  "理解不能な",
+  "不明な",
+]);
 const CORRECTIVE_COMMAND_PREDICATE = /(?:するな|やめ(?:て|ろ)|しないで|答え(?:て|ろ)(?:ください)?|示(?:して|せ)(?:ください)?|出(?:して|せ)(?:ください)?|止(?:めて|まれ)(?:ください)?|確認(?:して|しろ)(?:ください)?|使(?:って|え|うな?)(?:ください)?|維持(?:して|しろ)(?:ください)?|変更(?:して|しろ)(?:ください)?|説明(?:して|しろ)(?:ください)?|省(?:いて|け)|除外(?:して|しろ)|照合(?:して|しろ)(?:ください)?|提示(?:して|しろ)(?:ください)?|表示(?:して|しろ)(?:ください)?|見せ(?:て|ないで|るな)(?:ください)?|(?:出|示|提示|表示|使|説明|省)(?:さないで|しないで|わないで|さない|しない)|(?:文字|字|件|行|項目)(?:以内|以下|未満|程度)?[^、。！？!?]{0,8}にして|まとめて|短くして|制限して|解除して|避けて|控えて|再利用して|保存して|配置して|保持して|保管して|担当して|任せて|委譲して|割り当てて|実行して|設計(?:して|する)|実装(?:して|する)|検証(?:して|する)|分析(?:して|する)|レビュー(?:して|する)|テスト(?:して|する)|付けて|書いて|作成して|変えて|禁止)/u;
+const GENERIC_NEGATIVE_COMMAND = /(?:(?:書(?:くな|かないで?)|待(?:つな|たないで?)|出(?:すな|さないで?)|示(?:すな|さないで?)|使(?:うな|わないで?)|省(?:くな|かないで?)|答え(?:るな|ないで?)|止め(?:るな|ないで?)|見せ(?:るな|ないで?)|避け(?:るな|ないで?)|控え(?:るな|ないで?)|まとめ(?:るな|ないで?)|変え(?:るな|ないで?))|(?:回答|返事|説明|置換|言い換|制限|解除|維持|再利用|変更|確認|検証|照合|保存|配置|保持|保管|担当|任せ|委譲|実行|作成|付け|送信|転記|記載|追加|削除|起動)(?:するな|しないで?)|短く(?:するな|しないで?))[。．.!！?？]*$/u;
 
 function normalizeText(value: string): string {
   return value.normalize("NFKC").replace(/\s+/gu, " ").trim();
@@ -100,7 +125,11 @@ function removeCorrectionMarkers(value: string): string {
 }
 
 export function hasCorrectionPredicate(value: string): boolean {
-  return CORRECTIVE_COMMAND_PREDICATE.test(value);
+  return CORRECTIVE_COMMAND_PREDICATE.test(value) || hasGenericNegativeCommand(value);
+}
+
+export function hasGenericNegativeCommand(value: string): boolean {
+  return GENERIC_NEGATIVE_COMMAND.test(value);
 }
 
 export function isConsultationQuestion(value: string): boolean {
@@ -137,6 +166,62 @@ function orderedValues(values: Record<string, string>): Record<string, string> {
     result[key] = normalizeText(values[key]);
   }
   return result;
+}
+
+function ignoresExpressionModifier(input: Pick<CorrectionRuleInput, "topicKey" | "actionKey" | "polarity">): boolean {
+  return input.topicKey === "expression_policy" && input.actionKey === "use_terms" && input.polarity === "negative";
+}
+
+function isOwnerUnclearExpressionModifier(value: string): boolean {
+  return OWNER_UNCLEAR_EXPRESSION_MODIFIERS.has(normalizeText(value));
+}
+
+function expressionTargetIdentity(term: string): string {
+  const targetMatch = EXPRESSION_TARGET.exec(term);
+  if (!targetMatch || targetMatch.index === 0) return term;
+  const modifier = term.slice(0, targetMatch.index);
+  if (!isOwnerUnclearExpressionModifier(modifier)) return term;
+  return OWNER_UNCLEAR_EXPRESSION_CLASS + term.slice(targetMatch.index);
+}
+
+function identityValues(input: Pick<CorrectionRuleInput, "topicKey" | "actionKey" | "polarity" | "requiredValues">): Record<string, string> {
+  const values = orderedValues(input.requiredValues);
+  if (ignoresExpressionModifier(input) && values.term) values.term = expressionTargetIdentity(values.term);
+  return values;
+}
+
+function hasExpressionModifier(input: CorrectionRuleInput): boolean {
+  const term = input.requiredValues.term;
+  return ignoresExpressionModifier(input) && typeof term === "string" && expressionTargetIdentity(term) !== term;
+}
+
+export function isAttributiveExpressionModifier(value: string): boolean {
+  return ATTRIBUTIVE_MODIFIER.test(value);
+}
+
+export function matchExpressionTarget(value: string) {
+  return EXPRESSION_TARGET.exec(value);
+}
+
+export function normalizeCorrectionRequiredValuesKey(
+  value: string,
+  topicKey: string,
+  actionKey: string,
+  polarity: string,
+): string {
+  if (!ignoresExpressionModifier({
+    topicKey: topicKey as CorrectionRuleTopic,
+    actionKey,
+    polarity: polarity as CorrectionRuleInput["polarity"],
+  })) return value;
+  const parsed: unknown = JSON.parse(value);
+  if (!isRecord(parsed) || typeof parsed.term !== "string"
+    || Object.values(parsed).some((entry) => typeof entry !== "string")) {
+    throw new Error("expression correction required values key is invalid");
+  }
+  const requiredValues = Object.fromEntries(Object.entries(parsed).map(([key, entry]) => [key, entry as string]));
+  requiredValues.term = expressionTargetIdentity(requiredValues.term);
+  return JSON.stringify(orderedValues(requiredValues));
 }
 
 function canonicalInput(input: CorrectionRuleInput): CorrectionRuleInput {
@@ -324,12 +409,19 @@ export function renderTypedCorrectionRule(input: CorrectionRuleInput): string {
   const taskScope = canonical.boundaryKey.match(/(?:^|;)task:(今回だけ|この作業だけ|今日だけ|一時的)(?:;|$)/u)?.[1];
   const continued = canonical.lifetimeKind === "explicit_continuing"
     && canonical.topicKey !== "tone" && canonical.topicKey !== "document_delivery";
-  const body = continued ? `毎回、${statement}` : statement;
-  let result = body;
-  if (canonical.conditions.length > 0) result = `${canonical.conditions.join("または")}は${body}`;
-  if (taskScope) result = `${taskScope}、${result}`;
-  if (Array.from(result).length > 240) return "";
-  return result;
+  const render = (body: string): string => {
+    let result = body;
+    if (canonical.conditions.length > 0) result = `${canonical.conditions.join("または")}は${body}`;
+    if (taskScope) result = `${taskScope}、${result}`;
+    return result;
+  };
+  const result = render(continued ? `毎回、${statement}` : statement);
+  if (Array.from(result).length <= 240) return result;
+  if (continued) {
+    const compactResult = render(statement);
+    if (Array.from(compactResult).length <= 240) return compactResult;
+  }
+  return "";
 }
 
 export function renderCorrectionRule(input: CorrectionRuleInput): string {
@@ -359,7 +451,7 @@ export function serializeCorrectionRuleInput(input: CorrectionRuleInput): string
 }
 
 export function correctionRequiredValuesKey(input: CorrectionRuleInput): string {
-  return JSON.stringify(orderedValues(input.requiredValues));
+  return JSON.stringify(identityValues(input));
 }
 
 export function correctionConditionKey(input: CorrectionRuleInput): string {
@@ -385,7 +477,7 @@ function mergeIdentity(input: CorrectionRuleInput): string {
     topicKey: input.topicKey,
     actionKey: input.actionKey,
     polarity: input.polarity,
-    requiredValues: orderedValues(input.requiredValues),
+    requiredValues: identityValues(input),
     boundaryKey: input.boundaryKey,
     lifetimeKind: input.lifetimeKind,
     directive: input.directive,
@@ -402,7 +494,7 @@ export function mergeCorrectionRuleInputs(inputs: CorrectionRuleInput[]): Correc
   if (canonicalInputs.some((input) => !validInput(input))) return null;
   const identity = mergeIdentity(canonicalInputs[0]);
   if (canonicalInputs.some((input) => mergeIdentity(input) !== identity)) return null;
-  const first = canonicalInputs[0];
+  const first = canonicalInputs.find(hasExpressionModifier) ?? canonicalInputs[0];
   const continuationBases = Array.from(new Set(canonicalInputs.map((input) => input.continuationBasis))).sort();
   const conditions = canonicalInputs.some((input) => input.conditions.length === 0)
     ? []

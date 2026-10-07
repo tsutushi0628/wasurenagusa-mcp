@@ -49,6 +49,7 @@ export type MetricName =
   | "correction_backlog"
   | "correction_injected"
   | "correction_cooldown_skip"
+  | "correction_reinjected_correction_match"
   | "correction_budget_skip"
   | "correction_hook_timeout"
   | "correction_hook_ms"

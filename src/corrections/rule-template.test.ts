@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  isAttributiveExpressionModifier,
   mergeCorrectionRuleInputs,
   parseCorrectionRuleInput,
   renderPlainCorrectionRule,
@@ -54,6 +55,80 @@ describe("owner correction rule templates", () => {
       "毎回、成果物をリポジトリ直下へ保存する",
       "毎回、実装にはClaude Sonnetを使う",
     ]);
+  });
+
+  it("keeps the first owner-unclear modifier as the rule representative", () => {
+    const merged = mergeCorrectionRuleInputs([
+      rule({ topicKey: "expression_policy", actionKey: "use_terms", polarity: "negative", requiredValues: { term: "俺のわからない言葉" } }),
+      rule({ topicKey: "expression_policy", actionKey: "use_terms", polarity: "negative", requiredValues: { term: "変な言葉" } }),
+      rule({ topicKey: "expression_policy", actionKey: "use_terms", polarity: "negative", requiredValues: { term: "知らない言葉" } }),
+    ]);
+
+    expect(merged?.requiredValues.term).toBe("俺のわからない言葉");
+    expect(merged ? renderTypedCorrectionRule(merged) : "").toBe("毎回、俺のわからない言葉を使わない");
+  });
+
+  it("merges equivalent owner-unclear modifiers but keeps distinct meanings separate", () => {
+    const termRule = (term: string) => rule({
+      topicKey: "expression_policy",
+      actionKey: "use_terms",
+      polarity: "negative",
+      requiredValues: { term },
+    });
+    const equivalentPairs = [
+      ["変な言葉", "俺のわからない言葉"],
+      ["変な言葉", "知らない言葉"],
+      ["変な言葉", "意味不明な言葉"],
+      ["俺のわからない言葉", "知らない言葉"],
+    ] as const;
+    const distinctPairs = [
+      ["変な言葉", "難しい言葉"],
+      ["俺のわからない言葉", "汚い言葉"],
+      ["知らない言葉", "長い言葉"],
+      ["意味不明な言葉", "英語の言葉"],
+      ["言葉", "変な言葉"],
+    ] as const;
+
+    for (const pair of equivalentPairs) {
+      expect(mergeCorrectionRuleInputs(pair.map(termRule))).not.toBeNull();
+    }
+    for (const pair of distinctPairs) {
+      expect(mergeCorrectionRuleInputs(pair.map(termRule))).toBeNull();
+    }
+    expect(isAttributiveExpressionModifier("難しい")).toBe(true);
+  });
+
+  it("preserves the target modifier and conditions when a continuing rule needs compacting", () => {
+    const term = `${"変な".repeat(79)}言葉`;
+    const firstCondition = `${"あ".repeat(34)}時`;
+    const secondCondition = `${"い".repeat(34)}時`;
+    const input = rule({
+      topicKey: "expression_policy",
+      actionKey: "use_terms",
+      polarity: "negative",
+      requiredValues: { term },
+      conditions: [firstCondition, secondCondition],
+    });
+    const rendered = renderTypedCorrectionRule(input);
+
+    expect(Array.from(rendered).length).toBeLessThanOrEqual(240);
+    expect(rendered).toContain(term);
+    expect(rendered).toContain("を使わない");
+    expect(rendered).toContain(firstCondition);
+    expect(rendered).toContain(secondCondition);
+    expect(rendered).not.toContain("毎回、");
+  });
+
+  it("does not emit a partial rule when mandatory content still exceeds the limit", () => {
+    const input = rule({
+      topicKey: "expression_policy",
+      actionKey: "use_terms",
+      polarity: "negative",
+      requiredValues: { term: `${"変な".repeat(79)}言葉` },
+      conditions: [`${"あ".repeat(39)}時`, `${"い".repeat(39)}時`],
+    });
+
+    expect(renderTypedCorrectionRule(input)).toBe("");
   });
 
   it("leaves questions, consultations, unknown types, and missing values without rule text", () => {

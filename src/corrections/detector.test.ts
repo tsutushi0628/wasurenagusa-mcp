@@ -5,7 +5,11 @@ import {
   isModelRoutingRetraction,
 } from "./detector.js";
 import { extractOwnerEvent } from "./events.js";
-import { parseCorrectionRuleInput, serializeCorrectionRuleInput } from "./rule-template.js";
+import {
+  parseCorrectionRuleInput,
+  renderPlainCorrectionRule,
+  serializeCorrectionRuleInput,
+} from "./rule-template.js";
 
 function detect(text: string, context: Record<string, unknown> = {}) {
   const event = extractOwnerEvent({
@@ -64,6 +68,88 @@ describe("detectOwnerCorrections", () => {
       polarity: "negative",
       ruleText: "文書は毎回全文を表示しない",
     });
+  });
+
+  it("preserves negative expression modifiers across four modifier and four bare-target fixtures", () => {
+    const modifiedFixtures = [
+      ["今後は変な言葉を使わないで", "変な言葉"],
+      ["今後は俺のわからない言葉を使わないで", "俺のわからない言葉"],
+      ["今後は知らない用語を使わないで", "知らない用語"],
+      ["今後は意味の分からない略語を使うな", "意味の分からない略語"],
+    ] as const;
+    const bareFixtures = [
+      ["今後は言葉を使わないで", "言葉"],
+      ["今後は用語を使わないで", "用語"],
+      ["今後は略語を使わないで", "略語"],
+      ["今後は比喩を使わないで", "比喩"],
+    ] as const;
+
+    for (const [command, target] of modifiedFixtures) {
+      expect(detect(command)[0]?.ruleText).toBe(`毎回、${target}を使わない`);
+    }
+    for (const [command, target] of bareFixtures) {
+      expect(detect(command)[0]?.ruleText).toBe(`毎回、${target}を使わない`);
+    }
+  });
+
+  it("classifies generic Japanese prohibitions as negative and renders their command text", () => {
+    const commands = ["架空の青色試料番号を書くな。", "架空の青色試料番号を書かない。"];
+
+    for (const command of commands) {
+      const candidate = detect(command)[0];
+
+      expect(candidate).toMatchObject({ status: "candidate", polarity: "negative" });
+      expect(candidate?.ruleInput.commandText).toBe(command);
+      expect(candidate?.ruleText).toBe(command);
+    }
+    expect(detect("文章は短くない。")).toHaveLength(0);
+  });
+
+  it("keeps modifier variants in one bundle without dropping their rule text", () => {
+    const fixtures = [
+      ["今後は変な言葉を使わないで", "変な言葉"],
+      ["今後は俺のわからない言葉を使わないで", "俺のわからない言葉"],
+      ["今後は知らない言葉を使わないで", "知らない言葉"],
+      ["今後は意味不明な言葉を使わないで", "意味不明な言葉"],
+    ] as const;
+    const candidates = fixtures.map(([command]) => detect(command)[0]);
+    const first = candidates[0];
+
+    expect(first).toBeDefined();
+    expect(new Set(candidates.map((candidate) => candidate?.bundleKey)).size).toBe(1);
+    for (const [index, candidate] of candidates.entries()) {
+      expect(candidate).toMatchObject({
+        topicKey: "expression_policy",
+        actionKey: "use_terms",
+        polarity: "negative",
+        ruleText: `毎回、${fixtures[index][1]}を使わない`,
+      });
+    }
+
+    const opposite = detect("今後は言葉を使え")[0];
+    expect(opposite).toBeDefined();
+    expect(opposite?.bundleKey).not.toBe(first?.bundleKey);
+    expect(detect("今後は言葉を使わないで")[0]?.bundleKey).not.toBe(first?.bundleKey);
+    expect(detect("今後は難しい言葉を使わないで")[0]?.bundleKey).not.toBe(first?.bundleKey);
+  });
+
+  it("uses the unchanged plain command when an expression modifier cannot be extracted", () => {
+    const command = "今後はこの語彙では判断に迷う言葉を使うな";
+    const candidate = detect(command)[0];
+
+    expect(candidate).toMatchObject({
+      status: "candidate",
+      ruleText: "",
+      ruleInput: {
+        directive: false,
+        plainCommandEligible: true,
+        commandText: command,
+        requiredValues: { term: "この語彙では判断に迷う言葉" },
+      },
+    });
+    expect(renderPlainCorrectionRule(candidate!.ruleInput)).toBe(command);
+    expect(detect("今後はこの課題では判断に迷う言葉を使うな")[0]?.bundleKey)
+      .not.toBe(candidate?.bundleKey);
   });
 
   it("does not treat a consultation's separate imperative as a continuing document rule", () => {
@@ -595,5 +681,97 @@ describe("detectOwnerCorrections", () => {
     const candidates = detect(`今後は常体で答えて ${"合成文 ".repeat(700)}`);
 
     expect(candidates.every((candidate) => candidate.status !== "confirmed")).toBe(true);
+  });
+
+  it("does not split a bundle when an optional だけ condition word is present", () => {
+    const pairs = [
+      ["今後は質問に答えてから止まって", "今後は質問だけに答えてから止まって"],
+      ["今後は常体で答えて", "今後は常体だけで答えて"],
+      ["今後は文案・報告の全文を表示して", "今後は文案・報告の全文だけを表示して"],
+      ["今後は略語を説明して", "今後は略語だけを説明して"],
+      ["今後は要約を100文字以内にして", "今後は要約だけを100文字以内にして"],
+      ["今後はCSS部品を維持して", "今後はCSS部品だけを維持して"],
+      ["今後は仕様書を原本と照合して", "今後は仕様書だけを原本と照合して"],
+      ["今後は成果物をリポジトリ直下に保存して", "今後は成果物だけをリポジトリ直下に保存して"],
+    ] as const;
+
+    for (const [unlimitedText, limitedText] of pairs) {
+      const unlimited = detect(unlimitedText)[0];
+      const limited = detect(limitedText)[0];
+
+      expect(unlimited).toBeDefined();
+      expect(limited).toBeDefined();
+      expect(limited?.conditionKnown).toBe(true);
+      expect(limited?.conditionKey).toBe(unlimited?.conditionKey);
+      expect(unlimited?.bundleKey, `${unlimitedText} <> ${limitedText}`).toBe(limited?.bundleKey);
+    }
+  });
+
+  it("normalizes のみ and ばかり as limiters and keeps しか〜ない as negative emphasis", () => {
+    const base = detect("今後は文案・報告の全文を表示して")[0];
+
+    for (const limiter of ["のみ", "ばかり"]) {
+      const limited = detect(`今後は文案・報告の全文${limiter}を表示して`)[0];
+
+      expect(limited?.conditionKey).toBe(base?.conditionKey);
+      expect(limited?.bundleKey).toBe(base?.bundleKey);
+    }
+
+    const negativeEmphasis = detect("今後は文案・報告の全文しか表示しない")[0];
+
+    expect(negativeEmphasis).toMatchObject({ polarity: "negative", conditionKnown: true });
+    expect(negativeEmphasis?.conditionKey).toContain("modifier:shika-negative");
+    expect(negativeEmphasis?.bundleKey).not.toBe(base?.bundleKey);
+  });
+
+  it("keeps unclear reactions as candidates and excludes ordinary definition questions", () => {
+    const reactionContext = {
+      previousAssistantText: "合成方式Aは、対象を二段階で処理します。",
+      previousAssistantSessionId: "synthetic-session",
+    };
+    const reactions = [
+      "それって何?",
+      "これってなに？",
+      "ってなに",
+      "いみがわからん",
+      "意味わからん",
+      "意味不明",
+    ].map((text) => detect(text, reactionContext)[0]);
+    const questionContext = {
+      previousAssistantText: "合成方式Aについて、どの点を知りたいですか？",
+      previousAssistantSessionId: "synthetic-session",
+    };
+    const ordinaryQuestions = [
+      "合成方式って何?",
+      "合成方式ってなに？",
+      "APIって何?",
+      "OAuthってなに？",
+      "その用語って何?",
+      "プロジェクトってなに？",
+    ].map((text) => detect(text, questionContext));
+    const pendingSubmissionReaction = detect("意味わからん")[0];
+    const otherSessionReaction = detect("意味わからん", {
+      previousAssistantText: "合成方式Aは、対象を二段階で処理します。",
+      previousAssistantSessionId: "different-session",
+    })[0];
+    const unclearContext = detect("棚って何だ? 何のことだ? わかりづらい。")[0];
+    const longUnclearQuestion = detect(`${"合成語".repeat(20)}意味不明？`)[0];
+    const unclearDescription = detect("この説明は意味不明です。", reactionContext)[0];
+
+    expect(reactions).toHaveLength(6);
+    for (const candidate of reactions) {
+      expect(candidate).toMatchObject({
+        status: "candidate",
+        source: "utterance_detection",
+        ruleText: "",
+        ruleInput: { directive: false, plainCommandEligible: false },
+      });
+    }
+    expect(ordinaryQuestions).toEqual([[], [], [], [], [], []]);
+    expect(pendingSubmissionReaction).toMatchObject({ status: "candidate", source: "utterance_detection", ruleText: "" });
+    expect(otherSessionReaction).toBeUndefined();
+    expect(unclearContext).toMatchObject({ status: "candidate", source: "utterance_detection", ruleText: "" });
+    expect(longUnclearQuestion).toBeUndefined();
+    expect(unclearDescription).toBeUndefined();
   });
 });

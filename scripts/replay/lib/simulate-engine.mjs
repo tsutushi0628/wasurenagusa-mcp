@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { mkdir, open, readFile, readdir, stat, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import Database from "better-sqlite3";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -10,14 +10,18 @@ import {
   jstDate,
   percentile,
 } from "./analysis.mjs";
+import { launchDirectoryName, readSessionIndexForTranscripts, sessionIndexEntry, validateProjectName } from "./session-project.mjs";
+import { classifyRecurrenceCandidates, readRecurrenceLedger } from "./recurrence-ledger.mjs";
 import { matchThemes } from "./themes.mjs";
 
 const DATE_START = "2026-09-22";
 const DATE_END = "2026-10-02";
 const PERIOD_START_MS = Date.parse("2026-09-21T15:00:00.000Z");
+const DAY_MS = 24 * 60 * 60 * 1000;
+const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
 const ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const SAMPLE_SEED = 20261003;
-const DETECTOR_VERSION = "owner-correction-v3";
+const DETECTOR_VERSION = "owner-correction-v4";
 const REPORT_VERSION = 1;
 const AUDIT_PROMPT = [
   "独立監査。与えた人間発話と直前AI区間だけを読む。引用・貼付・AI生成文は本人の訂正として数えない。",
@@ -26,7 +30,6 @@ const AUDIT_PROMPT = [
   "不確かな判断はundetermined。別の監査者の回答、検出器の採否・点数・状態は参照しない。",
 ].join("\n");
 const STOP_COMMAND = "wasurenagusa-analyze";
-const SOURCE_PROJECT = "firebase-kit";
 const SOURCE_SCOPE = "general";
 
 function validateDateRange(dateRange) {
@@ -53,6 +56,57 @@ function compareAvailable(left, right) {
   return left.availableMs - right.availableMs ||
     left.sessionHash.localeCompare(right.sessionHash) ||
     left.lineOrder - right.lineOrder;
+}
+
+function onlineUntilMs(until) {
+  if (typeof until !== "string" || !/^\d{4}-\d{2}-\d{2}$/u.test(until) ||
+    Number.isNaN(Date.parse(`${until}T00:00:00.000Z`)) ||
+    new Date(`${until}T00:00:00.000Z`).toISOString().slice(0, 10) !== until) {
+    throw new Error("online replay requires --until YYYY-MM-DD");
+  }
+  return Date.parse(`${until}T23:59:59.999+09:00`);
+}
+
+function selectOnlineSessions(sessions, until) {
+  const cutoffMs = onlineUntilMs(until);
+  const ordered = sessions.map((session, manifestOrder) => {
+    const inputTimes = session.humanInputs.map((input) => input.availableMs).filter(Number.isFinite);
+    const firstHumanMs = Number.isFinite(session.firstHumanMs)
+      ? session.firstHumanMs
+      : Math.min(...inputTimes);
+    if (!Number.isFinite(firstHumanMs)) throw new Error("online replay session has no first-human timestamp");
+    return { session, manifestOrder, firstHumanMs };
+  }).filter((entry) => entry.firstHumanMs <= cutoffMs)
+    .sort((left, right) => left.firstHumanMs - right.firstHumanMs ||
+      left.session.sessionId.localeCompare(right.session.sessionId) || left.manifestOrder - right.manifestOrder);
+
+  return ordered.flatMap(({ session, firstHumanMs }) => {
+    const humanInputs = session.humanInputs
+      .filter((input) => Number.isFinite(input.availableMs) && input.availableMs <= cutoffMs)
+      .map((input) => ({ ...input }));
+    if (humanInputs.length === 0) return [];
+    const inputsByLineOrder = new Map(humanInputs.map((input) => [input.lineOrder, input]));
+    const lastHumanLineOrder = Math.max(...humanInputs.map((input) => input.lineOrder));
+    const timeline = session.timeline.filter((row) => {
+      if (row.kind === "human") return inputsByLineOrder.has(row.lineOrder);
+      if (Number.isFinite(row.availableMs)) return row.availableMs <= cutoffMs;
+      return row.lineOrder <= lastHumanLineOrder;
+    }).map((row) => row.kind === "human"
+      ? { ...row, input: inputsByLineOrder.get(row.lineOrder) }
+      : { ...row });
+    const lastIncludedLineOrder = Math.max(lastHumanLineOrder, ...timeline.map((row) => row.lineOrder));
+    const transcriptRecords = session.transcriptRecords.filter((record) => record.lineOrder <= lastIncludedLineOrder);
+    const lastIncludedByteEndOffset = Math.max(0, ...timeline.map((row) => row.byteEndOffset ?? 0));
+    for (const input of humanInputs) input.transcriptRecords = transcriptRecords;
+    return [{
+      ...session,
+      firstHumanMs,
+      humanInputs,
+      timeline,
+      transcriptRecords,
+      snapshotMeta: { ...session.snapshotMeta, size: lastIncludedByteEndOffset },
+    }];
+  });
 }
 
 function readText(value) {
@@ -353,6 +407,7 @@ export async function readManifest(filename) {
   const files = [];
   const sessions = [];
   const seenSessions = new Set();
+  const sessionIndexes = new Map();
   for (const entry of manifest.sessions) {
     if (!entry || typeof entry.sessionId !== "string" || typeof entry.path !== "string" ||
       typeof entry.fileId !== "string" || entry.fileId.length === 0) {
@@ -364,6 +419,25 @@ export async function readManifest(filename) {
       throw new Error("manifest session prefix hash is invalid");
     }
     const filePath = resolve(dirname(manifestPath), entry.path);
+    const transcriptsDirectory = dirname(filePath);
+    const launchDir = entry.launchDir === undefined
+      ? launchDirectoryName(basename(transcriptsDirectory))
+      : validateProjectName(entry.launchDir);
+    let project = entry.project === undefined || entry.project === null ? null : validateProjectName(entry.project);
+    let projectBasis = project ? entry.projectBasis ?? entry.basis ?? "manifest" : null;
+    let projectFallback = false;
+    if (!project) {
+      let sessionIndexPromise = sessionIndexes.get(transcriptsDirectory);
+      if (!sessionIndexPromise) {
+        sessionIndexPromise = readSessionIndexForTranscripts(transcriptsDirectory);
+        sessionIndexes.set(transcriptsDirectory, sessionIndexPromise);
+      }
+      const sessionIndex = await sessionIndexPromise;
+      const indexedSession = sessionIndexEntry(sessionIndex, entry.sessionId, launchDir);
+      project = indexedSession?.project ?? launchDir;
+      projectBasis = indexedSession?.basis ?? "launch_dir";
+      projectFallback = indexedSession === null;
+    }
     const snapshot = await readFixedFile(filePath, entry.readEndByteOffset);
     if (snapshot.prefixHash !== entry.prefixSha256) throw new Error("manifest transcript hash mismatch");
     const parsed = parseSnapshot(snapshot.snapshot, entry.sessionId, dateRangeJst.start, dateRangeJst.end);
@@ -373,6 +447,11 @@ export async function readManifest(filename) {
     if (entry.sessionHash && entry.sessionHash !== parsed.sessionHash) throw new Error("manifest session hash mismatch");
     sessions.push({
       ...parsed,
+      project,
+      projectBasis,
+      projectFallback,
+      launchDir,
+      humanInputs: parsed.humanInputs.map((input) => ({ ...input, project })),
       sourceFileId: entry.fileId,
       sourcePath: filePath,
       snapshot: snapshot.snapshot,
@@ -433,6 +512,54 @@ export async function readManifest(filename) {
     manifestPath,
     fixtureKind: manifest.fixtureKind ?? null,
   };
+}
+
+const RULE_MEANING_FIELDS = [
+  "ruleText",
+  "bodyHash",
+  "conditions",
+  "conditionKey",
+  "polarity",
+  "visibility",
+  "confirmedAt",
+  "lifetimeKind",
+  "continuationBasis",
+];
+
+function sameRuleMeaning(left, right) {
+  return RULE_MEANING_FIELDS.every((field) =>
+    Object.hasOwn(left, field) && Object.hasOwn(right, field) && left[field] === right[field],
+  );
+}
+
+function hasEvidenceOnlyVersionUpdate(previous, current) {
+  if (!Number.isSafeInteger(previous.version) || !Number.isSafeInteger(current.version) ||
+    current.version <= previous.version || previous.status !== "confirmed" || current.status !== "confirmed") {
+    return false;
+  }
+  if (Array.isArray(current.versionHistory)) {
+    return isEvidenceOnlyVersionContinuity(current.versionHistory, previous.version, current.version);
+  }
+  if (!sameRuleMeaning(previous, current)) return false;
+  if (!Array.isArray(previous.evidenceEventIds) || !Array.isArray(current.evidenceEventIds) ||
+    current.evidenceEventIds.length <= previous.evidenceEventIds.length) {
+    return false;
+  }
+  const currentEvidence = new Set(current.evidenceEventIds);
+  return previous.evidenceEventIds.every((eventId) => currentEvidence.has(eventId));
+}
+
+function isEvidenceOnlyVersionContinuity(versions, fromVersion, toVersion) {
+  if (!Number.isSafeInteger(fromVersion) || !Number.isSafeInteger(toVersion) || toVersion < fromVersion) return false;
+  const first = versions.find((version) => version.version === fromVersion);
+  if (!first || first.status !== "confirmed") return false;
+  if (toVersion === fromVersion) return true;
+  let previous = first;
+  for (const current of versions.filter((version) => version.version > fromVersion && version.version <= toVersion)) {
+    if (current.version !== previous.version + 1 || !hasEvidenceOnlyVersionUpdate(previous, current)) return false;
+    previous = current;
+  }
+  return previous.version === toVersion;
 }
 
 export function adjudicatePrevention({
@@ -511,12 +638,18 @@ export function adjudicatePrevention({
   const selectedSave = timelySaves.find((save) => {
     const snapshot = snapshotsByBundle.get(save.bundleKey);
     if (!snapshot) return true;
-    return snapshot.status === "confirmed" && snapshot.version === save.version && snapshot.evidenceEventIds.includes(save.eventId);
+    return snapshot.status === "confirmed" && snapshot.evidenceEventIds.includes(save.eventId) &&
+      (snapshot.version === save.version || hasEvidenceOnlyVersionUpdate(save, snapshot));
   }) ?? timelySaves[0];
   const snapshots = actionRuleSnapshots.filter((snapshot) => snapshot.bundleKey === selectedSave.bundleKey);
   const currentSnapshot = snapshots.at(-1);
-  if (currentSnapshot && (currentSnapshot.status !== "confirmed" || currentSnapshot.version !== selectedSave.version)) {
-    return cFailure("stale_version", selectedSave.eventId);
+  let ruleRepeatedAfterInjection = false;
+  if (currentSnapshot) {
+    if (currentSnapshot.status !== "confirmed") return cFailure("stale_version", selectedSave.eventId);
+    if (currentSnapshot.version !== selectedSave.version) {
+      ruleRepeatedAfterInjection = hasEvidenceOnlyVersionUpdate(selectedSave, currentSnapshot);
+      if (!ruleRepeatedAfterInjection) return cFailure("stale_version", selectedSave.eventId);
+    }
   }
   const relatedEmissions = emissions.filter((emission) =>
     emission.bundleLabel === occurrence.bundleLabel &&
@@ -533,13 +666,14 @@ export function adjudicatePrevention({
     emission.ruleText.trim().length > 0 &&
     typeof emission.bodyText === "string" &&
     normalizeBody(emission.bodyText).includes(normalizeBody(emission.ruleText));
-  const invalidOutputReason = (emission) => {
+  const invalidOutputReason = (emission, activeExpiresAt = selectedSave.expiresAt) => {
     const emittedAt = numericTime(emission.emittedAt);
     if (emission.versionStatus && emission.versionStatus !== "confirmed") return "stale_version";
     if (selectedSave.expiresAt && emittedAt !== null && numericTime(selectedSave.expiresAt) <= emittedAt) return "expired_at_injection";
     if (emission.expiresAt && emittedAt !== null && numericTime(emission.expiresAt) <= emittedAt) return "expired_at_injection";
-    if (selectedSave.expiresAt && actionAt !== null && numericTime(selectedSave.expiresAt) <= actionAt) return "expired_before_action";
-    if (emission.expiresAt && actionAt !== null && numericTime(emission.expiresAt) <= actionAt) return "expired_before_action";
+    if (!ruleRepeatedAfterInjection && selectedSave.expiresAt && actionAt !== null && numericTime(selectedSave.expiresAt) <= actionAt) return "expired_before_action";
+    if (!ruleRepeatedAfterInjection && emission.expiresAt && actionAt !== null && numericTime(emission.expiresAt) <= actionAt) return "expired_before_action";
+    if (activeExpiresAt && actionAt !== null && numericTime(activeExpiresAt) <= actionAt) return "expired_before_action";
     return null;
   };
   if (Array.isArray(occurrence.actionRows) || actionTimeline.length > 0) {
@@ -577,12 +711,14 @@ export function adjudicatePrevention({
 
       const ruleSnapshots = Array.isArray(action.ruleSnapshots) ? action.ruleSnapshots : [];
       const actionSnapshot = ruleSnapshots.find((snapshot) => snapshot.bundleKey === selectedSave.bundleKey);
-      if (!actionSnapshot || actionSnapshot.status !== "confirmed" || actionSnapshot.version !== selectedSave.version ||
+      if (!actionSnapshot || actionSnapshot.status !== "confirmed" ||
+        (actionSnapshot.version !== selectedSave.version && !hasEvidenceOnlyVersionUpdate(selectedSave, actionSnapshot)) ||
         !Array.isArray(actionSnapshot.evidenceEventIds) || !actionSnapshot.evidenceEventIds.includes(selectedSave.eventId)) {
         return cFailure("stale_version", selectedSave.eventId);
       }
-      if ((selectedSave.expiresAt && numericTime(selectedSave.expiresAt) <= actionTime) ||
-        (actionSnapshot.expiresAt && numericTime(actionSnapshot.expiresAt) <= actionTime)) {
+      const actionVersionChangedByEvidence = actionSnapshot.version !== selectedSave.version;
+      if (actionVersionChangedByEvidence) ruleRepeatedAfterInjection = true;
+      if (actionSnapshot.expiresAt && numericTime(actionSnapshot.expiresAt) <= actionTime) {
         return cFailure("expired_before_action", selectedSave.eventId);
       }
 
@@ -611,18 +747,21 @@ export function adjudicatePrevention({
         if (emission.versionStatus && emission.versionStatus !== "confirmed") return false;
         if (selectedSave.expiresAt && numericTime(selectedSave.expiresAt) <= emittedAt) return false;
         if (emission.expiresAt && numericTime(emission.expiresAt) <= emittedAt) return false;
-        if (selectedSave.expiresAt && numericTime(selectedSave.expiresAt) <= actionTime) return false;
-        if (emission.expiresAt && numericTime(emission.expiresAt) <= actionTime) return false;
+        if (!actionVersionChangedByEvidence && selectedSave.expiresAt && numericTime(selectedSave.expiresAt) <= actionTime) return false;
+        if (!actionVersionChangedByEvidence && emission.expiresAt && numericTime(emission.expiresAt) <= actionTime) return false;
         if (!actionSnapshot.expiresAt) return true;
         return numericTime(actionSnapshot.expiresAt) > actionTime;
       });
-      if (validOutput) continue;
+      if (validOutput) {
+        if (ruleRepeatedAfterInjection) return cFailure("rule_repeated_after_injection", selectedSave.eventId);
+        continue;
+      }
 
       const invalidOutput = sameEpochOutputs.find((emission) => hasBody(emission) && (
         (emission.versionStatus && emission.versionStatus !== "confirmed") ||
         (emission.expiresAt && numericTime(emission.expiresAt) <= numericTime(emission.emittedAt)) ||
-        (emission.expiresAt && numericTime(emission.expiresAt) <= actionTime) ||
-        (selectedSave.expiresAt && numericTime(selectedSave.expiresAt) <= actionTime)
+        (!actionVersionChangedByEvidence && emission.expiresAt && numericTime(emission.expiresAt) <= actionTime) ||
+        (!actionVersionChangedByEvidence && selectedSave.expiresAt && numericTime(selectedSave.expiresAt) <= actionTime)
       ));
       if (invalidOutput) {
         let reason = invalidOutputReason(invalidOutput);
@@ -643,10 +782,15 @@ export function adjudicatePrevention({
       if (!reason) reason = "not_emitted";
       return cFailure(reason, selectedSave.eventId);
     }
+    if (ruleRepeatedAfterInjection) return cFailure("rule_repeated_after_injection", selectedSave.eventId);
     return { prevented: true, failedAt: null, reason: null, sourceEventId: selectedSave.eventId };
   }
 
-  const validOutputsBeforeAction = outputsBeforeAction.filter((emission) => hasBody(emission) && !invalidOutputReason(emission));
+  let activeExpiresAt = selectedSave.expiresAt;
+  if (currentSnapshot && Object.hasOwn(currentSnapshot, "expiresAt")) activeExpiresAt = currentSnapshot.expiresAt;
+  const validOutputsBeforeAction = outputsBeforeAction.filter((emission) =>
+    hasBody(emission) && !invalidOutputReason(emission, activeExpiresAt),
+  );
   const emittedBody = validOutputsBeforeAction.find((emission) =>
     emission.sessionId === occurrence.sessionId && emission.compactEpoch === occurrence.compactEpoch);
 
@@ -654,19 +798,17 @@ export function adjudicatePrevention({
     if (emittedBody.trigger !== "start" && !(emittedBody.humanOrdinal < occurrence.humanOrdinal)) {
       return cFailure("output_after_action", selectedSave.eventId);
     }
+    if (ruleRepeatedAfterInjection) return cFailure("rule_repeated_after_injection", selectedSave.eventId);
     return { prevented: true, failedAt: null, reason: null, sourceEventId: selectedSave.eventId };
   }
 
   const invalidOutputs = outputsBeforeAction
-    .filter((emission) => hasBody(emission) && invalidOutputReason(emission))
+    .filter((emission) => hasBody(emission) && invalidOutputReason(emission, activeExpiresAt))
     .sort((left, right) => numericTime(left.emittedAt) - numericTime(right.emittedAt));
   if (invalidOutputs.length > 0) {
-    return cFailure(invalidOutputReason(invalidOutputs[0]), selectedSave.eventId);
+    return cFailure(invalidOutputReason(invalidOutputs[0], activeExpiresAt), selectedSave.eventId);
   }
-  if (selectedSave.expiresAt && numericTime(selectedSave.expiresAt) <= actionAt) {
-    return cFailure("expired_before_action", selectedSave.eventId);
-  }
-  if (currentSnapshot?.expiresAt && numericTime(currentSnapshot.expiresAt) <= actionAt) {
+  if (activeExpiresAt && numericTime(activeExpiresAt) <= actionAt) {
     return cFailure("expired_before_action", selectedSave.eventId);
   }
   const bodyless = outputsBeforeAction.find((emission) =>
@@ -706,6 +848,103 @@ export function summarizePrevention(rows) {
   const main = rows.filter((row) => /^B(?:[2-9]|10)$/u.test(row.bundleLabel));
   const b1 = rows.filter((row) => row.bundleLabel === "B1");
   return { main: summaryFor(main), b1: summaryFor(b1) };
+}
+
+function toStoredCorrectionBundleKeys(candidates, project, scope, sessionIdHash, storedBundleKey) {
+  if (!project || !scope || !sessionIdHash) return [];
+  const storedKeys = [];
+  for (const candidate of candidates) {
+    if (candidate.source !== "utterance_detection" ||
+      !candidate.bundleKey || !/^oc:v1:[0-9a-f]{64}$/iu.test(candidate.bundleKey) ||
+      !candidate.conditionKnown || !candidate.conditionKey) continue;
+    for (const visibility of ["project", "owner"]) {
+      storedKeys.push(storedBundleKey(
+        candidate.bundleKey,
+        project,
+        scope,
+        sessionIdHash,
+        candidate.lifetimeKind,
+        visibility,
+      ));
+    }
+  }
+  return [...new Set(storedKeys)];
+}
+
+function createStrengthJobSchedule(runStrengthJobAt, firstTimelineMs) {
+  if (!Number.isFinite(firstTimelineMs)) return () => {};
+  const firstJstDate = new Date(firstTimelineMs + JST_OFFSET_MS);
+  let nextStrengthJobMs = Date.UTC(
+    firstJstDate.getUTCFullYear(),
+    firstJstDate.getUTCMonth(),
+    firstJstDate.getUTCDate(),
+    4,
+    0,
+  ) - JST_OFFSET_MS;
+  if (nextStrengthJobMs < firstTimelineMs) nextStrengthJobMs += DAY_MS;
+  return (timeMs) => {
+    while (nextStrengthJobMs <= timeMs) {
+      runStrengthJobAt(nextStrengthJobMs);
+      nextStrengthJobMs += DAY_MS;
+    }
+  };
+}
+
+function runStrengthJobsBeforeEvent(runStrengthJobsThrough, row, lastPersistedAtMs) {
+  const eventTimeMs = numericTime(row.availableAt) ?? row.availableMs;
+  runStrengthJobsThrough(Math.max(lastPersistedAtMs, eventTimeMs));
+}
+
+function countCorrectionMatchedReinjections(selection, rendered) {
+  const matchedKeys = new Set(selection.correctionMatchedReinjectionKeys ?? []);
+  return rendered.ledger.filter((entry) => entry.bodyIncluded === true &&
+    matchedKeys.has(`${entry.bundleKey}:${entry.version}`)).length;
+}
+
+function summarizeStopDestinationGroup(recurrenceResults) {
+  const byStage = { a: 0, b: 0, c: 0 };
+  const byReason = new Map();
+  let preventedCount = 0;
+  for (const result of recurrenceResults) {
+    if (result.outcome === "prevented") {
+      preventedCount += 1;
+      continue;
+    }
+    if (Object.hasOwn(byStage, result.stage)) byStage[result.stage] += 1;
+    if (typeof result.reasonCode === "string") {
+      byReason.set(result.reasonCode, (byReason.get(result.reasonCode) ?? 0) + 1);
+    }
+  }
+  return {
+    recurrenceCount: recurrenceResults.length,
+    preventedCount,
+    stoppedCount: recurrenceResults.length - preventedCount,
+    byStage,
+    byReason: Object.fromEntries([...byReason].sort(([left], [right]) => left.localeCompare(right))),
+  };
+}
+
+function summarizeStopDestinations(recurrenceResults) {
+  return {
+    all: summarizeStopDestinationGroup(recurrenceResults),
+    b2ToB10: summarizeStopDestinationGroup(recurrenceResults.filter((result) => /^B(?:[2-9]|10)$/u.test(result.theme))),
+    b1: summarizeStopDestinationGroup(recurrenceResults.filter((result) => result.theme === "B1")),
+  };
+}
+
+function summarizeStrengthEvents(storage) {
+  const rows = storage.runCorrectionTransaction(({ db }) => db.prepare(`
+    SELECT reason, COUNT(*) AS eventCount,
+      SUM(CASE WHEN delta <> 0 THEN 1 ELSE 0 END) AS intensityChangeCount
+    FROM owner_correction_strength_events
+    GROUP BY reason
+    ORDER BY reason
+  `).all());
+  return {
+    eventCount: rows.reduce((sum, row) => sum + row.eventCount, 0),
+    intensityChangeCount: rows.reduce((sum, row) => sum + row.intensityChangeCount, 0),
+    byReason: Object.fromEntries(rows.map((row) => [row.reason, row.eventCount])),
+  };
 }
 
 function seededRandom(seed) {
@@ -1006,7 +1245,7 @@ async function createRuntime(compiledRoot, scratchRoot) {
   process.env.WASURENAGUSA_CORRECTION_LOOP = "on";
   process.env.WASURENAGUSA_CORRECTION_INJECT = "on";
   const importCompiled = async (relativePath) => import(pathToFileURL(join(compiledRoot, relativePath)).href);
-  const [sqlite, correctionSchema, events, detector, sessionStore, correctionStore, context, policy, render, budget, transcriptReader, redact, query, ruleTemplate] = await Promise.all([
+  const [sqlite, correctionSchema, events, detector, sessionStore, correctionStore, context, policy, render, budget, transcriptReader, redact, query, ruleTemplate, migration, schema, strength] = await Promise.all([
     importCompiled("storage/sqlite.js"),
     importCompiled("storage/correction-schema.js"),
     importCompiled("corrections/events.js"),
@@ -1021,6 +1260,9 @@ async function createRuntime(compiledRoot, scratchRoot) {
     importCompiled("utils/redact-sensitive-data.js"),
     importCompiled("corrections/retrieval.js"),
     importCompiled("corrections/rule-template.js"),
+    importCompiled("storage/migration.js"),
+    importCompiled("storage/schema.js"),
+    importCompiled("corrections/strength.js"),
   ]);
   const memoryPath = resolve(scratchRoot);
   await mkdir(memoryPath, { recursive: true });
@@ -1028,8 +1270,19 @@ async function createRuntime(compiledRoot, scratchRoot) {
   const storage = new sqlite.SQLiteStorage(dbPath);
   storage.initialize(memoryPath);
   correctionSchema.initializeCorrectionSchema(storage.db);
-  if (correctionSchema.CORRECTION_SCHEMA_VERSION !== 11) throw new Error("scratch correction store is not schema v11");
-  return { storage, events, detector, sessionStore, correctionStore, context, policy, render, budget, transcriptReader, redact, query, ruleTemplate };
+  let correctionVersion = schema.getSchemaVersion(storage.db);
+  if (correctionVersion === correctionSchema.CORRECTION_SCHEMA_VERSION) {
+    migration.migrateV11ToV12(storage.db);
+    correctionVersion = schema.getSchemaVersion(storage.db);
+  }
+  if (correctionVersion === correctionSchema.CORRECTION_COMPLIANCE_SCHEMA_VERSION) {
+    migration.migrateV12ToV13(storage.db);
+    correctionVersion = schema.getSchemaVersion(storage.db);
+  }
+  if (correctionVersion !== correctionSchema.CORRECTION_PRINCIPLES_SCHEMA_VERSION) {
+    throw new Error("scratch correction store is not schema v13");
+  }
+  return { storage, events, detector, sessionStore, correctionStore, context, policy, render, budget, transcriptReader, redact, query, ruleTemplate, strength };
 }
 
 export function createReplayOccurrenceRows(timeline, dateRangeJst = { start: DATE_START, end: DATE_END }) {
@@ -1289,7 +1542,7 @@ function makeSessionEvent(input, context, runtime, processedAt) {
     previousAction: Array.from(previousAction).slice(0, 160).join(""),
     ...(context.firstLocatorHash ? { actionFirstLocatorHash: context.firstLocatorHash } : {}),
     ...(context.lastLocatorHash ? { actionLastLocatorHash: context.lastLocatorHash } : {}),
-    project: SOURCE_PROJECT,
+    project: input.project,
     scope: SOURCE_SCOPE,
     rawTextHash: runtime.sessionStore.hashRawText(eventText),
     sourceLocatorHash: runtime.sessionStore.hashTranscriptPosition(input.sessionId, input.byteOffset),
@@ -1307,12 +1560,37 @@ function queryEvidenceSources(storage, bundleKey) {
 }
 
 function snapshotRules(storage) {
-  return storage.runCorrectionTransaction(({ db }) => db.prepare(`
-    SELECT b.bundle_key AS bundleKey, b.version, v.rule_text AS ruleText, v.status, v.expires_at AS expiresAt,
-      v.evidence_event_ids AS evidenceEventIds
-    FROM owner_correction_bundles b
-    JOIN owner_correction_versions v ON v.bundle_key = b.bundle_key AND v.version = b.version
-  `).all().map((row) => ({ ...row, evidenceEventIds: JSON.parse(row.evidenceEventIds) })));
+  return storage.runCorrectionTransaction(({ db }) => {
+    const currentRows = db.prepare(`
+      SELECT b.bundle_key AS bundleKey, b.version, v.rule_text AS ruleText, v.body_hash AS bodyHash,
+        v.conditions, v.condition_key AS conditionKey, v.polarity, v.visibility, v.status,
+        v.confirmed_at AS confirmedAt, v.expires_at AS expiresAt, v.lifetime_kind AS lifetimeKind,
+        v.continuation_basis AS continuationBasis, v.evidence_event_ids AS evidenceEventIds
+      FROM owner_correction_bundles b
+      JOIN owner_correction_versions v ON v.bundle_key = b.bundle_key AND v.version = b.version
+    `).all();
+    if (currentRows.length === 0) return [];
+    const bundleKeys = [...new Set(currentRows.map((row) => row.bundleKey))];
+    const placeholders = bundleKeys.map(() => "?").join(", ");
+    const versions = db.prepare(`
+      SELECT bundle_key AS bundleKey, version, rule_text AS ruleText, body_hash AS bodyHash,
+        conditions, condition_key AS conditionKey, polarity, visibility, status,
+        confirmed_at AS confirmedAt, expires_at AS expiresAt, lifetime_kind AS lifetimeKind,
+        continuation_basis AS continuationBasis, evidence_event_ids AS evidenceEventIds
+      FROM owner_correction_versions WHERE bundle_key IN (${placeholders}) ORDER BY bundle_key, version
+    `).all(...bundleKeys).map((row) => ({ ...row, evidenceEventIds: JSON.parse(row.evidenceEventIds) }));
+    const versionsByBundle = new Map();
+    for (const version of versions) {
+      const bundleVersions = versionsByBundle.get(version.bundleKey) ?? [];
+      bundleVersions.push(version);
+      versionsByBundle.set(version.bundleKey, bundleVersions);
+    }
+    return currentRows.map((row) => ({
+      ...row,
+      evidenceEventIds: JSON.parse(row.evidenceEventIds),
+      versionHistory: versionsByBundle.get(row.bundleKey) ?? [],
+    }));
+  });
 }
 
 function currentVersionSnapshots(storage) {
@@ -1418,6 +1696,7 @@ function reasonLabel(reason) {
     expired_at_injection: "(c) 注入時期限切れ",
     expired_before_action: "(c) 行動開始時期限切れ",
     stale_version: "(c) 旧版・取消済み",
+    rule_repeated_after_injection: "(c) 同じ規則の注入後再訂正",
     expired_before_action: "(c) 行動開始時期限切れ",
     cooldown: "(c) 冷却",
     budget: "(c) 予算",
@@ -1671,6 +1950,8 @@ function resetStore(scratchRoot, compiledRoot) {
     db.pragma("foreign_keys = ON");
     db.transaction(() => {
       for (const table of [
+        "owner_correction_strength_events",
+        "owner_correction_violations",
         "owner_correction_injections",
         "owner_correction_pending",
         "owner_correction_evidence",
@@ -1701,7 +1982,80 @@ function summarizeOutputs(rendered, selection, estimateTokens) {
   };
 }
 
-async function runCoverage({ split, coverage, sessions: sourceSessions, compiledRoot, scratchRoot, dateRangeJst }) {
+function summarizeInjectionAfterCorrection(storage, sessionOrderByHash) {
+  return storage.runCorrectionTransaction(({ db }) => {
+    const injections = db.prepare(`
+      SELECT DISTINCT bundle_key AS bundleKey, version, session_id_hash AS sessionHash,
+        human_ordinal AS humanOrdinal, emitted_at AS emittedAt
+      FROM owner_correction_injections
+      WHERE body_included = 1 AND stdout_status = 'emitted'
+    `).all();
+    const evidence = db.prepare(`
+      SELECT DISTINCT e.event_id AS eventId, e.bundle_key AS bundleKey, event.session_id_hash AS sessionHash,
+        event.human_ordinal AS humanOrdinal, event.observed_at AS observedAt
+      FROM owner_correction_evidence AS e
+      JOIN owner_correction_events AS event ON event.event_id = e.event_id
+    `).all();
+    const versions = db.prepare(`
+      SELECT bundle_key AS bundleKey, version, rule_text AS ruleText, body_hash AS bodyHash,
+        conditions, condition_key AS conditionKey, polarity, visibility, status,
+        confirmed_at AS confirmedAt, expires_at AS expiresAt, lifetime_kind AS lifetimeKind,
+        continuation_basis AS continuationBasis, evidence_event_ids AS evidenceEventIds,
+        effective_from AS effectiveFrom
+      FROM owner_correction_versions ORDER BY bundle_key, version
+    `).all().map((row) => ({ ...row, evidenceEventIds: JSON.parse(row.evidenceEventIds) }));
+    const sessionsWithBodyInjection = new Set(injections.map((row) => row.sessionHash));
+    const injectionsByBundle = new Map();
+    const versionsByBundle = new Map();
+    for (const injection of injections) {
+      const bundleInjections = injectionsByBundle.get(injection.bundleKey) ?? [];
+      bundleInjections.push(injection);
+      injectionsByBundle.set(injection.bundleKey, bundleInjections);
+    }
+    for (const version of versions) {
+      const bundleVersions = versionsByBundle.get(version.bundleKey) ?? [];
+      bundleVersions.push(version);
+      versionsByBundle.set(version.bundleKey, bundleVersions);
+    }
+    const sessionsWithLaterSameBundleEvidence = new Set();
+    for (const row of evidence) {
+      const matchingInjections = injectionsByBundle.get(row.bundleKey) ?? [];
+      const bundleVersions = versionsByBundle.get(row.bundleKey) ?? [];
+      const observedAt = numericTime(row.observedAt);
+      const versionIncludingEvidence = bundleVersions.find((version) => version.evidenceEventIds.includes(row.eventId));
+      const versionAtEvidence = versionIncludingEvidence ?? bundleVersions
+        .filter((version) => numericTime(version.effectiveFrom) <= observedAt)
+        .at(-1);
+      if (!versionAtEvidence) continue;
+      const hasEarlierInjection = matchingInjections.some((injection) => {
+        const emittedAt = numericTime(injection.emittedAt);
+        if (observedAt === null || emittedAt === null) return false;
+        let occurredAfterInjection = observedAt > emittedAt;
+        if (observedAt === emittedAt) {
+          if (row.sessionHash === injection.sessionHash) occurredAfterInjection = row.humanOrdinal > injection.humanOrdinal;
+          else occurredAfterInjection = sessionOrderByHash.get(row.sessionHash) > sessionOrderByHash.get(injection.sessionHash);
+        }
+        return occurredAfterInjection && isEvidenceOnlyVersionContinuity(bundleVersions, injection.version, versionAtEvidence.version);
+      });
+      if (hasEarlierInjection) sessionsWithLaterSameBundleEvidence.add(row.sessionHash);
+    }
+    const denominator = sessionsWithBodyInjection.size;
+    const numerator = sessionsWithLaterSameBundleEvidence.size;
+    return { numerator, denominator, rate: denominator === 0 ? null : numerator / denominator };
+  });
+}
+
+async function runCoverage({
+  split,
+  coverage,
+  sessions: sourceSessions,
+  compiledRoot,
+  scratchRoot,
+  dateRangeJst,
+  sessionOrdered = false,
+  includeOnlineMetrics = false,
+  recurrenceLedger = null,
+}) {
   const coverageRoot = join(resolve(scratchRoot), "splits", split, coverage);
   await mkdir(coverageRoot, { recursive: true });
   const isolatedStoreRoot = coverageRoot;
@@ -1709,6 +2063,8 @@ async function runCoverage({ split, coverage, sessions: sourceSessions, compiled
   const { storage } = runtime;
   resetStore(isolatedStoreRoot, compiledRoot);
   const sessions = filterReplayOwnerInputs(sourceSessions, runtime.events);
+  const sessionOrderByHash = new Map(sessions.map((session, index) => [session.sessionHash, index]));
+  const hookDurations = { SessionStart: [], UserPromptSubmit: [], Stop: [] };
   for (const session of sessions) {
     session.startHookObservations = [];
     session.deliveryAttempts = [];
@@ -1731,6 +2087,7 @@ async function runCoverage({ split, coverage, sessions: sourceSessions, compiled
   }
   const startOutputs = new Map();
   const promptOutputs = new Map();
+  let correctionMatchedReinjectionCount = 0;
   const sessionStates = new Map();
   const pendingStopInputs = new Map();
   const snapshotsByEvent = new Map();
@@ -1813,7 +2170,14 @@ async function runCoverage({ split, coverage, sessions: sourceSessions, compiled
     }
     bySession.set(session.sessionHash, sessionRows);
   }
-  originalTimeline.sort(compareAvailable);
+  if (sessionOrdered) {
+    originalTimeline.sort((left, right) =>
+      sessionOrderByHash.get(left.sessionHash) - sessionOrderByHash.get(right.sessionHash) ||
+      left.lineOrder - right.lineOrder,
+    );
+  } else {
+    originalTimeline.sort(compareAvailable);
+  }
   originalTimeline.forEach((row, index) => {
     row.globalOrder = index + 1;
     row.availableAt = Number.isFinite(row.availableMs) ? new Date(row.availableMs).toISOString() : null;
@@ -1824,7 +2188,19 @@ async function runCoverage({ split, coverage, sessions: sourceSessions, compiled
     }
     if (row.kind !== "human") return;
   });
-  const targetRows = createReplayOccurrenceRows(originalTimeline, dateRangeJst);
+  const regexRecurrenceCandidates = createReplayOccurrenceRows(originalTimeline, dateRangeJst);
+  let targetRows = regexRecurrenceCandidates;
+  let recurrenceSummary = null;
+  if (recurrenceLedger) {
+    try {
+      const classification = classifyRecurrenceCandidates(regexRecurrenceCandidates, recurrenceLedger);
+      targetRows = classification.denominatorCandidates;
+      recurrenceSummary = classification.summary;
+    } catch (error) {
+      storage.close();
+      throw error;
+    }
+  }
   const targetMap = new Map(targetRows.map((entry) => [`${entry.eventId}:${entry.bundleLabel}`, entry]));
 
   const pendingCandidatesByEvent = new Map();
@@ -1847,7 +2223,7 @@ async function runCoverage({ split, coverage, sessions: sourceSessions, compiled
     const budget = runtime.budget.DEFAULT_INJECTION_TOKEN_BUDGET;
     const plan = runtime.context.getContextInjectionPlan(input, state.humanSeen, budget);
     const selection = runtime.policy.selectCorrectionInjections(storage, {
-      project: SOURCE_PROJECT,
+      project: session.project,
       scope: SOURCE_SCOPE,
       query: "",
       at,
@@ -1942,7 +2318,29 @@ async function runCoverage({ split, coverage, sessions: sourceSessions, compiled
     }
   };
 
+  const recordHookDuration = (hookName, startedAt) => {
+    if (startedAt === null) return;
+    hookDurations[hookName].push(Number(process.hrtime.bigint() - startedAt) / 1e6);
+  };
+  const runMeasuredStartOutput = (...args) => {
+    const startedAt = includeOnlineMetrics ? process.hrtime.bigint() : null;
+    runStartOutput(...args);
+    recordHookDuration("SessionStart", startedAt);
+  };
+  let lastPersistedAtMs = -Infinity;
+  const runStrengthJobAt = (timeMs) => runtime.strength.runStrengthJob(storage, {
+    now: new Date(timeMs).toISOString(),
+    mode: "on",
+  });
+  const firstTimelineMs = originalTimeline.length === 0
+    ? null
+    : numericTime(originalTimeline[0].availableAt) ?? originalTimeline[0].availableMs;
+  const runStrengthJobsThrough = includeOnlineMetrics
+    ? createStrengthJobSchedule(runStrengthJobAt, firstTimelineMs)
+    : () => {};
+
   for (const row of originalTimeline) {
+    if (includeOnlineMetrics) runStrengthJobsBeforeEvent(runStrengthJobsThrough, row, lastPersistedAtMs);
     const session = sessions.find((entry) => entry.sessionHash === row.sessionHash);
     const state = sessionStates.get(row.sessionHash);
     const at = row.availableAt ?? new Date(row.availableMs).toISOString();
@@ -1951,7 +2349,7 @@ async function runCoverage({ split, coverage, sessions: sourceSessions, compiled
       if (!state.startHandled) {
         if (row.source === "compact" && !state.compactPending) state.compactEpoch += 1;
         if (row.source === "resume" || row.source === "clear") state.compactEpoch += 1;
-        runStartOutput(session, state, at, row.observed, row.source, row);
+        runMeasuredStartOutput(session, state, at, row.observed, row.source, row);
         state.startHandled = true;
       }
       if (row.source === "compact") state.compactPending = false;
@@ -1966,7 +2364,7 @@ async function runCoverage({ split, coverage, sessions: sourceSessions, compiled
         const hasRecordedCompactStart = session.timeline.some((entry) => entry.kind === "start" && entry.source === "compact" &&
           entry.lineOrder > row.lineOrder && (!nextHuman || entry.lineOrder < nextHuman.lineOrder));
         if (!hasRecordedCompactStart) {
-          runStartOutput(session, state, at, true, "compact", row);
+          runMeasuredStartOutput(session, state, at, true, "compact", row);
           state.startHandled = true;
         }
       } else {
@@ -2003,11 +2401,20 @@ async function runCoverage({ split, coverage, sessions: sourceSessions, compiled
       let rendered = runtime.render.renderCorrectionRules({ trigger: "prompt", rules: [], budgetTokens: 0 });
       let candidates = [];
       let plan = null;
+      const promptStartedAt = includeOnlineMetrics && hooked ? process.hrtime.bigint() : null;
       if (hooked) {
         const hookInput = { hook_event_name: "UserPromptSubmit", session_id: input.sessionId, prompt: input.text };
+        candidates = runtime.context.detectPendingCorrectionCandidates(input.text);
+        const detectedStoredCorrectionBundleKeys = toStoredCorrectionBundleKeys(
+          candidates,
+          input.project,
+          SOURCE_SCOPE,
+          runtime.sessionStore.hashSessionId(input.sessionId),
+          runtime.correctionStore.storedBundleKey,
+        );
         plan = runtime.context.getContextInjectionPlan(hookInput, input.humanOrdinal, runtime.budget.DEFAULT_INJECTION_TOKEN_BUDGET);
         selection = runtime.policy.selectCorrectionInjections(storage, {
-          project: SOURCE_PROJECT,
+          project: input.project,
           scope: SOURCE_SCOPE,
           query: input.text,
           at,
@@ -2015,6 +2422,7 @@ async function runCoverage({ split, coverage, sessions: sourceSessions, compiled
           compactEpoch: state.compactEpoch,
           humanOrdinal: input.humanOrdinal,
           trigger: plan.requestTrigger,
+          detectedStoredCorrectionBundleKeys,
         });
         rendered = runtime.render.finalizeCorrectionRender(
           runtime.render.renderCorrectionRules({ trigger: plan.renderTrigger, rules: selection.rules, budgetTokens: plan.budgetTokens }),
@@ -2059,6 +2467,7 @@ async function runCoverage({ split, coverage, sessions: sourceSessions, compiled
         }
         const output = summarizeOutputs(rendered, selection, runtime.budget.estimateTokens);
         promptOutputs.set(input.eventId, output);
+        correctionMatchedReinjectionCount += countCorrectionMatchedReinjections(selection, rendered);
         for (const rule of rendered.includedRules) {
           const version = outputSnapshot(storage, rule.bundleKey, rule.version, []);
           if (!version) continue;
@@ -2089,7 +2498,6 @@ async function runCoverage({ split, coverage, sessions: sourceSessions, compiled
           }
         }
         addOutputLedger(storage, runtime.sessionStore.hashSessionId(input.sessionId), state.compactEpoch, input.humanOrdinal, plan.ledgerTrigger, at, rendered);
-        candidates = runtime.context.detectPendingCorrectionCandidates(input.text);
         const receiptId = runtime.context.addUserPromptPendingReceipt(
           storage,
           runtime.sessionStore.hashSessionId(input.sessionId),
@@ -2131,6 +2539,9 @@ async function runCoverage({ split, coverage, sessions: sourceSessions, compiled
       } else {
         candidates = [];
       }
+      if (promptStartedAt !== null) {
+        hookDurations.UserPromptSubmit.push(Number(process.hrtime.bigint() - promptStartedAt) / 1e6);
+      }
       pendingStopInputs.get(row.sessionHash).push({ input, hookCandidates: candidates, hasReceipt: pendingCandidatesByEvent.has(input.eventId) });
       continue;
     }
@@ -2150,6 +2561,7 @@ async function runCoverage({ split, coverage, sessions: sourceSessions, compiled
       continue;
     }
     if (row.kind === "stop") {
+      const stopStartedAt = includeOnlineMetrics ? process.hrtime.bigint() : null;
       const toProcess = pendingStopInputs.get(row.sessionHash) ?? [];
       const progress = readCurrentSessionState(storage, runtime.sessionStore.hashSessionId(session.sessionId));
       const prior = {
@@ -2158,12 +2570,16 @@ async function runCoverage({ split, coverage, sessions: sourceSessions, compiled
         transcriptIdentity: progress.transcriptIdentity,
       };
       if (toProcess.length > 0) {
+        const persistenceAtMs = includeOnlineMetrics
+          ? Math.max(lastPersistedAtMs, numericTime(at) ?? row.availableMs ?? PERIOD_START_MS)
+          : numericTime(at) ?? row.availableMs ?? PERIOD_START_MS;
+        const persistenceAt = includeOnlineMetrics ? new Date(persistenceAtMs).toISOString() : at;
         const items = toProcess.map(({ input, hasReceipt, hookCandidates }) => {
           const context = assistantContextFor(input, runtime);
           const candidates = hasReceipt ? hookCandidates : detectReplayOwnerCorrections(input, runtime, context);
           return { input, context, candidates };
         });
-        const eventItems = items.map(({ input, context }) => makeSessionEvent(input, context, runtime, at));
+        const eventItems = items.map(({ input, context }) => makeSessionEvent(input, context, runtime, persistenceAt));
         const nextIdentity = nextCursorIdentity(session.snapshotMeta, session.snapshot, row.byteEndOffset);
         let commitResult;
         const candidatesByEvent = new Map(items.map((item) => [item.input.eventId, item.candidates]));
@@ -2185,7 +2601,7 @@ async function runCoverage({ split, coverage, sessions: sourceSessions, compiled
             sessionIdHash: runtime.sessionStore.hashSessionId(session.sessionId),
             expected: prior,
             nextCursor: { transcriptOffset: row.byteEndOffset, transcriptIdentity: nextIdentity },
-            lastSeenAt: at,
+            lastSeenAt: persistenceAt,
             events: eventItems,
           });
           if (!commitResult.committed) throw new Error("Stop replay cursor conflict");
@@ -2199,7 +2615,7 @@ async function runCoverage({ split, coverage, sessions: sourceSessions, compiled
             for (const candidate of candidates) {
               runtime.correctionStore.applyCorrectionEvidence({ db, save }, {
                 eventId: input.eventId,
-                at: input.availableAt ?? at,
+                at: includeOnlineMetrics ? persistenceAt : input.availableAt ?? at,
                 bundleKey: candidate.bundleKey,
                 ruleText: candidate.ruleText,
                 topicKey: candidate.topicKey,
@@ -2209,7 +2625,7 @@ async function runCoverage({ split, coverage, sessions: sourceSessions, compiled
                 decision: candidate.status === "confirmed" ? "confirmed" : "candidate",
                 lifetimeKind: candidate.lifetimeKind,
                 continuationBasis: candidateContinuation(candidate),
-                ...(candidate.lifetimeKind === "task" ? { sessionEndsAt: at } : {}),
+                ...(candidate.lifetimeKind === "task" ? { sessionEndsAt: persistenceAt } : {}),
                 evidence: {
                   source: candidate.source,
                   score: candidate.score,
@@ -2220,7 +2636,10 @@ async function runCoverage({ split, coverage, sessions: sourceSessions, compiled
               });
             }
             const rows = db.prepare(`
-              SELECT e.bundle_key AS bundleKey, b.version, b.status, b.expires_at AS expiresAt, v.evidence_event_ids AS evidenceEventIds
+              SELECT e.bundle_key AS bundleKey, b.version, v.rule_text AS ruleText, v.body_hash AS bodyHash,
+                v.conditions, v.condition_key AS conditionKey, v.polarity, v.visibility, b.status,
+                v.confirmed_at AS confirmedAt, b.expires_at AS expiresAt, v.lifetime_kind AS lifetimeKind,
+                v.continuation_basis AS continuationBasis, v.evidence_event_ids AS evidenceEventIds
               FROM owner_correction_evidence e JOIN owner_correction_bundles b ON b.bundle_key = e.bundle_key
               JOIN owner_correction_versions v ON v.bundle_key = b.bundle_key AND v.version = b.version
               WHERE e.event_id = ?
@@ -2242,9 +2661,18 @@ async function runCoverage({ split, coverage, sessions: sourceSessions, compiled
               bundleKey: row.bundleKey,
               version: row.version,
               status: row.status,
-              savedAt: at,
+              ruleText: row.ruleText,
+              bodyHash: row.bodyHash,
+              conditions: row.conditions,
+              conditionKey: row.conditionKey,
+              polarity: row.polarity,
+              visibility: row.visibility,
+              confirmedAt: row.confirmedAt,
+              savedAt: persistenceAt,
               order: row.globalOrder,
               expiresAt: row.expiresAt,
+              lifetimeKind: row.lifetimeKind,
+              continuationBasis: row.continuationBasis,
               evidenceEventIds: JSON.parse(row.evidenceEventIds),
             }));
           }
@@ -2254,6 +2682,7 @@ async function runCoverage({ split, coverage, sessions: sourceSessions, compiled
             transcriptOffset: row.byteEndOffset,
             transcriptIdentity: nextIdentity,
           };
+          if (includeOnlineMetrics) lastPersistedAtMs = persistenceAtMs;
           pendingStopInputs.set(row.sessionHash, []);
         } catch (error) {
           for (const { input } of items) input.saves = [];
@@ -2267,7 +2696,13 @@ async function runCoverage({ split, coverage, sessions: sourceSessions, compiled
           });
         }
       }
+      recordHookDuration("Stop", stopStartedAt);
     }
+  }
+
+  if (includeOnlineMetrics) {
+    const jobTimeMs = Math.max(lastPersistedAtMs, onlineUntilMs(dateRangeJst.end));
+    runStrengthJobsThrough(jobTimeMs);
   }
 
   const actionSnapshotsByInput = new Map();
@@ -2296,15 +2731,36 @@ async function runCoverage({ split, coverage, sessions: sourceSessions, compiled
   const allDetections = allInputs.flatMap((input) => input.detections);
   const audit = buildAuditRows(allInputs, runtime.events, runtime.redact);
   const hookObservations = summarizeHookObservations(sessions, allInputs);
+  const recurrenceResults = includeOnlineMetrics ? resultRows.map((row) => ({
+    eventHash: sha256(row.eventId).slice(0, 24),
+    theme: row.bundleLabel,
+    outcome: row.result.prevented ? "prevented" : "stopped",
+    stage: row.result.failedAt,
+    reasonCode: row.result.reason,
+  })) : null;
+  const injectionCorrectionRate = includeOnlineMetrics
+    ? summarizeInjectionAfterCorrection(storage, sessionOrderByHash)
+    : null;
+  const hookTime = includeOnlineMetrics ? {
+    measurement: "in-process replay hook logic elapsed time",
+    byHook: Object.fromEntries(Object.entries(hookDurations).map(([hookName, values]) => [hookName, summarizeDurations(values)])),
+  } : null;
+  const strengthEvents = includeOnlineMetrics ? summarizeStrengthEvents(storage) : null;
+  const stopFailureReasons = includeOnlineMetrics
+    ? Object.fromEntries([...stopFailures.reduce((counts, failure) => {
+      counts.set(failure.message, (counts.get(failure.message) ?? 0) + 1);
+      return counts;
+    }, new Map())].sort(([left], [right]) => left.localeCompare(right)))
+    : null;
   const report = {
     split,
     coverage,
     sampleSeed: SAMPLE_SEED,
     detectorVersion: DETECTOR_VERSION,
-    sourceProject: SOURCE_PROJECT,
     sourceScope: SOURCE_SCOPE,
     population: {
       sessionCount: sessions.length,
+      ...projectSessionSummary(sessions),
       humanUtteranceCount: allInputs.length,
       periodHumanUtteranceCount: allInputs.filter((input) => input.dateJst >= dateRangeJst.start && input.dateJst <= dateRangeJst.end).length,
       recurrenceCountB2ToB10: counts.main.recurrenceCount,
@@ -2344,10 +2800,21 @@ async function runCoverage({ split, coverage, sessions: sourceSessions, compiled
     replayErrors: {
       stopPersistenceFailureCount: stopFailures.length,
       stopPersistenceFailureSampleCount: stopFailures.length,
+      ...(includeOnlineMetrics ? { stopPersistenceFailureReasons: stopFailureReasons } : {}),
     },
   };
   storage.close();
-  return { report, auditRows: audit.rows, auditGroups: audit.groups };
+  return {
+    report,
+    auditRows: audit.rows,
+    auditGroups: audit.groups,
+    recurrenceResults,
+    injectionCorrectionRate,
+    correctionMatchedReinjectionCount,
+    strengthEvents,
+    hookTime,
+    recurrenceSummary,
+  };
 }
 
 async function runHookTimings({ sessions, compiledRoot, scratchRoot }) {
@@ -2490,6 +2957,30 @@ function isExpectedReplaySplit(sessions, split) {
   return split.tune.length === tuneCount && split.evaluation.length === sessions.length - tuneCount;
 }
 
+function projectSessionSummary(sessions) {
+  const projectCounts = new Map();
+  const projectBasisCounts = new Map();
+  let projectFallbackSessionCount = 0;
+  let projectUnresolvedSessionCount = 0;
+  for (const session of sessions) {
+    if (typeof session.project !== "string" || session.project.length === 0) {
+      projectUnresolvedSessionCount += 1;
+      continue;
+    }
+    const projectBasis = session.projectBasis ?? "manifest";
+    projectCounts.set(session.project, (projectCounts.get(session.project) ?? 0) + 1);
+    projectBasisCounts.set(projectBasis, (projectBasisCounts.get(projectBasis) ?? 0) + 1);
+    if (session.projectFallback === true) projectFallbackSessionCount += 1;
+  }
+  const sortedCounts = (counts) => Object.fromEntries([...counts].sort(([left], [right]) => left.localeCompare(right)));
+  return {
+    projectCounts: sortedCounts(projectCounts),
+    projectBasisCounts: sortedCounts(projectBasisCounts),
+    projectFallbackSessionCount,
+    projectUnresolvedSessionCount,
+  };
+}
+
 function reportPopulation(manifest) {
   const dateRangeJst = manifest.dateRangeJst ?? { start: DATE_START, end: DATE_END };
   return {
@@ -2499,6 +2990,7 @@ function reportPopulation(manifest) {
     noHumanCount: manifest.fileAudit.noHuman,
     outsidePeriodCount: manifest.fileAudit.outsidePeriod,
     periodSessionCount: manifest.sessions.length,
+    ...projectSessionSummary(manifest.sessions),
     periodHumanUtteranceCount: manifest.sessions.reduce((sum, session) =>
       sum + session.humanInputs.filter((input) => input.dateJst >= dateRangeJst.start && input.dateJst <= dateRangeJst.end).length, 0),
   };
@@ -2558,7 +3050,7 @@ function flattenNumericMetrics(value, prefix = "", output = {}) {
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) return output;
   for (const [key, entry] of Object.entries(value)) {
-    if (["split", "coverage", "sampleSeed", "detectorVersion", "sourceProject", "sourceScope", "failureSentence", "auditSampleCounts", "round0TuneComparison"].includes(key)) continue;
+    if (["split", "coverage", "sampleSeed", "detectorVersion", "projectCounts", "projectBasisCounts", "projectFallbackSessionCount", "projectUnresolvedSessionCount", "sourceScope", "failureSentence", "auditSampleCounts", "round0TuneComparison"].includes(key)) continue;
     flattenNumericMetrics(entry, prefix ? `${prefix}.${key}` : key, output);
   }
   return output;
@@ -3178,10 +3670,15 @@ async function runColdSimulation({ splitName, manifest, split, compiledRoot, scr
   await mkdir(join(scratchRoot, "state"), { recursive: true });
   await writeFile(splitName === "tune" ? tuneStatePath : evaluationStatePath, JSON.stringify(state) + "\n", "utf8");
   const report = await writeEffectReports(scratchRoot, hashes, reportPopulation(manifest), manifest);
+  const splitProjectSummary = projectSessionSummary(split);
   return {
     mode: "cold",
     split: splitName,
     sessionCount: split.length,
+    projectCounts: splitProjectSummary.projectCounts,
+    projectBasisCounts: splitProjectSummary.projectBasisCounts,
+    projectFallbackSessionCount: splitProjectSummary.projectFallbackSessionCount,
+    projectUnresolvedSessionCount: splitProjectSummary.projectUnresolvedSessionCount,
     evaluationStatus: report.evaluationStatus,
     reportFiles: ["reports/simulate.json", "reports/simulate.md"],
     auditPromptFile: `audit-prompts/${splitName}.jsonl`,
@@ -3385,6 +3882,9 @@ async function writeSimpleReport(scratchRoot, name, body, markdown) {
 
 function buildSimpleMarkdown(title, body) {
   const rows = flattenNumericMetrics(body);
+  if (body.afterInjectionCorrectionRate) {
+    rows["注入後再訂正率"] = body.afterInjectionCorrectionRate.rate;
+  }
   return [
     `# ${title}`,
     "",
@@ -3394,6 +3894,7 @@ function buildSimpleMarkdown(title, body) {
     "|---|---:|",
     ...Object.entries(rows).map(([key, value]) => `| ${key} | ${formatMetric(value)} |`),
     "",
+    ...(typeof body.recurrence?.ledgerSha256 === "string" ? [`台帳SHA-256: ${body.recurrence.ledgerSha256}`, ""] : []),
     ...(body.checks ? Object.entries(body.checks).map(([key, value]) => `- ${key}: ${value ? "pass" : "fail"}`) : []),
   ].join("\n");
 }
@@ -3421,12 +3922,56 @@ async function validateRunPaths(compiledRoot, scratchRoot) {
   return { compiled, scratch };
 }
 
-export async function runSimulation({ mode, manifest: manifestPath, compiledRoot, scratchRoot, split, auditArgs }) {
-  if (!["cold", "freeze", "acceptance", "hook-timing"].includes(mode)) {
+async function runOnlineSimulation({ manifest, compiledRoot, scratchRoot, until, recurrenceLedgerPath }) {
+  const sessions = selectOnlineSessions(manifest.sessions, until);
+  const recurrenceLedger = await readRecurrenceLedger(recurrenceLedgerPath);
+  const replay = await runCoverage({
+    split: "online",
+    coverage: "contract",
+    sessions,
+    compiledRoot,
+    scratchRoot,
+    dateRangeJst: { start: manifest.dateRangeJst.start, end: until },
+    sessionOrdered: true,
+    includeOnlineMetrics: true,
+    recurrenceLedger,
+  });
+  const body = {
+    mode: "online",
+    status: replay.report.replayErrors.stopPersistenceFailureCount === 0 ? "pass" : "fail",
+    until,
+    sessionOrder: "first-human-utterance-time; ties by sessionId; each session transcript order",
+    coverage: "contract",
+    sourceSessionCount: manifest.sessions.length,
+    sessionCount: sessions.length,
+    population: replay.report.population,
+    recurrence: replay.recurrenceSummary,
+    prevention: replay.report.prevention,
+    stopDestinations: summarizeStopDestinations(replay.recurrenceResults),
+    recurrenceResults: replay.recurrenceResults,
+    afterInjectionCorrectionRate: replay.injectionCorrectionRate,
+    correctionMatchedReinjectionCount: replay.correctionMatchedReinjectionCount,
+    strengthEvents: replay.strengthEvents,
+    hookTime: replay.hookTime,
+    replayErrors: replay.report.replayErrors,
+    reportFiles: ["reports/online.json", "reports/online.md"],
+  };
+  await writeSimpleReport(scratchRoot, "online", body, buildSimpleMarkdown("時刻順 online 再生", body));
+  return body;
+}
+
+export async function runSimulation({ mode, manifest: manifestPath, compiledRoot, scratchRoot, split, auditArgs, until, recurrenceLedgerPath }) {
+  if (!["cold", "freeze", "acceptance", "hook-timing", "online"].includes(mode)) {
     throw new Error("unsupported replay mode");
   }
   const { compiled, scratch } = await validateRunPaths(compiledRoot, scratchRoot);
   const manifest = await readManifest(manifestPath);
+  if (mode === "online") {
+    if (manifest.sessions.length !== manifest.fileAudit.included) {
+      throw new Error("online replay requires every included manifest session");
+    }
+    return runOnlineSimulation({ manifest, compiledRoot: compiled, scratchRoot: scratch, until, recurrenceLedgerPath });
+  }
   if (mode === "cold" || mode === "freeze") {
     if (manifest.sessions.length !== manifest.fileAudit.included) {
       throw new Error("cold replay requires every included manifest session");
@@ -3488,4 +4033,14 @@ export const internal = {
   filterReplayOwnerInputs,
   isExpectedReplaySplit,
   confidenceConditions,
+  initializeBlankStore,
+  flattenNumericMetrics,
+  makeSessionEvent,
+  selectOnlineSessions,
+  isEvidenceOnlyVersionContinuity,
+  toStoredCorrectionBundleKeys,
+  createStrengthJobSchedule,
+  runStrengthJobsBeforeEvent,
+  countCorrectionMatchedReinjections,
+  summarizeStopDestinations,
 };

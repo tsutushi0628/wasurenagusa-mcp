@@ -1,5 +1,12 @@
 import type Database from "better-sqlite3";
+import { readCorrectionFeatureModes, type CorrectionFeatureModes } from "./environment-mode.js";
+import { correctionPrincipleCandidateFilter } from "./principles.js";
 import { extractShortCjkTokens, SQLiteStorage, tokenizeForFts } from "../storage/sqlite.js";
+
+interface CorrectionPrincipleExclusion {
+  sql: string;
+  parameters: string[];
+}
 
 const MAX_QUERY_CHARACTERS = 2000;
 const MAX_QUERY_TERMS = 8;
@@ -18,6 +25,18 @@ const TOPIC_KEY_TERMS: Record<string, readonly string[]> = {
   storage_location: ["保存", "配置", "一時", "成果物"],
   model_routing: ["モデル", "経路", "担当", "利用枠"],
 };
+const OWNER_SCOPE_BEHAVIOR_TOPIC_KEYS = new Set(["tone", "response_policy", "expression_policy"]);
+const OWNER_SCOPE_PROJECT_TARGET_TERMS = [
+  "api", "アプリ", "画面", "コード", "ファイル", "社外向け", "ブランド",
+  "用語集", "略号", "略語", "文書", "文章", "報告書", "レポート", "仕様書",
+];
+const OWNER_SCOPE_BEHAVIOR_TERMS = [
+  "質問には簡潔に答", "質問に簡潔に答", "簡潔に答え", "短く答え", "回答は簡潔", "返答は簡潔",
+  "分からない言葉を使", "わからない言葉を使", "難しい言葉を使わ", "専門用語を使わ", "横文字を使わ",
+  "質問に答", "質問へ答", "質問には答", "質問に回答", "聞かれたことに答", "問いに答",
+  "同じ注意を繰り返", "同じ注意書きを繰り返", "同じことを繰り返", "同じ指摘を繰り返", "同じ説明を繰り返", "言い直させ", "二度言わせ",
+  "会話では敬語で答", "敬語で答", "敬体で答", "常体で答", "ですますで答", "話し方は", "応答の仕方は",
+];
 
 export interface CorrectionQuery {
   text: string;
@@ -61,6 +80,7 @@ export interface CorrectionRetrievalResult {
   alwaysOn: RetrievedCorrectionRule[];
   projectRules: RetrievedCorrectionRule[];
   related: RelatedCorrectionRule[];
+  candidates: RetrievedCorrectionRule[];
   ftsCandidateCount: number;
 }
 
@@ -80,6 +100,10 @@ interface CorrectionRow {
   expires_at: string | null;
   lifetime_kind: "explicit_continuing" | "inferred" | "task" | "routing";
   continuation_basis: string;
+}
+
+interface CandidateCorrectionRow extends CorrectionRow {
+  first_detector_version: string | null;
 }
 
 function stripQuotedText(text: string): string {
@@ -290,47 +314,180 @@ function mapCorrectionRow(row: CorrectionRow): RetrievedCorrectionRule {
   };
 }
 
-function currentCorrectionSelect(where: string): string {
+function detectorMajorVersion(version: string): number {
+  const match = version.match(/(?:^|[-.])v(\d+)(?:$|[-.])/iu);
+  if (!match) return 0;
+  const majorVersion = Number(match[1]);
+  if (!Number.isSafeInteger(majorVersion)) return 0;
+  return majorVersion;
+}
+
+function isOwnerScopeBehaviorRule(topicKey: string, ruleText: string): boolean {
+  const normalizedTopic = topicKey.normalize("NFKC").toLocaleLowerCase("en-US");
+  const normalizedRule = ruleText.normalize("NFKC").toLocaleLowerCase("en-US").trim()
+    .replace(/[。.!！?？\s]+$/u, "");
+  if (normalizedRule === "簡潔に") return true;
+  if (normalizedRule === "全文を出して" || normalizedRule === "全文出して") return true;
+  if (!OWNER_SCOPE_BEHAVIOR_TOPIC_KEYS.has(normalizedTopic)) return false;
+  if (OWNER_SCOPE_PROJECT_TARGET_TERMS.some((term) => normalizedRule.includes(term))) return false;
+  return OWNER_SCOPE_BEHAVIOR_TERMS.some((term) => normalizedRule.includes(term));
+}
+
+function correctionRuleIdentity(rule: Pick<RetrievedCorrectionRule, "bundleKey" | "version">): string {
+  return `${rule.bundleKey}:${rule.version}`;
+}
+
+function correctionEffectiveIntensitySql(
+  db: Pick<Database.Database, "prepare">,
+  strengthMode: CorrectionFeatureModes["strength"],
+): string {
+  const strengthEventsTable = db.prepare(
+    "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?",
+  ).get("owner_correction_strength_events");
+  if (!strengthEventsTable) return "b.intensity";
+  const recordedBaseIntensity = "(SELECT CAST(json_extract(strength.basis, '$.baseIntensity') AS INTEGER) " +
+    "FROM owner_correction_strength_events strength " +
+    "WHERE strength.bundle_key = b.bundle_key AND strength.at >= b.first_seen_at " +
+    "AND CAST(json_extract(strength.basis, '$.baseIntensity') AS INTEGER) BETWEEN 1 AND 5 " +
+    "ORDER BY datetime(strength.at) DESC, strength.reason ASC LIMIT 1)";
+  const hasRecordedBaseIntensity = "EXISTS (SELECT 1 FROM owner_correction_strength_events strength " +
+    "WHERE strength.bundle_key = b.bundle_key AND strength.at >= b.first_seen_at " +
+    "AND CAST(json_extract(strength.basis, '$.baseIntensity') AS INTEGER) BETWEEN 1 AND 5)";
+  if (strengthMode === "on") {
+    const correctionTotal = "COALESCE((SELECT SUM(strength.delta) " +
+      "FROM owner_correction_strength_events strength " +
+      "WHERE strength.bundle_key = b.bundle_key AND strength.at >= b.first_seen_at), 0)";
+    return `CASE WHEN ${hasRecordedBaseIntensity} ` +
+      `THEN MAX(1, MIN(5, ${recordedBaseIntensity} + ${correctionTotal})) ELSE b.intensity END`;
+  }
+  return `CASE WHEN ${hasRecordedBaseIntensity} THEN ${recordedBaseIntensity} ELSE b.intensity END`;
+}
+
+function currentCorrectionSelect(where: string, exclusionSql: string, intensitySql: string): string {
   return `
     SELECT b.bundle_key, b.version, v.rule_text, m.title, b.topic_key, b.condition_key, b.visibility, b.project, b.scope,
-      b.intensity, b.session_count, b.last_seen_at, b.expires_at, b.lifetime_kind, b.continuation_basis
+      ${intensitySql} AS intensity, b.session_count, b.last_seen_at, b.expires_at, b.lifetime_kind, b.continuation_basis
     FROM owner_correction_bundles b
     JOIN owner_correction_versions v ON v.bundle_key = b.bundle_key AND v.version = b.version
     JOIN memories m ON m.id = b.memory_id
     WHERE b.status = 'confirmed' AND v.status = 'confirmed' AND m.state = 'active' AND m.category = 'dont'
       AND (b.expires_at IS NULL OR datetime(b.expires_at) > datetime(?))
       AND (v.expires_at IS NULL OR datetime(v.expires_at) > datetime(?))
-      AND b.visibility = v.visibility ${where}
+      AND julianday(b.confirmed_at) <= julianday(?)
+      AND julianday(v.confirmed_at) <= julianday(?)
+      AND b.visibility = v.visibility ${exclusionSql} ${where}
   `;
 }
 
-function readAlwaysOnRules(db: Pick<Database.Database, "prepare">, input: CorrectionRetrievalInput): RetrievedCorrectionRule[] {
+function readAlwaysOnRules(
+  db: Pick<Database.Database, "prepare">,
+  input: CorrectionRetrievalInput,
+  exclusion: CorrectionPrincipleExclusion,
+  intensitySql: string,
+): RetrievedCorrectionRule[] {
   const rows = db.prepare(currentCorrectionSelect(`
     AND b.visibility = 'owner' AND b.lifetime_kind IN ('explicit_continuing','inferred')
     AND length(trim(b.continuation_basis)) > 0
-  `)).all(input.at, input.at) as CorrectionRow[];
+  `, exclusion.sql, intensitySql)).all(input.at, input.at, input.at, input.at, ...exclusion.parameters) as CorrectionRow[];
   return rows.map(mapCorrectionRow);
 }
 
-function readProjectRules(db: Pick<Database.Database, "prepare">, input: CorrectionRetrievalInput): RetrievedCorrectionRule[] {
+function readOwnerScopeBehaviorRules(
+  db: Pick<Database.Database, "prepare">,
+  input: CorrectionRetrievalInput,
+  exclusion: CorrectionPrincipleExclusion,
+  intensitySql: string,
+): RetrievedCorrectionRule[] {
+  const rows = db.prepare(currentCorrectionSelect(`
+    AND b.visibility = 'project' AND b.lifetime_kind IN ('explicit_continuing','inferred')
+    AND length(trim(b.continuation_basis)) > 0
+    ORDER BY ${intensitySql} DESC, b.session_count DESC, datetime(b.last_seen_at) DESC, b.bundle_key ASC
+  `, exclusion.sql, intensitySql)).all(input.at, input.at, input.at, input.at, ...exclusion.parameters) as CorrectionRow[];
+  return rows.map(mapCorrectionRow)
+    .filter((rule) => isOwnerScopeBehaviorRule(rule.topicKey, rule.ruleText))
+    .map((rule) => ({ ...rule, visibility: "owner" }));
+}
+
+function readProjectRules(
+  db: Pick<Database.Database, "prepare">,
+  input: CorrectionRetrievalInput,
+  exclusion: CorrectionPrincipleExclusion,
+  intensitySql: string,
+): RetrievedCorrectionRule[] {
   const rows = db.prepare(currentCorrectionSelect(`
     AND b.visibility = 'project' AND b.project = ? AND b.scope = ?
-    ORDER BY b.intensity DESC, b.session_count DESC, datetime(b.last_seen_at) DESC, b.bundle_key ASC
-  `)).all(input.at, input.at, input.project, input.scope) as CorrectionRow[];
+    ORDER BY ${intensitySql} DESC, b.session_count DESC, datetime(b.last_seen_at) DESC, b.bundle_key ASC
+  `, exclusion.sql, intensitySql)).all(
+    input.at, input.at, input.at, input.at, ...exclusion.parameters, input.project, input.scope,
+  ) as CorrectionRow[];
   return rows.map(mapCorrectionRow);
+}
+
+function readCandidateRules(
+  db: Pick<Database.Database, "prepare">,
+  input: CorrectionRetrievalInput,
+  exclusion: CorrectionPrincipleExclusion,
+  includeOwnerScopeBehavior: boolean,
+): RetrievedCorrectionRule[] {
+  const visibleScope = includeOwnerScopeBehavior
+    ? `AND (b.visibility = 'owner' OR (b.visibility = 'project' AND (
+        (b.project = ? AND b.scope = ?) OR
+        (b.lifetime_kind IN ('explicit_continuing','inferred') AND length(trim(b.continuation_basis)) > 0)
+      )))`
+    : `AND (b.visibility = 'owner' OR (b.visibility = 'project' AND b.project = ? AND b.scope = ?))`;
+  const rows = db.prepare(`
+    SELECT b.bundle_key, b.version, v.rule_text, COALESCE(m.title, '仮の注意') AS title,
+      b.topic_key, b.condition_key, b.visibility, b.project, b.scope, b.intensity,
+      b.session_count, b.last_seen_at, b.expires_at, b.lifetime_kind, b.continuation_basis,
+      (
+        SELECT evidence.detector_version
+        FROM owner_correction_evidence evidence
+        JOIN owner_correction_events evidence_event ON evidence_event.event_id = evidence.event_id
+        WHERE evidence.bundle_key = b.bundle_key
+        ORDER BY datetime(evidence_event.observed_at), evidence.event_id
+        LIMIT 1
+      ) AS first_detector_version
+    FROM owner_correction_bundles b
+    JOIN owner_correction_versions v ON v.bundle_key = b.bundle_key AND v.version = b.version
+    LEFT JOIN memories m ON m.id = b.memory_id
+    WHERE b.status = 'candidate' AND v.status = 'candidate'
+      AND length(trim(v.rule_text)) > 0
+      AND (b.expires_at IS NULL OR datetime(b.expires_at) > datetime(?))
+      AND (v.expires_at IS NULL OR datetime(v.expires_at) > datetime(?))
+      AND b.visibility = v.visibility ${exclusion.sql} ${visibleScope}
+    ORDER BY b.intensity DESC, b.session_count DESC, datetime(b.last_seen_at) DESC, b.bundle_key ASC
+  `).all(input.at, input.at, ...exclusion.parameters, input.project, input.scope) as CandidateCorrectionRow[];
+
+  return rows
+    .filter((row) => detectorMajorVersion(row.first_detector_version ?? "") >= 4)
+    .map((row) => {
+      const rule = mapCorrectionRow(row);
+      if (rule.visibility === "owner") return rule;
+      if (rule.project === input.project && rule.scope === input.scope) return rule;
+      if (includeOwnerScopeBehavior && isOwnerScopeBehaviorRule(rule.topicKey, rule.ruleText)) {
+        return { ...rule, visibility: "owner" };
+      }
+      return null;
+    })
+    .filter((rule): rule is RetrievedCorrectionRule => rule !== null)
+    .slice(0, MAX_FTS_CANDIDATES);
 }
 
 function readFtsRules(
   db: Pick<Database.Database, "prepare">,
   memoryIds: readonly string[],
   input: CorrectionRetrievalInput,
+  exclusion: CorrectionPrincipleExclusion,
+  intensitySql: string,
 ): RetrievedCorrectionRule[] {
   if (memoryIds.length === 0) return [];
   const placeholders = memoryIds.map(() => "?").join(", ");
   const rows = db.prepare(currentCorrectionSelect(`
     AND b.memory_id IN (${placeholders})
     AND (b.visibility = 'owner' OR (b.visibility = 'project' AND b.project = ? AND b.scope = ?))
-  `)).all(input.at, input.at, ...memoryIds, input.project, input.scope) as CorrectionRow[];
+  `, exclusion.sql, intensitySql)).all(
+    input.at, input.at, input.at, input.at, ...exclusion.parameters, ...memoryIds, input.project, input.scope,
+  ) as CorrectionRow[];
   return rows.map(mapCorrectionRow);
 }
 
@@ -338,11 +495,13 @@ function readTopicRules(
   db: Pick<Database.Database, "prepare">,
   topicKeys: readonly string[],
   input: CorrectionRetrievalInput,
+  exclusion: CorrectionPrincipleExclusion,
+  intensitySql: string,
 ): RetrievedCorrectionRule[] {
   const requestedTopics = [...new Set(topicKeys.filter((topic) => topic !== "model_routing"))];
   const routeAssignments = topicKeys.includes("model_routing") ? extractModelRoutingAssignments(input.query) : [];
   const topicConditions: string[] = [];
-  const parameters: unknown[] = [input.at, input.at];
+  const parameters: unknown[] = [input.at, input.at, input.at, input.at];
   if (requestedTopics.length > 0) {
     topicConditions.push("b.topic_key IN (" + requestedTopics.map(() => "?").join(", ") + ")");
     parameters.push(...requestedTopics);
@@ -360,8 +519,10 @@ function readTopicRules(
   const rows = db.prepare(currentCorrectionSelect([
     "AND (" + topicConditions.join(" OR ") + ")",
     "AND (b.visibility = 'owner' OR (b.visibility = 'project' AND b.project = ? AND b.scope = ?))",
-    "ORDER BY b.intensity DESC, b.session_count DESC, datetime(b.last_seen_at) DESC, b.bundle_key ASC",
-  ].join("\n"))).all(...parameters, input.project, input.scope) as CorrectionRow[];
+    "ORDER BY " + intensitySql + " DESC, b.session_count DESC, datetime(b.last_seen_at) DESC, b.bundle_key ASC",
+  ].join("\n"), exclusion.sql, intensitySql)).all(
+    ...parameters.slice(0, 4), ...exclusion.parameters, ...parameters.slice(4), input.project, input.scope,
+  ) as CorrectionRow[];
   const rulesByVisibility = new Map<string, RetrievedCorrectionRule[]>();
   for (const rule of rows.map(mapCorrectionRow)) {
     const visibleRules = rulesByVisibility.get(rule.visibility) ?? [];
@@ -374,6 +535,7 @@ function readTopicRules(
 export function retrieveCorrectionCandidates(
   storage: SQLiteStorage,
   input: CorrectionRetrievalInput,
+  featureModes: CorrectionFeatureModes = readCorrectionFeatureModes(),
 ): CorrectionRetrievalResult {
   if (!input.project || !input.scope) throw new Error("correction retrieval requires project and scope");
   if (!Number.isFinite(Date.parse(input.at))) throw new Error("correction retrieval time must be valid");
@@ -384,17 +546,33 @@ export function retrieveCorrectionCandidates(
   let topicRules: RetrievedCorrectionRule[] = [];
   let alwaysOn: RetrievedCorrectionRule[] = [];
   let projectRules: RetrievedCorrectionRule[] = [];
+  let candidates: RetrievedCorrectionRule[] = [];
+  let ownerScopeBehaviorRules: RetrievedCorrectionRule[] = [];
+  const ownerScopeBehaviorEnabled = featureModes.ownerScopeBehavior === "on";
+  const candidateInjectionEnabled = featureModes.candidateInjection === "on";
   const topicKeys = [...new Set([...inferCorrectionTopicKeys(input.query), ...(input.topicKeys ?? [])])];
 
   storage.runCorrectionTransaction(({ db }) => {
-    alwaysOn = readAlwaysOnRules(db, input);
-    projectRules = readProjectRules(db, input);
-    topicRules = readTopicRules(db, topicKeys, input);
+    const exclusion = correctionPrincipleCandidateFilter(db as Database.Database, input.at, "b", featureModes.principles);
+    const intensitySql = correctionEffectiveIntensitySql(db, featureModes.strength);
+    alwaysOn = readAlwaysOnRules(db, input, exclusion, intensitySql);
+    if (ownerScopeBehaviorEnabled) {
+      ownerScopeBehaviorRules = readOwnerScopeBehaviorRules(db, input, exclusion, intensitySql);
+    }
+    projectRules = readProjectRules(db, input, exclusion, intensitySql);
+    if (candidateInjectionEnabled) {
+      candidates = readCandidateRules(db, input, exclusion, ownerScopeBehaviorEnabled);
+    }
+    topicRules = readTopicRules(db, topicKeys, input, exclusion, intensitySql);
     if (!query.searchText) return;
     const search = storage.searchCorrectionCandidates({ query: query.searchText, project: input.project });
     const memoryIds = search.results.map((entry) => entry.id).slice(0, MAX_FTS_CANDIDATES);
-    ftsRules = readFtsRules(db, memoryIds, input);
+    ftsRules = readFtsRules(db, memoryIds, input, exclusion, intensitySql);
   });
+
+  const ownerScopeBehaviorKeys = new Set(ownerScopeBehaviorRules.map(correctionRuleIdentity));
+  alwaysOn = [...alwaysOn, ...ownerScopeBehaviorRules];
+  projectRules = projectRules.filter((rule) => !ownerScopeBehaviorKeys.has(correctionRuleIdentity(rule)));
 
   const routeAssignments = extractModelRoutingAssignments(input.query);
   const candidateMap = new Map<string, RetrievedCorrectionRule>();
@@ -430,7 +608,11 @@ export function retrieveCorrectionCandidates(
       Date.parse(right.rule.lastSeenAt) - Date.parse(left.rule.lastSeenAt) ||
       left.rule.bundleKey.localeCompare(right.rule.bundleKey))
     .slice(0, MAX_FTS_CANDIDATES)
-    .map((entry) => ({ ...entry.rule, relevance: entry.relevance }));
+    .map((entry) => ({
+      ...entry.rule,
+      visibility: ownerScopeBehaviorKeys.has(correctionRuleIdentity(entry.rule)) ? "owner" : entry.rule.visibility,
+      relevance: entry.relevance,
+    }));
 
-  return { query, alwaysOn, projectRules, related, ftsCandidateCount };
+  return { query, alwaysOn, projectRules, related, candidates, ftsCandidateCount };
 }

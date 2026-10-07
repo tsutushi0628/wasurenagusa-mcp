@@ -8,6 +8,7 @@ import { parseReplayArguments, REPLAY_USAGE } from "../simulate.mjs";
 import { detectOwnerCorrections } from "../../../src/corrections/detector.js";
 import { extractOwnerEvent } from "../../../src/corrections/events.js";
 import { parseCorrectionRuleInput, serializeCorrectionRuleInput } from "../../../src/corrections/rule-template.js";
+import { storedBundleKey } from "../../../src/corrections/store.js";
 import {
   adjudicatePrevention,
   claimReplayEvaluation,
@@ -31,6 +32,114 @@ describe("再生側の訂正根拠形式", () => {
     const conditions = internal.confidenceConditions(candidate, { serializeCorrectionRuleInput });
 
     expect(parseCorrectionRuleInput(conditions)).toEqual(candidate.ruleInput);
+  });
+});
+
+describe("online再生の本番一致キーと日次ジョブ", () => {
+  it("UserPromptSubmitの候補から本番と同じv2キーを作る", () => {
+    const candidate = {
+      source: "utterance_detection",
+      bundleKey: `oc:v1:${"a".repeat(64)}`,
+      conditionKnown: true,
+      conditionKey: "topic:expression_policy",
+      lifetimeKind: "explicit_continuing",
+    };
+    const keys = internal.toStoredCorrectionBundleKeys(
+      [candidate, candidate, { ...candidate, conditionKnown: false }],
+      "synthetic-project",
+      "general",
+      "synthetic-session-hash",
+      storedBundleKey,
+    );
+
+    expect(keys).toEqual([
+      storedBundleKey(candidate.bundleKey, "synthetic-project", "general", "synthetic-session-hash", "explicit_continuing", "project"),
+      storedBundleKey(candidate.bundleKey, "synthetic-project", "general", "synthetic-session-hash", "explicit_continuing", "owner"),
+    ]);
+    expect(keys.every((key: string) => key.startsWith("oc:v2:"))).toBe(true);
+  });
+
+  it("強度ジョブをJST 04:00に1日1回だけ実行する", () => {
+    const runs: string[] = [];
+    const runThrough = internal.createStrengthJobSchedule(
+      (timeMs: number) => runs.push(new Date(timeMs).toISOString()),
+      Date.parse("2026-10-01T01:00:00+09:00"),
+    );
+
+    runThrough(Date.parse("2026-10-01T10:00:00+09:00"));
+    runThrough(Date.parse("2026-10-01T23:59:00+09:00"));
+    runThrough(Date.parse("2026-10-02T03:59:59+09:00"));
+    runThrough(Date.parse("2026-10-02T04:00:00+09:00"));
+
+    expect(runs).toEqual(["2026-09-30T19:00:00.000Z", "2026-10-01T19:00:00.000Z"]);
+  });
+
+  it("予定時刻を越えた後の最初のSessionStartは更新後の強度を注入する", () => {
+    let intensity = 1;
+    const injectedIntensities: number[] = [];
+    const firstTimelineMs = Date.parse("2026-10-01T03:30:00+09:00");
+    const runs: string[] = [];
+    const runThrough = internal.createStrengthJobSchedule((timeMs: number) => {
+      runs.push(new Date(timeMs).toISOString());
+      intensity += 1;
+    }, firstTimelineMs);
+    const timeline = [
+      { kind: "start", availableAt: "2026-10-01T03:30:00+09:00", availableMs: firstTimelineMs },
+      { kind: "stop", availableAt: "2026-10-01T03:45:00+09:00", availableMs: Date.parse("2026-10-01T03:45:00+09:00") },
+      { kind: "start", availableAt: "2026-10-01T04:30:00+09:00", availableMs: Date.parse("2026-10-01T04:30:00+09:00") },
+    ];
+
+    for (const row of timeline) {
+      internal.runStrengthJobsBeforeEvent(runThrough, row, Number.NEGATIVE_INFINITY);
+      if (row.kind === "start") injectedIntensities.push(intensity);
+    }
+
+    expect(runs).toEqual(["2026-09-30T19:00:00.000Z"]);
+    expect(injectedIntensities).toEqual([1, 2]);
+  });
+
+  it("G2の件数は本文台帳に載った一致束だけ数える", () => {
+    expect(internal.countCorrectionMatchedReinjections(
+      { correctionMatchedReinjectionKeys: ["bundle-a:2", "bundle-b:1"] },
+      { ledger: [
+        { bundleKey: "bundle-a", version: 2, bodyIncluded: true },
+        { bundleKey: "bundle-a", version: 1, bodyIncluded: true },
+        { bundleKey: "bundle-b", version: 1, bodyIncluded: false },
+      ] },
+    )).toBe(1);
+  });
+
+  it("再発の止まり先をstageと理由で集計する", () => {
+    expect(internal.summarizeStopDestinations([
+      { theme: "B2", outcome: "prevented", stage: null, reasonCode: null },
+      { theme: "B2", outcome: "stopped", stage: "a", reasonCode: "no_prior_candidate" },
+      { theme: "B2", outcome: "stopped", stage: "b", reasonCode: "not_confirmed" },
+      { theme: "B2", outcome: "stopped", stage: "b", reasonCode: "not_confirmed" },
+      { theme: "B2", outcome: "stopped", stage: "c", reasonCode: "body_not_emitted" },
+      { theme: "B1", outcome: "stopped", stage: "b", reasonCode: "not_confirmed" },
+    ])).toEqual({
+      all: {
+        recurrenceCount: 6,
+        preventedCount: 1,
+        stoppedCount: 5,
+        byStage: { a: 1, b: 3, c: 1 },
+        byReason: { body_not_emitted: 1, no_prior_candidate: 1, not_confirmed: 3 },
+      },
+      b2ToB10: {
+        recurrenceCount: 5,
+        preventedCount: 1,
+        stoppedCount: 4,
+        byStage: { a: 1, b: 2, c: 1 },
+        byReason: { body_not_emitted: 1, no_prior_candidate: 1, not_confirmed: 2 },
+      },
+      b1: {
+        recurrenceCount: 1,
+        preventedCount: 0,
+        stoppedCount: 1,
+        byStage: { a: 0, b: 1, c: 0 },
+        byReason: { not_confirmed: 1 },
+      },
+    });
   });
 });
 
@@ -266,6 +375,77 @@ describe("再発前の規則到達判定", () => {
         actionTimeline,
       })).toMatchObject({ prevented: false, failedAt: "c", reason: "stale_version" });
     }
+  });
+
+  it("根拠追加だけの版更新は注入後の再訂正として結び、規則変更は旧版扱いする", () => {
+    const previousRule = {
+      ...saved,
+      ruleText: "本文を出す前に確認する",
+      bodyHash: "synthetic-rule-hash",
+      conditions: "synthetic-conditions",
+      conditionKey: "general",
+      polarity: "positive",
+      visibility: "owner",
+      confirmedAt: "2026-09-24T01:01:00.000Z",
+      lifetimeKind: "explicit_continuing",
+      continuationBasis: "synthetic",
+      expiresAt: "2026-09-25T01:00:05.000Z",
+    };
+    const evidenceAddedRule = {
+      ...previousRule,
+      version: 2,
+      expiresAt: "2026-10-01T00:00:00.000Z",
+      evidenceEventIds: ["first", "second"],
+    };
+    expect(internal.isEvidenceOnlyVersionContinuity([previousRule, evidenceAddedRule], 1, 2)).toBe(true);
+    const action = {
+      at: "2026-09-25T01:00:10.000Z",
+      order: 5,
+      compactEpoch: 0,
+      ruleSnapshots: [evidenceAddedRule],
+    };
+    const repeat = {
+      ...occurrence,
+      actionStartAt: action.at,
+      actionOrder: action.order,
+      at: "2026-09-25T01:00:20.000Z",
+      order: 6,
+      actionRows: [action],
+    };
+    const injection = {
+      ...emitted,
+      ruleText: previousRule.ruleText,
+      bodyText: previousRule.ruleText,
+      expiresAt: previousRule.expiresAt,
+    };
+
+    expect(adjudicatePrevention({
+      occurrence: repeat,
+      detections: [detected],
+      saves: [previousRule],
+      emissions: [injection],
+      actionRuleSnapshots: [evidenceAddedRule],
+      actionTimeline: [action],
+    })).toMatchObject({ prevented: false, failedAt: "c", reason: "rule_repeated_after_injection" });
+
+    const changedRule = {
+      ...evidenceAddedRule,
+      ruleText: "本文は要約して表示する",
+      bodyHash: "synthetic-changed-rule-hash",
+    };
+    expect(internal.isEvidenceOnlyVersionContinuity([previousRule, changedRule], 1, 2)).toBe(false);
+    const restoredRule = { ...evidenceAddedRule, version: 3, evidenceEventIds: ["first", "second", "third"] };
+    expect(internal.isEvidenceOnlyVersionContinuity([previousRule, changedRule, restoredRule], 1, 3)).toBe(false);
+    const changedAction = { ...action, ruleSnapshots: [changedRule] };
+
+    expect(adjudicatePrevention({
+      occurrence: { ...repeat, actionRows: [changedAction] },
+      detections: [detected],
+      saves: [previousRule],
+      emissions: [injection],
+      actionRuleSnapshots: [changedRule],
+      actionTimeline: [changedAction],
+    })).toMatchObject({ prevented: false, failedAt: "c", reason: "stale_version" });
   });
 
   it("区間内assistant行の状態が欠けた再発を成功扱いしない", () => {
@@ -509,7 +689,14 @@ describe("再発前の規則到達判定", () => {
       }],
     });
 
-    expect(population).toMatchObject({ periodSessionCount: 1, periodHumanUtteranceCount: 2 });
+    expect(population).toMatchObject({
+      periodSessionCount: 1,
+      periodHumanUtteranceCount: 2,
+      projectCounts: {},
+      projectBasisCounts: {},
+      projectFallbackSessionCount: 0,
+      projectUnresolvedSessionCount: 1,
+    });
   });
 
   it("評価入力をhash固定し、同じevaluationを二度開始しない", async () => {

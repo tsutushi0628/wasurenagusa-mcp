@@ -24,6 +24,8 @@ export { isDirectRun } from "../utils/cli-entry.js";
 import { findProjectRoot } from "../utils/projectRoot.js";
 import { SQLiteStorage } from "../storage/index.js";
 import { getMemoryPath, config } from "../config.js";
+import { readCorrectionFeatureModes } from "../corrections/environment-mode.js";
+import { storedBundleKey } from "../corrections/store.js";
 
 import { loadOwnerProfile } from "../utils/owner-profile.js";
 import { increment } from "../observability/counters.js";
@@ -674,6 +676,40 @@ export function shouldProcessPromptCorrectionWork(
   return hookEventName !== "UserPromptSubmit" || !automatedPrompt;
 }
 
+function toStoredCorrectionBundleKeys(
+  candidates: readonly CorrectionCandidate[],
+  project: string,
+  scope: string,
+  sessionIdHash: string,
+): string[] {
+  if (!project || !scope || !sessionIdHash) {
+    return [];
+  }
+  const storedKeys: string[] = [];
+  for (const candidate of candidates) {
+    if (
+      candidate.source !== "utterance_detection" ||
+      !candidate.bundleKey ||
+      !/^oc:v1:[0-9a-f]{64}$/iu.test(candidate.bundleKey) ||
+      !candidate.conditionKnown ||
+      !candidate.conditionKey
+    ) {
+      continue;
+    }
+    for (const visibility of ["project", "owner"] as const) {
+      storedKeys.push(storedBundleKey(
+        candidate.bundleKey,
+        project,
+        scope,
+        sessionIdHash,
+        candidate.lifetimeKind,
+        visibility,
+      ));
+    }
+  }
+  return [...new Set(storedKeys)];
+}
+
 function getRequestTrigger(input: HookInput, humanOrdinal: number): CorrectionInjectionTrigger {
   if (input.hook_event_name === "SessionStart") return "start";
   if (input.hook_event_name === "PreCompact") return "compact";
@@ -997,6 +1033,7 @@ export async function main(): Promise<ContextHookStatus> {
     lap("stdin");
     requireHookTime(deadlineAt);
     const hookInput = parseContextHookInput(inputData);
+    const correctionFeatureModes = readCorrectionFeatureModes();
     const automatedPrompt = hookInput.hook_event_name === "UserPromptSubmit" &&
       typeof hookInput.prompt === "string" &&
       isAutomatedPrompt(hookInput.prompt);
@@ -1006,15 +1043,14 @@ export async function main(): Promise<ContextHookStatus> {
     const projectRoot = findProjectRoot(hookInput.cwd);
     const currentProject = basename(projectRoot);
     const memoryPath = getMemoryPath(projectRoot);
-    const correctionLoopRequested = process.env.WASURENAGUSA_CORRECTION_LOOP?.trim().toLowerCase() === "on";
+    const correctionLoopRequested = correctionFeatureModes.correctionLoop === "on";
     const dbPath = join(memoryPath, config.sqliteFile);
     requireHookTime(deadlineAt);
     storage = SQLiteStorage.openExistingForHook(dbPath, {
       mode: correctionLoopRequested ? "auto" : "index",
     });
     const correctionLoopEnabled = correctionLoopRequested && storage.supportsCorrectionHooks;
-    const correctionInjectionEnabled = correctionLoopEnabled &&
-      process.env.WASURENAGUSA_CORRECTION_INJECT?.trim().toLowerCase() !== "off";
+    const correctionInjectionEnabled = correctionLoopEnabled && correctionFeatureModes.correctionInject === "on";
     const eventKind = getHookEventKind(hookInput.hook_event_name);
     const stageMetricEvent = eventKind === "SessionStart" || eventKind === "UserPromptSubmit";
     const captureStageMetrics = correctionInjectionEnabled && stageMetricEvent;
@@ -1059,41 +1095,51 @@ export async function main(): Promise<ContextHookStatus> {
     const userPromptEvent = hookInput.hook_event_name === "UserPromptSubmit" && !automatedPrompt
       ? extractOwnerEvent({ hookEventName: "UserPromptSubmit", prompt: hookInput.prompt })
       : undefined;
-    let pendingCandidates: CorrectionCandidate[] | undefined;
-    if (
+    const canDetectCurrentCorrections =
       correctionLoopEnabled &&
       hookInput.hook_event_name === "UserPromptSubmit" &&
       userPromptEvent !== null &&
-      userPromptEvent !== undefined &&
-      !position.currentPromptLocated &&
-      hookInput.prompt !== undefined
-    ) {
-      pendingCandidates = detectOwnerCorrections(userPromptEvent);
+      userPromptEvent !== undefined;
+    let detectedCandidates: CorrectionCandidate[] = [];
+    if (canDetectCurrentCorrections) detectedCandidates = detectOwnerCorrections(userPromptEvent);
+    let pendingCandidates: CorrectionCandidate[] | undefined;
+    if (canDetectCurrentCorrections && !position.currentPromptLocated && hookInput.prompt !== undefined) {
+      pendingCandidates = detectedCandidates;
     }
     if (captureStageMetrics) lap("detect");
 
     let sessionProject = currentProject;
     if (sessionState.project) sessionProject = sessionState.project;
 
+    const correctionScope = "general";
+    const detectedStoredCorrectionBundleKeys = toStoredCorrectionBundleKeys(
+      detectedCandidates,
+      sessionProject,
+      correctionScope,
+      sessionIdHash,
+    );
     const injectionPlan = getContextInjectionPlan(hookInput, position.humanOrdinal, budgetTokens);
     let selection: CorrectionInjectionSelection = {
       rules: [],
       unreached: [],
       alwaysOnCount: 0,
       ftsCandidateCount: 0,
+      correctionMatchedReinjectionKeys: [],
     };
     let correctionRender = makeEmptyCorrectionRender(injectionPlan.renderTrigger, injectionPlan.budgetTokens);
     if (correctionInjectionEnabled && shouldProcessPrompt) {
       requireHookTime(deadlineAt);
       selection = selectCorrectionInjections(storage, {
         project: sessionProject,
-        scope: "general",
+        scope: correctionScope,
         query: hookInput.prompt ?? "",
         at: new Date().toISOString(),
         sessionIdHash,
         compactEpoch: sessionState.compactEpoch,
         humanOrdinal: position.humanOrdinal,
         trigger: injectionPlan.requestTrigger,
+        detectedStoredCorrectionBundleKeys,
+        featureModes: correctionFeatureModes,
       });
       requireHookTime(deadlineAt);
     }
@@ -1187,6 +1233,16 @@ export async function main(): Promise<ContextHookStatus> {
       pendingReceiptId,
       lap: captureStageMetrics ? lap : undefined,
     });
+    const matchedCorrectionKeys = new Set(selection.correctionMatchedReinjectionKeys);
+    const emittedCorrectionReinjections = result.rendered.ledger.filter((entry) =>
+      matchedCorrectionKeys.has(`${entry.bundleKey}:${entry.version}`),
+    ).length;
+    if (
+      emittedCorrectionReinjections > 0 &&
+      (result.status === "emitted" || result.status === "ledger_unknown")
+    ) {
+      await increment(memoryPath, "correction_reinjected_correction_match", emittedCorrectionReinjections);
+    }
     if (correctionInjectionEnabled && stageMetricEvent) {
       await recordCorrectionMetric(memoryPath, {
         eventKind,

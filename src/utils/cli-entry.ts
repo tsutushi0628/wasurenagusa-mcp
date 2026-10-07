@@ -1,6 +1,11 @@
 import { realpathSync } from "fs";
 import { fileURLToPath } from "url";
 
+const SECRET_VALUE_PATTERN = /(?:\bAKIA[0-9A-Z]{16}\b|\bAIza[0-9A-Za-z_-]{20,}\b|\bsk-[A-Za-z0-9_-]{20,}\b|\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_-]{20,}\b|\bBearer\s+\S+|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b)/giu;
+const SENSITIVE_ASSIGNMENT_PATTERN = /(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|passwd|secret|authorization)(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/giu;
+const MAX_CLI_ERROR_STACK_FRAMES = 3;
+const MAX_CLI_ERROR_MESSAGE_LENGTH = 500;
+
 /**
  * CLI起動時のargv1が呼び出し元モジュール自身か判定する。
  *
@@ -33,4 +38,38 @@ export function isDirectRun(argv1: string | undefined, moduleUrl: string): boole
  */
 export function isMainModule(importMetaUrl: string): boolean {
   return isDirectRun(process.argv[1], importMetaUrl);
+}
+
+function redactCliErrorText(value: string): string {
+  return value
+    .replace(SENSITIVE_ASSIGNMENT_PATTERN, "$1[REDACTED]")
+    .replace(SECRET_VALUE_PATTERN, "[REDACTED]")
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----.*$/iu, "[REDACTED PRIVATE KEY]")
+    .replace(/(?<=:\/\/)[^:/@\s]+:[^@\s]+@/gu, "[REDACTED]@");
+}
+
+export function formatCliErrorDetails(error: unknown): string {
+  if (!(error instanceof Error)) return "non-Error value thrown";
+
+  let message = error.message;
+  if (/[\r\n]/u.test(message)) message = "multiline error message omitted";
+  if (message.length > MAX_CLI_ERROR_MESSAGE_LENGTH) {
+    message = `${message.slice(0, MAX_CLI_ERROR_MESSAGE_LENGTH)}…`;
+  }
+  if (message === "") message = error.name;
+
+  const stackFrames = (error.stack ?? "")
+    .split(/\r?\n/u)
+    .filter((line) => /^\s+at\s/u.test(line))
+    .slice(0, MAX_CLI_ERROR_STACK_FRAMES)
+    .map(redactCliErrorText);
+
+  return [redactCliErrorText(message), ...stackFrames].join("\n");
+}
+
+export function reportCliFailure(command: string, error: unknown): void {
+  const [message, ...stackFrames] = formatCliErrorDetails(error).split("\n");
+  const details = stackFrames.length === 0 ? "" : `\n${stackFrames.join("\n")}`;
+  process.stderr.write(`[${command}] 実行失敗: ${message}${details}\n`);
+  process.exitCode = 1;
 }

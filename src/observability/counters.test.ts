@@ -219,6 +219,7 @@ describe("observability/counters: 5指標の計測と閾値警報", () => {
       "correction_backlog",
       "correction_injected",
       "correction_cooldown_skip",
+      "correction_reinjected_correction_match",
       "correction_budget_skip",
       "correction_hook_timeout",
       "correction_hook_ms",

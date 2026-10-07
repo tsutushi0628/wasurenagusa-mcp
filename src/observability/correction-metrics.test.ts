@@ -6,6 +6,7 @@ import { tmpdir } from "os";
 import {
   CORRECTION_HOOK_EVENT_KINDS,
   CORRECTION_REASON_CODES,
+  recordCorrectionLlmCall,
   recordCorrectionMetric,
   recordCorrectionViolationMetric,
   rotateCorrectionMetrics,
@@ -91,6 +92,18 @@ describe("observability/correction-metrics", () => {
       k: "violation",
     });
     expect(Buffer.byteLength(line)).toBeLessThanOrEqual(256);
+  });
+
+  it("抽象化のCodex呼び出しを本文なしの専用カウンタへ1件記録する", async () => {
+    await recordCorrectionLlmCall(memoryPath, jstMidnightUtc);
+
+    const countersPath = join(memoryPath, "logs", "counters-2026-10-03.jsonl");
+    const entries = readFileSync(countersPath, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+    expect(entries).toEqual([{
+      ts: "2026-10-03T00:00:00.000+09:00",
+      metric: "correction_llm_call",
+      value: 1,
+    }]);
   });
 
   it("設計書にある理由コードを許可する", async () => {

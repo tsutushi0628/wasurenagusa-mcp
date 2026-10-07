@@ -382,3 +382,10 @@ export async function recordCorrectionViolationMetric(
     return "failed";
   }
 }
+
+export async function recordCorrectionLlmCall(
+  memoryPath: string,
+  now: Date = new Date(),
+): Promise<void> {
+  await increment(memoryPath, "correction_llm_call", 1, now);
+}

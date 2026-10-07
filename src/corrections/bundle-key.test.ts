@@ -121,4 +121,113 @@ describe("correction bundle keys", () => {
     expect(createBundleKey(base)).toMatch(/^oc:v1:/u);
     expect(createBundleKey(base)).not.toBe(createBundleKey(threshold));
   });
+
+  it("canonicalizes optional limiter words while keeping total and negative-only meanings separate", () => {
+    const base = {
+      topicKey: "document_delivery",
+      actionKey: "present_full",
+      polarity: "positive",
+      conditionKey: "continuing",
+      normalizedText: "今後は文案・報告の全文を表示して",
+      conditionKnown: true,
+    };
+    const limiterWords = ["だけ", "のみ", "しか", "ばかり"];
+
+    for (const limiterWord of limiterWords) {
+      const limited = {
+        ...base,
+        normalizedText: `今後は文案・報告の全文${limiterWord}を表示して`,
+      };
+
+      expect(haveSameBundleKey(base, limited)).toBe(true);
+      expect(createBundleKey(base)).toBe(createBundleKey(limited));
+    }
+
+    const previousStoredKey = `oc:v2:${"a".repeat(64)}`;
+    expect(createBundleKey(base, [{
+      ...base,
+      normalizedText: "今後は文案・報告の全文だけを表示して",
+      bundleKey: previousStoredKey,
+    }])).toBe(previousStoredKey);
+
+    const inversePairs = [
+      ["今後は文案・報告の全部を表示して", "今後は文案・報告の全文だけを表示して"],
+      ["今後はすべての項目を表示して", "今後は項目だけを表示して"],
+    ] as const;
+    const negativeEmphasis = {
+      ...base,
+      polarity: "negative",
+      conditionKey: "continuing;modifier:shika-negative",
+      normalizedText: "今後は文案・報告の全文しか表示しない",
+    };
+
+    for (const [allText, onlyText] of inversePairs) {
+      const allDescriptor = {
+        ...base,
+        normalizedText: allText,
+        plainCommandEligible: true,
+        requiredValuesKey: "document:full-text",
+      };
+      const onlyDescriptor = {
+        ...base,
+        normalizedText: onlyText,
+        plainCommandEligible: true,
+        requiredValuesKey: "document:full-text",
+      };
+
+      expect(haveSameBundleKey(
+        { ...base, normalizedText: allText },
+        { ...base, normalizedText: onlyText },
+      )).toBe(false);
+      expect(createBundleKey(allDescriptor)).not.toBe(createBundleKey(onlyDescriptor));
+    }
+    expect(haveSameBundleKey(base, negativeEmphasis)).toBe(false);
+  });
+
+  it("groups equivalent owner-unclear term modifiers and preserves different meanings and legacy keys", () => {
+    const unclearTerms = ["変な言葉", "俺のわからない言葉", "知らない言葉", "意味不明な言葉"];
+    const descriptor = (term: string, plainCommandEligible: boolean) => ({
+      topicKey: "expression_policy",
+      actionKey: "use_terms",
+      polarity: "negative",
+      conditionKey: "lifetime:explicit_continuing",
+      normalizedText: `今後は${term}を使わないで`,
+      conditionKnown: true,
+      plainCommandEligible,
+      requiredValuesKey: JSON.stringify({ term }),
+    });
+
+    const distinctPairs = [
+      ["変な言葉", "難しい言葉"],
+      ["俺のわからない言葉", "汚い言葉"],
+      ["知らない言葉", "長い言葉"],
+      ["意味不明な言葉", "英語の言葉"],
+      ["言葉", "変な言葉"],
+    ] as const;
+
+    for (const plainCommandEligible of [false, true]) {
+      const candidates = unclearTerms.map((term) => descriptor(term, plainCommandEligible));
+      const first = candidates[0];
+      expect(first).toBeDefined();
+      for (const candidate of candidates.slice(1)) {
+        expect(haveSameBundleKey(first!, candidate)).toBe(true);
+        expect(createBundleKey(first!)).toBe(createBundleKey(candidate));
+      }
+
+      const oppositeAction = { ...first!, polarity: "positive" };
+      expect(haveSameBundleKey(first!, oppositeAction)).toBe(false);
+      for (const [unclearTerm, distinctTerm] of distinctPairs) {
+        const unclear = descriptor(unclearTerm, plainCommandEligible);
+        const distinct = descriptor(distinctTerm, plainCommandEligible);
+        expect(haveSameBundleKey(unclear, distinct)).toBe(false);
+        expect(createBundleKey(unclear)).not.toBe(createBundleKey(distinct));
+      }
+      const differentTarget = descriptor("長い文", plainCommandEligible);
+      expect(haveSameBundleKey(first!, differentTarget)).toBe(false);
+    }
+
+    const storedKey = `oc:v2:${"c".repeat(64)}`;
+    const legacyDescriptor = { ...descriptor("変な言葉", true), bundleKey: storedKey };
+    expect(createBundleKey(descriptor("俺のわからない言葉", true), [legacyDescriptor])).toBe(storedKey);
+  });
 });

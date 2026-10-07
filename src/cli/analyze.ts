@@ -44,6 +44,7 @@ import {
 import { Analyzer } from "../analyzer/index.js";
 import { SQLiteStorage } from "../storage/index.js";
 import { getMemoryPath, config } from "../config.js";
+import { getCorrectionLoopMode } from "../corrections/environment-mode.js";
 import { findProjectRoot } from "../utils/projectRoot.js";
 import { redactSensitive } from "../utils/redact-sensitive-data.js";
 import { isDirectRun } from "../utils/cli-entry.js";
@@ -61,7 +62,7 @@ import { recordCorrectionViolationMetric } from "../observability/correction-met
 export const STOP_DETERMINISTIC_TIMEOUT_MS = 2500;
 export const STOP_TOTAL_TIMEOUT_MS = 25000;
 
-const STOP_DETECTOR_VERSION = "owner-correction-v3";
+const STOP_DETECTOR_VERSION = "owner-correction-v4";
 const MAX_STOP_INPUT_BYTES = 1024 * 1024;
 const OWNER_VISIBLE_TOPICS = new Set([
   "tone",
@@ -142,7 +143,7 @@ function explicitCancellationBundleKey(entry: unknown): string | undefined {
     .flatMap((line) => line.match(/[^。！？!?]+[。！？!?]?/gu) ?? [])
     .map((segment) => segment.trim())
     .filter(Boolean);
-  const bundleKeyPattern = String.raw`oc:v\d+:[a-f0-9]{64}`;
+  const bundleKeyPattern = String.raw`(?:oc:v\d+|pr:v1):[a-f0-9]{64}`;
   const cancellationPattern = new RegExp(
     String.raw`(?:規則ID|ID)\s*[：:=]?\s*(${bundleKeyPattern})\s*(?:(?:を|は)\s*)?(?:取り消(?:して|す|し|します|しました)|取消(?:して|す|し)?|キャンセル(?:して|する)?|無効(?:にして|にする|化して|化する))(?:ください|下さい)?\s*[。！？!?]?\s*$`,
     "giu",
@@ -605,7 +606,7 @@ export async function main() {
     process.exit(0);
   }
 
-  if (process.env.WASURENAGUSA_CORRECTION_LOOP?.trim().toLowerCase() === "on") {
+  if (getCorrectionLoopMode() === "on") {
     await recoverStopCorrections(hookInput, deterministicDeadline);
   }
 

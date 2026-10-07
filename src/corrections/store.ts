@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { SaveParams, SaveResult } from "../types.js";
+import { CORRECTION_PRINCIPLES_SCHEMA_VERSION } from "../storage/correction-schema.js";
 import {
   correctionConditionKey,
   mergeCorrectionRuleInputs,
@@ -228,7 +229,7 @@ function getEvent(db: CorrectionStoreTransaction["db"], eventId: string): EventR
   return event;
 }
 
-function storedBundleKey(
+export function storedBundleKey(
   logicalBundleKey: string,
   project: string,
   scope: string,
@@ -555,6 +556,10 @@ function updateBundle(db: CorrectionStoreTransaction["db"], bundle: BundleUpdate
     bundle.confirmationState,
     bundle.bundleKey,
   );
+  if (bundle.status === "confirmed" && bundle.memoryId !== null) {
+    const memoryUpdate = db.prepare("UPDATE memories SET intensity = ? WHERE id = ?").run(bundle.intensity, bundle.memoryId);
+    if (memoryUpdate.changes !== 1) throw new Error("correction memory intensity copy was not updated");
+  }
 }
 
 function resultFromBundle(bundle: BundleRow): CorrectionStoreResult {
@@ -644,6 +649,39 @@ function calculateIntensity(rows: EvidenceRow[]): number {
     intensity = Math.min(5, Math.max(intensity, scoreIntensity) + 1);
   });
   return Math.min(5, intensity);
+}
+
+function updateStrengthEventBaseIntensity(
+  db: CorrectionStoreTransaction["db"],
+  bundleKey: string,
+  cycleStartAt: string,
+  baseIntensity: number,
+): void {
+  const events = db.prepare(`
+    SELECT at, reason, basis
+    FROM owner_correction_strength_events
+    WHERE bundle_key = ? AND at >= ?
+  `).all(bundleKey, cycleStartAt) as Array<{ at: string; reason: string; basis: string }>;
+  const update = db.prepare(`
+    UPDATE owner_correction_strength_events SET basis = ?
+    WHERE bundle_key = ? AND at = ? AND reason = ?
+  `);
+  for (const event of events) {
+    const parsed: unknown = JSON.parse(event.basis);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("strength event basis must be a JSON object");
+    }
+    update.run(
+      JSON.stringify({ ...(parsed as Record<string, unknown>), baseIntensity }),
+      bundleKey,
+      event.at,
+      event.reason,
+    );
+  }
+}
+
+function clampIntensity(value: number): number {
+  return Math.min(5, Math.max(1, value));
 }
 
 function getRepeatRows(
@@ -993,7 +1031,19 @@ export function applyCorrectionEvidence(
   let metricRows = countedRows;
   if (usableRows.length > 0) metricRows = usableRows;
   else if (plainActionRows.length > 0) metricRows = plainActionRows;
-  const intensity = freshRoutingCycle ? calculateIntensity(metricRows) : Math.max(bundle.intensity, calculateIntensity(metricRows));
+  const strengthCycleStartAt = freshRoutingCycle ? metricRows[0]?.observed_at ?? event.observed_at : bundle.first_seen_at;
+  const schemaVersion = db.prepare("SELECT MAX(version) AS version FROM schema_version").get() as { version: number | null };
+  let strengthDelta = 0;
+  if (schemaVersion.version !== null && schemaVersion.version >= CORRECTION_PRINCIPLES_SCHEMA_VERSION) {
+    const strengthEvent = db.prepare(`
+      SELECT COALESCE(SUM(delta), 0) AS delta
+      FROM owner_correction_strength_events
+      WHERE bundle_key = ? AND at >= ?
+    `).get(bundle.bundle_key, strengthCycleStartAt) as { delta: number };
+    strengthDelta = strengthEvent.delta;
+  }
+  const baseIntensity = calculateIntensity(metricRows);
+  const intensity = clampIntensity(baseIntensity + strengthDelta);
   let firstSeenAt = bundle.first_seen_at;
   let lastSeenAt = bundle.last_seen_at;
   const datedRows = metricRows;
@@ -1003,6 +1053,9 @@ export function applyCorrectionEvidence(
   }
 
   if (!hasUnappliedEvidence) return resultFromBundle(bundle);
+  if (schemaVersion.version !== null && schemaVersion.version >= CORRECTION_PRINCIPLES_SCHEMA_VERSION) {
+    updateStrengthEventBaseIntensity(db, bundle.bundle_key, strengthCycleStartAt, baseIntensity);
+  }
 
   const recentUsableRows = getRepeatRows(usableRows, event.observed_at, repeatWindow, includeRepeatWindowStart);
   const recentProofRows = getRepeatRows(proofRows, event.observed_at, repeatWindow, includeRepeatWindowStart);

@@ -185,7 +185,9 @@ async function listTopLevelTranscripts(transcriptsDirectory) {
 
 async function archiveDirectory({ transcriptsDirectory, destinationDirectory, dryRun, copyFileImpl = copyFile }) {
   const transcriptEntries = await listTopLevelTranscripts(transcriptsDirectory);
-  if (transcriptEntries === null) return { plannedCount: 0, copiedCount: 0, skippedCount: 0, filenames: [] };
+  if (transcriptEntries === null) {
+    return { plannedCount: 0, copiedCount: 0, skippedCount: 0, filenames: [], plannedFilenames: [] };
+  }
   const pendingCopies = [];
 
   for (const entry of transcriptEntries) {
@@ -199,7 +201,13 @@ async function archiveDirectory({ transcriptsDirectory, destinationDirectory, dr
   }
 
   if (dryRun) {
-    return { plannedCount: pendingCopies.length, copiedCount: 0, skippedCount: 0, filenames: transcriptEntries.map((entry) => entry.name) };
+    return {
+      plannedCount: pendingCopies.length,
+      copiedCount: 0,
+      skippedCount: 0,
+      filenames: transcriptEntries.map((entry) => entry.name),
+      plannedFilenames: pendingCopies.map((pendingCopy) => basename(pendingCopy.sourcePath)),
+    };
   }
 
   if (pendingCopies.length > 0) {
@@ -223,7 +231,13 @@ async function archiveDirectory({ transcriptsDirectory, destinationDirectory, dr
     process.stderr.write(`WARN: transcript archive exceeds 2 GiB; oldest month=${oldestMonth}\n`);
   }
 
-  return { plannedCount: pendingCopies.length, copiedCount, skippedCount, filenames: transcriptEntries.map((entry) => entry.name) };
+  return {
+    plannedCount: pendingCopies.length,
+    copiedCount,
+    skippedCount,
+    filenames: transcriptEntries.map((entry) => entry.name),
+    plannedFilenames: pendingCopies.map((pendingCopy) => basename(pendingCopy.sourcePath)),
+  };
 }
 
 async function listSourceDirectories(projectsDirectory) {
@@ -340,6 +354,34 @@ function launchProjectSessionCounts(sessions) {
     .sort((left, right) => left.launchDir.localeCompare(right.launchDir) || left.project.localeCompare(right.project));
 }
 
+function countPlannedCopiesByProject(sessions, plannedSessionKeys) {
+  const counts = {};
+  for (const session of sessions) {
+    counts[session.project] = counts[session.project] ?? 0;
+    const key = sessionIndexKey(session.launchDir, session.sessionId);
+    if (plannedSessionKeys.has(key)) counts[session.project] += 1;
+  }
+  return Object.fromEntries(Object.entries(counts).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+async function countDirectoryPlannedCopiesByProject({ transcriptsDirectory, launchDir, plannedFilenames, homeDirectory }) {
+  const counts = {};
+  if (plannedFilenames.length === 0) return { [launchDir]: 0 };
+
+  for (const filename of plannedFilenames) {
+    const sessionId = basename(filename, ".jsonl");
+    const inferred = await inferSessionProject({
+      transcriptPath: join(transcriptsDirectory, filename),
+      subagentsDirectory: join(transcriptsDirectory, sessionId, "subagents"),
+      launchDir,
+      homeDirectory,
+    });
+    counts[inferred.project] = (counts[inferred.project] ?? 0) + 1;
+  }
+
+  return Object.fromEntries(Object.entries(counts).sort(([left], [right]) => left.localeCompare(right)));
+}
+
 async function writeSessionIndex(archiveRoot, sessions) {
   if (sessions.length === 0) return;
   await mkdir(archiveRoot, { recursive: true });
@@ -353,6 +395,7 @@ async function archiveAll({ projectDirectory, projectsDirectory, homeDirectory, 
   const resolvedProjectsDirectory = resolve(projectsDirectory ?? join(resolvedHomeDirectory, ".claude", "projects"));
   const sourceDirectories = await listSourceDirectories(resolvedProjectsDirectory);
   const launchDirectories = [];
+  const plannedSessionKeys = new Set();
   let plannedCount = 0;
   let copiedCount = 0;
   let skippedCount = 0;
@@ -367,6 +410,9 @@ async function archiveAll({ projectDirectory, projectsDirectory, homeDirectory, 
     plannedCount += result.plannedCount;
     copiedCount += result.copiedCount;
     skippedCount += result.skippedCount;
+    for (const filename of result.plannedFilenames) {
+      plannedSessionKeys.add(sessionIndexKey(source.launchDir, basename(filename, ".jsonl")));
+    }
     launchDirectories.push({
       launchDir: source.launchDir,
       plannedCount: result.plannedCount,
@@ -389,6 +435,7 @@ async function archiveAll({ projectDirectory, projectsDirectory, homeDirectory, 
     launchDirectories,
     projectCounts: projectSessionCounts(sessions),
     launchProjectCounts: launchProjectSessionCounts(sessions),
+    plannedProjectCounts: countPlannedCopiesByProject(sessions, plannedSessionKeys),
   };
 }
 
@@ -431,6 +478,14 @@ async function archiveTranscripts({
         copiedCount: directoryResult.copiedCount,
         skippedCount: directoryResult.skippedCount,
       };
+      if (dryRun) {
+        result.plannedProjectCounts = await countDirectoryPlannedCopiesByProject({
+          transcriptsDirectory,
+          launchDir: basename(paths.destinationDirectory),
+          plannedFilenames: directoryResult.plannedFilenames,
+          homeDirectory: resolve(homeDirectory ?? homedir()),
+        });
+      }
     }
     if (!dryRun && result.skippedCount > 0) await writeSkippedFilesLog(projectRoot, result.skippedCount);
     return result;
@@ -452,7 +507,7 @@ function formatAllArchiveSummary(result, dryRun) {
     `launchDir=${launchDir} plannedCopies=${plannedCount} copied=${copiedCount}`
   ));
   const projectLines = Object.entries(result.projectCounts)
-    .map(([project, count]) => `project=${project} sessions=${count}`);
+    .map(([project, count]) => `project=${project} sessions=${count} plannedCopies=${result.plannedProjectCounts[project] ?? 0}`);
   const launchProjectLines = result.launchProjectCounts
     .map(({ launchDir, project, sessions }) => `launchProject=${launchDir} project=${project} sessions=${sessions}`);
   return [`mode=${mode} skipped=${result.skippedCount}`, ...launchLines, ...projectLines, ...launchProjectLines].join("\n") + "\n";
@@ -469,18 +524,20 @@ async function main() {
     writeAllArchiveSummary(result, options.dryRun);
     return;
   }
+  if (options.dryRun) {
+    const projectLines = Object.entries(result.plannedProjectCounts)
+      .map(([project, count]) => `project=${project} plannedCopies=${count}`);
+    process.stdout.write(`${projectLines.join("\n")}\n`);
+    return;
+  }
   process.stdout.write(`${options.dryRun ? result.plannedCount : result.copiedCount}\n`);
   if (!options.dryRun && result.skippedCount > 0) process.stdout.write(`skipped=${result.skippedCount}\n`);
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
   main().catch((error) => {
-    const errorCode = error && typeof error === "object" && "code" in error && typeof error.code === "string"
-      ? error.code
-      : error instanceof Error
-        ? error.name
-        : "UNKNOWN";
-    process.stderr.write(`archive failed: ${errorCode}\n`);
+    const errorDetails = error instanceof Error ? error.stack || `${error.name}: ${error.message}` : String(error);
+    process.stderr.write(`archive failed: ${errorDetails}\n`);
     process.exitCode = 1;
   });
 }
