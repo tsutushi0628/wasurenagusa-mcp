@@ -13,3 +13,5 @@ export const REPEAT_CLASS_PATTERNS = Object.freeze([
   { id: "R12", pattern: /まだ投稿(?:しないで|するな|はしないで)/u },
   { id: "R13", pattern: /はなしがながい|話が長|結論から|けつろんからいえ/u },
 ]);
+
+export const REPEAT_SIGNAL_PATTERN = /また(?:同じ|言わせ|忘れ|間違え)|前(?:回|にも|も|から|に).{0,16}(?:言|伝え|話)|何(?:回|度).{0,16}(?:言わせ|言った|言う|繰り返|同じ)|さっきも|言った(?:だろ|よね)/u;

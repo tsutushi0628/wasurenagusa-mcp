@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import { runSimulation } from "./lib/simulate-engine.mjs";
 
 export const REPLAY_USAGE = [
-  "Usage: node scripts/replay/simulate.mjs --mode cold|freeze|acceptance|hook-timing|online --manifest <file> --compiled-root <dir> --scratch <dir> [--split tune|evaluation] [--until YYYY-MM-DD] [--recurrence-ledger <file>] [--audit <file>]",
+  "Usage: node scripts/replay/simulate.mjs --mode cold|freeze|acceptance|hook-timing|online --manifest <file> --compiled-root <dir> --scratch <dir> [--measurement-root <dir>] [--split tune|evaluation] [--until YYYY-MM-DD] [--recurrence-ledger <file>] [--audit <file>]",
   "",
   "Cold evaluation sequence: run --mode cold --split tune, then --mode freeze, then --mode cold --split evaluation.",
   "Online replay runs manifest sessions in first-human-utterance order through --until, inclusive in JST.",
@@ -30,6 +30,9 @@ export function parseReplayArguments(args) {
       index += 1;
     } else if (argument === "--compiled-root") {
       options.compiledRoot = args[index + 1];
+      index += 1;
+    } else if (argument === "--measurement-root") {
+      options.measurementRoot = args[index + 1];
       index += 1;
     } else if (argument === "--manifest") {
       options.manifest = args[index + 1];

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, open, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import Database from "better-sqlite3";
@@ -871,6 +872,17 @@ function toStoredCorrectionBundleKeys(candidates, project, scope, sessionIdHash,
   return [...new Set(storedKeys)];
 }
 
+function getCompiledStoredBundleKey(compiledStore) {
+  if (typeof compiledStore.storedBundleKey === "function") return compiledStore.storedBundleKey;
+  return (logicalBundleKey, project, scope, sessionIdHash, lifetimeKind, visibility) => {
+    const sessionBoundary = lifetimeKind === "task" ? sessionIdHash : "";
+    const projectBoundary = visibility === "owner" ? "owner" : project;
+    const scopeBoundary = visibility === "owner" ? "owner" : scope;
+    const identity = JSON.stringify([logicalBundleKey, projectBoundary, scopeBoundary, sessionBoundary]);
+    return `oc:v2:${sha256(identity)}`;
+  };
+}
+
 function createStrengthJobSchedule(runStrengthJobAt, firstTimelineMs) {
   if (!Number.isFinite(firstTimelineMs)) return () => {};
   const firstJstDate = new Date(firstTimelineMs + JST_OFFSET_MS);
@@ -1239,15 +1251,17 @@ function addOutputLedger(storage, sessionHash, epoch, ordinal, trigger, at, rend
   });
 }
 
-async function createRuntime(compiledRoot, scratchRoot) {
+async function createRuntime(compiledRoot, scratchRoot, measurementRoot = compiledRoot) {
   process.env.HOME = join(resolve(scratchRoot), "home");
   process.env.MEMORY_DIR = resolve(scratchRoot);
   process.env.WASURENAGUSA_CORRECTION_LOOP = "on";
   process.env.WASURENAGUSA_CORRECTION_INJECT = "on";
+  process.env.WASURENAGUSA_CORRECTION_COMPLIANCE = "on";
   const importCompiled = async (relativePath) => import(pathToFileURL(join(compiledRoot, relativePath)).href);
-  const [sqlite, correctionSchema, events, detector, sessionStore, correctionStore, context, policy, render, budget, transcriptReader, redact, query, ruleTemplate, migration, schema, strength] = await Promise.all([
+  const importMeasurement = async (relativePath) => import(pathToFileURL(join(measurementRoot, relativePath)).href);
+  const [sqlite, correctionSchema, events, detector, sessionStore, correctionStore, context, policy, render, budget, transcriptReader, redact, query, ruleTemplate, migration, schema, strength, compliance, funnel, compiledCompliance] = await Promise.all([
     importCompiled("storage/sqlite.js"),
-    importCompiled("storage/correction-schema.js"),
+    importMeasurement("storage/correction-schema.js"),
     importCompiled("corrections/events.js"),
     importCompiled("corrections/detector.js"),
     importCompiled("corrections/session-store.js"),
@@ -1260,10 +1274,16 @@ async function createRuntime(compiledRoot, scratchRoot) {
     importCompiled("utils/redact-sensitive-data.js"),
     importCompiled("corrections/retrieval.js"),
     importCompiled("corrections/rule-template.js"),
-    importCompiled("storage/migration.js"),
-    importCompiled("storage/schema.js"),
-    importCompiled("corrections/strength.js"),
+    importMeasurement("storage/migration.js"),
+    importMeasurement("storage/schema.js"),
+    importMeasurement("corrections/strength.js"),
+    importMeasurement("corrections/compliance.js"),
+    importMeasurement("corrections/funnel.js"),
+    existsSync(join(compiledRoot, "corrections/compliance.js"))
+      ? importCompiled("corrections/compliance.js")
+      : Promise.resolve(null),
   ]);
+  const keying = { storedBundleKey: getCompiledStoredBundleKey(correctionStore) };
   const memoryPath = resolve(scratchRoot);
   await mkdir(memoryPath, { recursive: true });
   const dbPath = join(memoryPath, "memory.db");
@@ -1282,7 +1302,7 @@ async function createRuntime(compiledRoot, scratchRoot) {
   if (correctionVersion !== correctionSchema.CORRECTION_PRINCIPLES_SCHEMA_VERSION) {
     throw new Error("scratch correction store is not schema v13");
   }
-  return { storage, events, detector, sessionStore, correctionStore, context, policy, render, budget, transcriptReader, redact, query, ruleTemplate, strength };
+  return { storage, events, detector, sessionStore, correctionStore, context, policy, render, budget, transcriptReader, redact, query, ruleTemplate, strength, compliance, compiledCompliance, funnel, keying };
 }
 
 export function createReplayOccurrenceRows(timeline, dateRangeJst = { start: DATE_START, end: DATE_END }) {
@@ -1938,8 +1958,8 @@ function summarizeHookObservations(sessions, inputs) {
   };
 }
 
-async function initializeBlankStore(compiledRoot, scratchRoot) {
-  const runtime = await createRuntime(compiledRoot, scratchRoot);
+async function initializeBlankStore(compiledRoot, scratchRoot, measurementRoot = compiledRoot) {
+  const runtime = await createRuntime(compiledRoot, scratchRoot, measurementRoot);
   return runtime;
 }
 
@@ -1951,6 +1971,7 @@ function resetStore(scratchRoot, compiledRoot) {
     db.transaction(() => {
       for (const table of [
         "owner_correction_strength_events",
+        "owner_correction_compliance_checks",
         "owner_correction_violations",
         "owner_correction_injections",
         "owner_correction_pending",
@@ -1982,66 +2003,110 @@ function summarizeOutputs(rendered, selection, estimateTokens) {
   };
 }
 
-function summarizeInjectionAfterCorrection(storage, sessionOrderByHash) {
+function buildLedgerEventIntentMap(events, ledgerRows) {
+  const eventsByHash = new Map(events.map((event) => [sha256(event.event_id), event]));
+  const intentsByEventId = new Map();
+  for (const row of ledgerRows) {
+    if (row.recurrence !== "yes") continue;
+    const event = eventsByHash.get(row.event_hash);
+    if (!event) continue;
+    if (event.session_id_hash !== row.session_hash) throw new Error("recurrence ledger session hash mismatch");
+    const intents = intentsByEventId.get(event.event_id) ?? new Set();
+    intents.add(row.intent_id);
+    intentsByEventId.set(event.event_id, intents);
+  }
+  return intentsByEventId;
+}
+
+function buildLedgerRecorrectionSource(events, eventIntentById, unitIntentMap) {
+  const sourceByTurn = new Map();
+  for (const event of events) {
+    const eventIntents = eventIntentById.get(event.event_id);
+    if (!eventIntents) continue;
+    const unitKeys = new Set();
+    for (const [unitKey, unitIntents] of unitIntentMap) {
+      if ([...eventIntents].some((intentId) => unitIntents.has(intentId))) unitKeys.add(unitKey);
+    }
+    if (unitKeys.size > 0) sourceByTurn.set(`${event.session_id_hash}\u0000${event.human_ordinal}`, unitKeys);
+  }
+  return (sessionHash, ordinal) => sourceByTurn.get(`${sessionHash}\u0000${ordinal}`) ?? new Set();
+}
+
+function aggregateFunnelByIntent(byUnit, unitIntentMap, counterFunctions) {
+  const countsByIntent = new Map();
+  for (const unit of byUnit) {
+    for (const intentId of unitIntentMap.get(unit.unitKey) ?? []) {
+      const counts = countsByIntent.get(intentId) ?? counterFunctions.emptyFunnelCounts();
+      counterFunctions.addFunnelCounts(counts, unit);
+      countsByIntent.set(intentId, counts);
+    }
+  }
+  return [...countsByIntent.entries()].sort(([left], [right]) => left.localeCompare(right))
+    .map(([intentId, counts]) => ({ intentId, ...counterFunctions.makeCounterReport(counts) }));
+}
+
+function persistReplayCorrectionCompliance(runtime, storage, input) {
+  runtime.compliance.persistCorrectionComplianceViolations(storage, { ...input, persistViolations: false });
+  if (runtime.compiledCompliance) {
+    runtime.compiledCompliance.persistCorrectionComplianceViolations(storage, input);
+  }
+}
+
+function indexTranscriptRecordsByHumanInput(sessions) {
+  const recordsByEventId = new Map();
+  for (const session of sessions) {
+    const records = session.transcriptRecords;
+    const inputs = session.humanInputs;
+    let recordIndex = 0;
+    for (let inputIndex = 0; inputIndex < inputs.length; inputIndex += 1) {
+      const input = inputs[inputIndex];
+      const nextHumanLineOrder = inputs[inputIndex + 1]?.lineOrder ?? Number.POSITIVE_INFINITY;
+      while (recordIndex < records.length && records[recordIndex].lineOrder < input.lineOrder) recordIndex += 1;
+      const turnRecords = [];
+      while (recordIndex < records.length && records[recordIndex].lineOrder < nextHumanLineOrder) {
+        turnRecords.push(records[recordIndex]);
+        recordIndex += 1;
+      }
+      recordsByEventId.set(input.eventId, turnRecords);
+    }
+  }
+  return recordsByEventId;
+}
+
+function summarizeFunnel(storage, runtime, { sessions, sessionOrderByHash, dateRangeJst, recurrenceLedger }) {
   return storage.runCorrectionTransaction(({ db }) => {
-    const injections = db.prepare(`
-      SELECT DISTINCT bundle_key AS bundleKey, version, session_id_hash AS sessionHash,
-        human_ordinal AS humanOrdinal, emitted_at AS emittedAt
-      FROM owner_correction_injections
-      WHERE body_included = 1 AND stdout_status = 'emitted'
+    const events = db.prepare(`
+      SELECT event_id, session_id_hash, human_ordinal, observed_at, excerpt
+      FROM owner_correction_events
+      ORDER BY observed_at, session_id_hash, human_ordinal
     `).all();
-    const evidence = db.prepare(`
-      SELECT DISTINCT e.event_id AS eventId, e.bundle_key AS bundleKey, event.session_id_hash AS sessionHash,
-        event.human_ordinal AS humanOrdinal, event.observed_at AS observedAt
-      FROM owner_correction_evidence AS e
-      JOIN owner_correction_events AS event ON event.event_id = e.event_id
-    `).all();
-    const versions = db.prepare(`
-      SELECT bundle_key AS bundleKey, version, rule_text AS ruleText, body_hash AS bodyHash,
-        conditions, condition_key AS conditionKey, polarity, visibility, status,
-        confirmed_at AS confirmedAt, expires_at AS expiresAt, lifetime_kind AS lifetimeKind,
-        continuation_basis AS continuationBasis, evidence_event_ids AS evidenceEventIds,
-        effective_from AS effectiveFrom
-      FROM owner_correction_versions ORDER BY bundle_key, version
-    `).all().map((row) => ({ ...row, evidenceEventIds: JSON.parse(row.evidenceEventIds) }));
-    const sessionsWithBodyInjection = new Set(injections.map((row) => row.sessionHash));
-    const injectionsByBundle = new Map();
-    const versionsByBundle = new Map();
-    for (const injection of injections) {
-      const bundleInjections = injectionsByBundle.get(injection.bundleKey) ?? [];
-      bundleInjections.push(injection);
-      injectionsByBundle.set(injection.bundleKey, bundleInjections);
+    const eventIntentById = buildLedgerEventIntentMap(events, recurrenceLedger.rows.values());
+    const versionSnapshot = runtime.funnel.readCorrectionFunnelVersionSnapshot(db);
+    const unitIntentMap = runtime.funnel.getCorrectionUnitIntentMap(db, eventIntentById, versionSnapshot);
+    const recorrectionSource = buildLedgerRecorrectionSource(events, eventIntentById, unitIntentMap);
+    const epochsByTurn = new Map();
+    for (const session of sessions) {
+      for (const input of session.humanInputs) {
+        if (!Number.isSafeInteger(input.humanOrdinal)) continue;
+        epochsByTurn.set(`${input.sessionHash}\u0000${input.humanOrdinal}`, input.compactEpoch ?? 0);
+      }
     }
-    for (const version of versions) {
-      const bundleVersions = versionsByBundle.get(version.bundleKey) ?? [];
-      bundleVersions.push(version);
-      versionsByBundle.set(version.bundleKey, bundleVersions);
-    }
-    const sessionsWithLaterSameBundleEvidence = new Set();
-    for (const row of evidence) {
-      const matchingInjections = injectionsByBundle.get(row.bundleKey) ?? [];
-      const bundleVersions = versionsByBundle.get(row.bundleKey) ?? [];
-      const observedAt = numericTime(row.observedAt);
-      const versionIncludingEvidence = bundleVersions.find((version) => version.evidenceEventIds.includes(row.eventId));
-      const versionAtEvidence = versionIncludingEvidence ?? bundleVersions
-        .filter((version) => numericTime(version.effectiveFrom) <= observedAt)
-        .at(-1);
-      if (!versionAtEvidence) continue;
-      const hasEarlierInjection = matchingInjections.some((injection) => {
-        const emittedAt = numericTime(injection.emittedAt);
-        if (observedAt === null || emittedAt === null) return false;
-        let occurredAfterInjection = observedAt > emittedAt;
-        if (observedAt === emittedAt) {
-          if (row.sessionHash === injection.sessionHash) occurredAfterInjection = row.humanOrdinal > injection.humanOrdinal;
-          else occurredAfterInjection = sessionOrderByHash.get(row.sessionHash) > sessionOrderByHash.get(injection.sessionHash);
-        }
-        return occurredAfterInjection && isEvidenceOnlyVersionContinuity(bundleVersions, injection.version, versionAtEvidence.version);
-      });
-      if (hasEarlierInjection) sessionsWithLaterSameBundleEvidence.add(row.sessionHash);
-    }
-    const denominator = sessionsWithBodyInjection.size;
-    const numerator = sessionsWithLaterSameBundleEvidence.size;
-    return { numerator, denominator, rate: denominator === 0 ? null : numerator / denominator };
+    const commonOptions = {
+      since: dateRangeJst.start,
+      until: dateRangeJst.end,
+      turnEpoch: (sessionHash, ordinal) => epochsByTurn.get(`${sessionHash}\u0000${ordinal}`) ?? null,
+      sessionOrderByHash,
+    };
+    const funnel = runtime.funnel.computeCorrectionFunnel(db, {
+      ...commonOptions,
+      recorrectionSource,
+      includeEvidenceComparison: true,
+      versionSnapshot,
+    });
+    return {
+      ...funnel,
+      byIntent: aggregateFunnelByIntent(funnel.byUnit, unitIntentMap, runtime.funnel),
+    };
   });
 }
 
@@ -2050,6 +2115,7 @@ async function runCoverage({
   coverage,
   sessions: sourceSessions,
   compiledRoot,
+  measurementRoot = compiledRoot,
   scratchRoot,
   dateRangeJst,
   sessionOrdered = false,
@@ -2059,7 +2125,7 @@ async function runCoverage({
   const coverageRoot = join(resolve(scratchRoot), "splits", split, coverage);
   await mkdir(coverageRoot, { recursive: true });
   const isolatedStoreRoot = coverageRoot;
-  const runtime = await initializeBlankStore(compiledRoot, isolatedStoreRoot);
+  const runtime = await initializeBlankStore(compiledRoot, isolatedStoreRoot, measurementRoot);
   const { storage } = runtime;
   resetStore(isolatedStoreRoot, compiledRoot);
   const sessions = filterReplayOwnerInputs(sourceSessions, runtime.events);
@@ -2106,6 +2172,7 @@ async function runCoverage({
     input.eventId = input.eventId ?? eventIdForInput(input, runtime);
   }
   for (const session of sessions) session.humanInputs.sort((a, b) => a.lineOrder - b.lineOrder);
+  const complianceRecordsByEventId = indexTranscriptRecordsByHumanInput(sessions);
   const originalTimeline = [];
   for (const session of sessions) {
     const sessionRows = [];
@@ -2410,7 +2477,7 @@ async function runCoverage({
           input.project,
           SOURCE_SCOPE,
           runtime.sessionStore.hashSessionId(input.sessionId),
-          runtime.correctionStore.storedBundleKey,
+          runtime.keying.storedBundleKey,
         );
         plan = runtime.context.getContextInjectionPlan(hookInput, input.humanOrdinal, runtime.budget.DEFAULT_INJECTION_TOKEN_BUDGET);
         selection = runtime.policy.selectCorrectionInjections(storage, {
@@ -2677,6 +2744,17 @@ async function runCoverage({
             }));
           }
           });
+          if (includeOnlineMetrics) {
+            for (const { input } of items) {
+              const records = complianceRecordsByEventId.get(input.eventId) ?? [];
+              persistReplayCorrectionCompliance(runtime, storage, {
+                sessionIdHash: input.sessionHash,
+                humanOrdinal: input.humanOrdinal,
+                assistantText: runtime.compliance.getLatestAssistantText(records),
+                detectedAt: persistenceAt,
+              });
+            }
+          }
           state.progress = {
             humanOrdinal: commitResult.humanOrdinal,
             transcriptOffset: row.byteEndOffset,
@@ -2738,8 +2816,8 @@ async function runCoverage({
     stage: row.result.failedAt,
     reasonCode: row.result.reason,
   })) : null;
-  const injectionCorrectionRate = includeOnlineMetrics
-    ? summarizeInjectionAfterCorrection(storage, sessionOrderByHash)
+  const funnel = includeOnlineMetrics
+    ? summarizeFunnel(storage, runtime, { sessions, sessionOrderByHash, dateRangeJst, recurrenceLedger })
     : null;
   const hookTime = includeOnlineMetrics ? {
     measurement: "in-process replay hook logic elapsed time",
@@ -2809,7 +2887,7 @@ async function runCoverage({
     auditRows: audit.rows,
     auditGroups: audit.groups,
     recurrenceResults,
-    injectionCorrectionRate,
+    funnel,
     correctionMatchedReinjectionCount,
     strengthEvents,
     hookTime,
@@ -2849,6 +2927,7 @@ async function runHookTimings({ sessions, compiledRoot, scratchRoot }) {
     MEMORY_DIR: resolve(root),
     WASURENAGUSA_CORRECTION_LOOP: "on",
     WASURENAGUSA_CORRECTION_INJECT: "on",
+    WASURENAGUSA_CORRECTION_COMPLIANCE: "on",
     WASURENAGUSA_STOP_LLM: "off",
     WASURENAGUSA_SCHEDULER: "0",
   };
@@ -3693,6 +3772,7 @@ function hookEnvironment(scratchRoot, memoryRoot) {
     MEMORY_DIR: resolve(memoryRoot),
     WASURENAGUSA_CORRECTION_LOOP: "on",
     WASURENAGUSA_CORRECTION_INJECT: "on",
+    WASURENAGUSA_CORRECTION_COMPLIANCE: "on",
     WASURENAGUSA_STOP_LLM: "off",
     WASURENAGUSA_SCHEDULER: "0",
   };
@@ -3882,8 +3962,12 @@ async function writeSimpleReport(scratchRoot, name, body, markdown) {
 
 function buildSimpleMarkdown(title, body) {
   const rows = flattenNumericMetrics(body);
-  if (body.afterInjectionCorrectionRate) {
-    rows["注入後再訂正率"] = body.afterInjectionCorrectionRate.rate;
+  if (body.funnel) {
+    rows["適用機会"] = body.funnel.overall.opportunities;
+    rows["配送率"] = body.funnel.overall.deliveryRate;
+    rows["再訂正率"] = body.funnel.overall.recorrectRate;
+    rows["捕捉率"] = body.funnel.overall.captureRate;
+    rows.legacyA8 = body.funnel.legacyA8.rate;
   }
   return [
     `# ${title}`,
@@ -3899,14 +3983,16 @@ function buildSimpleMarkdown(title, body) {
   ].join("\n");
 }
 
-async function validateRunPaths(compiledRoot, scratchRoot) {
+async function validateRunPaths(compiledRoot, scratchRoot, measurementRoot = compiledRoot) {
   const temporaryRoot = join(ROOT, ".tmp");
   const compiled = resolve(compiledRoot);
   const scratch = resolve(scratchRoot);
-  if (!pathContains(temporaryRoot, compiled) || !pathContains(temporaryRoot, scratch)) {
+  const measurement = resolve(measurementRoot);
+  if (!pathContains(temporaryRoot, compiled) || !pathContains(temporaryRoot, scratch) || !pathContains(temporaryRoot, measurement)) {
     throw new Error("compiled root and scratch must stay under the worktree .tmp directory");
   }
-  if (compiled === scratch || pathContains(compiled, scratch) || pathContains(scratch, compiled)) {
+  if (compiled === scratch || pathContains(compiled, scratch) || pathContains(scratch, compiled) ||
+    measurement === scratch || pathContains(measurement, scratch) || pathContains(scratch, measurement)) {
     throw new Error("compiled root and scratch must be separate directories");
   }
   if (compiled === join(ROOT, "dist") || pathContains(join(ROOT, "dist"), compiled)) {
@@ -3915,14 +4001,20 @@ async function validateRunPaths(compiledRoot, scratchRoot) {
   if (!(await stat(join(compiled, "cli", "context.js")).catch(() => null))) {
     throw new Error("scratch build not found; compile with --outDir under .tmp first");
   }
-  const compiledParentEnv = resolve(compiled, "..", ".env");
-  if (await stat(compiledParentEnv).catch(() => null)) {
-    throw new Error("refusing a replay build whose parent contains .env");
+  if (!(await stat(join(measurement, "corrections", "compliance.js")).catch(() => null)) ||
+    !(await stat(join(measurement, "corrections", "funnel.js")).catch(() => null))) {
+    throw new Error("measurement build is missing correction measurement modules");
   }
-  return { compiled, scratch };
+  for (const root of new Set([compiled, measurement])) {
+    const parentEnv = resolve(root, "..", ".env");
+    if (await stat(parentEnv).catch(() => null)) {
+      throw new Error("refusing a replay build whose parent contains .env");
+    }
+  }
+  return { compiled, scratch, measurement };
 }
 
-async function runOnlineSimulation({ manifest, compiledRoot, scratchRoot, until, recurrenceLedgerPath }) {
+async function runOnlineSimulation({ manifest, compiledRoot, measurementRoot, scratchRoot, until, recurrenceLedgerPath }) {
   const sessions = selectOnlineSessions(manifest.sessions, until);
   const recurrenceLedger = await readRecurrenceLedger(recurrenceLedgerPath);
   const replay = await runCoverage({
@@ -3930,6 +4022,7 @@ async function runOnlineSimulation({ manifest, compiledRoot, scratchRoot, until,
     coverage: "contract",
     sessions,
     compiledRoot,
+    measurementRoot,
     scratchRoot,
     dateRangeJst: { start: manifest.dateRangeJst.start, end: until },
     sessionOrdered: true,
@@ -3949,7 +4042,7 @@ async function runOnlineSimulation({ manifest, compiledRoot, scratchRoot, until,
     prevention: replay.report.prevention,
     stopDestinations: summarizeStopDestinations(replay.recurrenceResults),
     recurrenceResults: replay.recurrenceResults,
-    afterInjectionCorrectionRate: replay.injectionCorrectionRate,
+    funnel: replay.funnel,
     correctionMatchedReinjectionCount: replay.correctionMatchedReinjectionCount,
     strengthEvents: replay.strengthEvents,
     hookTime: replay.hookTime,
@@ -3960,17 +4053,17 @@ async function runOnlineSimulation({ manifest, compiledRoot, scratchRoot, until,
   return body;
 }
 
-export async function runSimulation({ mode, manifest: manifestPath, compiledRoot, scratchRoot, split, auditArgs, until, recurrenceLedgerPath }) {
+export async function runSimulation({ mode, manifest: manifestPath, compiledRoot, measurementRoot, scratchRoot, split, auditArgs, until, recurrenceLedgerPath }) {
   if (!["cold", "freeze", "acceptance", "hook-timing", "online"].includes(mode)) {
     throw new Error("unsupported replay mode");
   }
-  const { compiled, scratch } = await validateRunPaths(compiledRoot, scratchRoot);
+  const { compiled, scratch, measurement } = await validateRunPaths(compiledRoot, scratchRoot, measurementRoot ?? compiledRoot);
   const manifest = await readManifest(manifestPath);
   if (mode === "online") {
     if (manifest.sessions.length !== manifest.fileAudit.included) {
       throw new Error("online replay requires every included manifest session");
     }
-    return runOnlineSimulation({ manifest, compiledRoot: compiled, scratchRoot: scratch, until, recurrenceLedgerPath });
+    return runOnlineSimulation({ manifest, compiledRoot: compiled, measurementRoot: measurement, scratchRoot: scratch, until, recurrenceLedgerPath });
   }
   if (mode === "cold" || mode === "freeze") {
     if (manifest.sessions.length !== manifest.fileAudit.included) {
@@ -4043,4 +4136,9 @@ export const internal = {
   runStrengthJobsBeforeEvent,
   countCorrectionMatchedReinjections,
   summarizeStopDestinations,
+  buildLedgerEventIntentMap,
+  buildLedgerRecorrectionSource,
+  indexTranscriptRecordsByHumanInput,
+  persistReplayCorrectionCompliance,
+  getCompiledStoredBundleKey,
 };

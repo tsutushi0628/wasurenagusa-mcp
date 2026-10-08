@@ -356,7 +356,7 @@ describe("correction strength job", () => {
     }
   });
 
-  it("省略記号のない短い要約は違反なしでもsettledに数えない", () => {
+  it("省略記号のない短い要約は未検査として記録せずsettledに数えない", () => {
     const bundleKey = "short-summary-bundle";
     seedBundle(bundleKey, 3);
     storage.runCorrectionTransaction(({ db }) => {
@@ -389,7 +389,7 @@ describe("correction strength job", () => {
 
       expect(storage.connection.prepare(
         "SELECT is_compliant, COUNT(*) AS count FROM owner_correction_compliance_checks WHERE bundle_key = ? GROUP BY is_compliant",
-      ).all(bundleKey)).toEqual([{ is_compliant: 0, count: 5 }]);
+      ).all(bundleKey)).toEqual([]);
       const summary = runStrengthJob(storage, { now: at(5), mode: "on" });
       expect(summary.settledEvents).toBe(0);
       expect(readStrengthEvents(bundleKey)).toEqual([]);

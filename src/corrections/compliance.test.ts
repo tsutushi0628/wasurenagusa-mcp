@@ -557,4 +557,73 @@ describe("確定規則の遵守検査", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  it("未注入でも有効な検査器つき規則を検査し、violationsには書かない", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "correction-compliance-effective-check-"));
+    const dbPath = join(tempDir, "memory.db");
+    const initialStorage = new SQLiteStorage(dbPath);
+    initialStorage.initialize();
+    initialStorage.close();
+    const setupDb = new Database(dbPath);
+    migrateV10ToV11(setupDb);
+    migrateV11ToV12(setupDb);
+    migrateV12ToV13(setupDb);
+    setupDb.close();
+    const storage = SQLiteStorage.openExistingForHook(dbPath, { mode: "correction" });
+    const previousValue = process.env.WASURENAGUSA_CORRECTION_COMPLIANCE;
+    process.env.WASURENAGUSA_CORRECTION_COMPLIANCE = "on";
+
+    try {
+      storage.runCorrectionTransaction(({ db }) => {
+        db.prepare(`
+          INSERT INTO owner_correction_bundles (
+            bundle_key, memory_id, rule_text, topic_key, polarity, condition_key, project, scope,
+            visibility, status, intensity, occurrence_count, session_count, first_seen_at, last_seen_at,
+            expires_at, lifetime_kind, continuation_basis, confirmed_at, version,
+            counterevidence_event_id, last_confirmation_asked_at, confirmation_state
+          ) VALUES (?, NULL, '回答は常体で書く', 'tone', 'positive', 'general', 'owner', 'owner',
+            'owner', 'confirmed', 3, 1, 1, ?, ?, NULL, 'explicit_continuing', 'synthetic', ?, 1,
+            NULL, NULL, 'none')
+        `).run("oc:v2:synthetic-effective-tone", "2026-10-01T00:00:00.000Z", "2026-10-01T00:00:00.000Z", "2026-10-01T00:00:00.000Z");
+        db.prepare(`
+          INSERT INTO owner_correction_versions (
+            bundle_key, version, rule_text, body_hash, conditions, condition_key, polarity, visibility,
+            status, confirmed_at, expires_at, lifetime_kind, continuation_basis, evidence_event_ids,
+            effective_from, change_reason
+          ) VALUES (?, 1, '回答は常体で書く', 'synthetic-rule-hash', '[]', 'general', 'positive',
+            'owner', 'confirmed', ?, NULL, 'explicit_continuing', 'synthetic', '[]', ?, 'fixture')
+        `).run("oc:v2:synthetic-effective-tone", "2026-10-01T00:00:00.000Z", "2026-10-01T00:00:00.000Z");
+      });
+
+      expect(persistCorrectionComplianceViolations(storage, {
+        sessionIdHash: "synthetic-session",
+        humanOrdinal: 1,
+        assistantText: "確認しました。対応します。",
+        detectedAt: "2026-10-01T00:01:00.000Z",
+      })).toEqual([]);
+      expect(assessCorrectionCompliance("確認しました。", [toneRule])[0]?.outcome).toBe("unproven");
+      expect(persistCorrectionComplianceViolations(storage, {
+        sessionIdHash: "synthetic-session",
+        humanOrdinal: 2,
+        assistantText: "確認しました。",
+        detectedAt: "2026-10-01T00:02:00.000Z",
+      })).toEqual([]);
+      expect(storage.connection.prepare(`
+        SELECT human_ordinal, bundle_key, version, checker, is_compliant
+        FROM owner_correction_compliance_checks
+      `).all()).toEqual([{
+        human_ordinal: 1,
+        bundle_key: "oc:v2:synthetic-effective-tone",
+        version: 1,
+        checker: "tone",
+        is_compliant: 0,
+      }]);
+      expect(storage.connection.prepare("SELECT bundle_key FROM owner_correction_violations").all()).toEqual([]);
+    } finally {
+      storage.close();
+      if (previousValue === undefined) delete process.env.WASURENAGUSA_CORRECTION_COMPLIANCE;
+      else process.env.WASURENAGUSA_CORRECTION_COMPLIANCE = previousValue;
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });

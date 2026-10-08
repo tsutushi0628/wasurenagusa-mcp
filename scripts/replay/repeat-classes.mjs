@@ -2,11 +2,11 @@
 
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, readdir, writeFile } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
-import { REPEAT_CLASS_PATTERNS } from "./lib/repeat-class-patterns.mjs";
+import { REPEAT_CLASS_PATTERNS, REPEAT_SIGNAL_PATTERN } from "./lib/repeat-class-patterns.mjs";
 import { readSessionIndexForTranscripts, sessionIndexEntry, validateProjectName } from "./lib/session-project.mjs";
 
 const DATE_FORMAT = /^\d{4}-\d{2}-\d{2}$/u;
@@ -39,7 +39,7 @@ export function parseRepeatClassesArguments(args) {
   const options = { since: null, until: null };
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
-    if (["--transcripts", "--compiled-root", "--out", "--since", "--until", "--project"].includes(argument)) {
+    if (["--transcripts", "--compiled-root", "--out", "--since", "--until", "--project", "--manifest"].includes(argument)) {
       const value = readOptionValue(args, index, argument);
       index += 1;
       if (argument === "--transcripts") {
@@ -50,6 +50,8 @@ export function parseRepeatClassesArguments(args) {
         options.outputPath = value;
       } else if (argument === "--project") {
         options.project = validateProjectName(value);
+      } else if (argument === "--manifest") {
+        options.manifestPath = value;
       } else if (argument === "--since") {
         options.since = validateDate(value, argument);
       } else {
@@ -67,6 +69,42 @@ export function parseRepeatClassesArguments(args) {
     throw new Error("--since must not be after --until");
   }
   return options;
+}
+
+async function readFixedManifest(manifestPath, transcriptsRoot) {
+  const resolvedManifestPath = resolve(manifestPath);
+  const resolvedTranscriptsRoot = resolve(transcriptsRoot);
+  let manifest;
+  try {
+    manifest = JSON.parse(await readFile(resolvedManifestPath, "utf8"));
+  } catch (error) {
+    throw new Error("repeat classes manifest could not be read", { cause: error });
+  }
+  if (!manifest || manifest.version !== 1 || !Array.isArray(manifest.sessions)) {
+    throw new Error("repeat classes manifest is invalid");
+  }
+  const snapshots = new Map();
+  for (const session of manifest.sessions) {
+    if (!session || typeof session.fileId !== "string" || !/^[^/\\]+$/u.test(session.fileId) ||
+      typeof session.path !== "string" || !Number.isSafeInteger(session.readEndByteOffset) ||
+      session.readEndByteOffset <= 0 || typeof session.prefixSha256 !== "string" ||
+      !/^[a-f0-9]{64}$/u.test(session.prefixSha256)) {
+      throw new Error("repeat classes manifest session is invalid");
+    }
+    const transcriptPath = resolve(resolvedTranscriptsRoot, session.path);
+    const relativePath = relative(resolvedTranscriptsRoot, transcriptPath);
+    if (isAbsolute(session.path) || relativePath === ".." || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath) ||
+      basename(transcriptPath) !== `${session.fileId}.jsonl`) {
+      throw new Error("repeat classes manifest transcript path does not match --transcripts");
+    }
+    if (snapshots.has(session.fileId)) throw new Error("repeat classes manifest contains a duplicate fileId");
+    snapshots.set(session.fileId, {
+      filename: transcriptPath,
+      readEndByteOffset: session.readEndByteOffset,
+      prefixSha256: session.prefixSha256,
+    });
+  }
+  return snapshots;
 }
 
 function jstDate(timestamp) {
@@ -116,9 +154,21 @@ function makeClassStats() {
   return stats;
 }
 
-async function readTranscriptFile({ filename, extractOwnerEvent, options, state, project }) {
+async function readTranscriptFile({ filename, extractOwnerEvent, options, state, project, snapshot }) {
+  let streamOptions = { encoding: "utf8" };
+  let snapshotHash = null;
+  if (snapshot) {
+    const fileStat = await stat(filename);
+    if (fileStat.size < snapshot.readEndByteOffset) {
+      throw new Error(`manifest transcript is shorter than its fixed byte offset: ${basename(filename)}`);
+    }
+    streamOptions = { start: 0, end: snapshot.readEndByteOffset - 1 };
+    snapshotHash = createHash("sha256");
+  }
+  const input = createReadStream(filename, streamOptions);
+  if (snapshotHash) input.on("data", (chunk) => snapshotHash.update(chunk));
   const lineReader = createInterface({
-    input: createReadStream(filename, { encoding: "utf8" }),
+    input,
     crlfDelay: Infinity,
   });
   let lineNumber = 0;
@@ -165,6 +215,11 @@ async function readTranscriptFile({ filename, extractOwnerEvent, options, state,
       state.broadcastGroups.set(broadcastKey, group);
     }
     group.add(sessionHash);
+    state.utterancesDeduped.add(broadcastKey);
+    if (REPEAT_SIGNAL_PATTERN.test(text)) {
+      state.repeatSignalCount += 1;
+      state.repeatSignalDeduped.add(broadcastKey);
+    }
 
     const classId = classifyText(ownerEvent.text);
     if (!classId) continue;
@@ -188,6 +243,9 @@ async function readTranscriptFile({ filename, extractOwnerEvent, options, state,
       textPrefix: "",
     });
   }
+  if (snapshot && snapshotHash?.digest("hex") !== snapshot.prefixSha256) {
+    throw new Error(`manifest transcript prefix digest does not match: ${basename(filename)}`);
+  }
 }
 
 export async function measureRepeatClasses(options) {
@@ -199,16 +257,24 @@ export async function measureRepeatClasses(options) {
 
   const extractOwnerEvent = await loadOwnerEventExtractor(options.compiledRoot);
   const transcriptsRoot = resolve(options.transcriptsDirectory);
+  const manifestSnapshots = options.manifestPath
+    ? await readFixedManifest(options.manifestPath, transcriptsRoot)
+    : null;
   const sessionIndex = await readSessionIndexForTranscripts(transcriptsRoot, { required: Boolean(options.project) });
   const launchDir = basename(transcriptsRoot);
-  const entries = await readdir(transcriptsRoot, { withFileTypes: true });
-  const allFilenames = entries
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
-    .map((entry) => join(transcriptsRoot, entry.name))
-    .sort();
-  const filenames = options.project
-    ? allFilenames.filter((filename) => sessionIndexEntry(sessionIndex, basename(filename, ".jsonl"), launchDir)?.project === options.project)
-    : allFilenames;
+  let filenames;
+  if (manifestSnapshots) {
+    filenames = [...manifestSnapshots.values()].map((snapshot) => snapshot.filename);
+  } else {
+    const entries = await readdir(transcriptsRoot, { withFileTypes: true });
+    filenames = entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
+      .map((entry) => join(transcriptsRoot, entry.name))
+      .sort();
+  }
+  if (options.project) {
+    filenames = filenames.filter((filename) => sessionIndexEntry(sessionIndex, basename(filename, ".jsonl"), launchDir)?.project === options.project);
+  }
   if (filenames.length === 0) {
     if (options.project) throw new Error(`transcripts directory contains no JSONL files for project: ${options.project}`);
     throw new Error("transcripts directory contains no JSONL files");
@@ -225,6 +291,9 @@ export async function measureRepeatClasses(options) {
     projectNames,
     dailyTotals,
     broadcastGroups: new Map(),
+    utterancesDeduped: new Set(),
+    repeatSignalCount: 0,
+    repeatSignalDeduped: new Set(),
     matches: [],
   };
   for (const filename of filenames) {
@@ -238,6 +307,7 @@ export async function measureRepeatClasses(options) {
       options: { since, until },
       state,
       project,
+      snapshot: manifestSnapshots?.get(sessionId),
     });
   }
 
@@ -275,6 +345,16 @@ export async function measureRepeatClasses(options) {
     period: { since, until },
     total,
     utterances: state.utterances,
+    repeatSignal: {
+      count: state.repeatSignalCount,
+      utterances: state.utterances,
+      per100: state.utterances === 0 ? null : (state.repeatSignalCount / state.utterances) * 100,
+      countDeduped: state.repeatSignalDeduped.size,
+      utterancesDeduped: state.utterancesDeduped.size,
+      per100Deduped: state.utterancesDeduped.size === 0
+        ? null
+        : (state.repeatSignalDeduped.size / state.utterancesDeduped.size) * 100,
+    },
     classes,
     dailyTotals: activeDateList.map((date) => ({ date, total: dailyTotals.get(date) })),
     activeDays: activeDateList.length,
@@ -293,7 +373,7 @@ async function writeReport(report, outputPath) {
 
 function formatSummary(report) {
   const classSummary = REPEAT_CLASS_PATTERNS.map(({ id }) => `${id}=${report.classes[id].count}`).join(" ");
-  return `total=${report.total} ${classSummary} utterances=${report.utterances} activeDays=${report.activeDays} broadcastGroups=${report.broadcastGroups}`;
+  return `total=${report.total} ${classSummary} utterances=${report.utterances} activeDays=${report.activeDays} broadcastGroups=${report.broadcastGroups} repeatSignal=${report.repeatSignal.count}/${report.repeatSignal.utterances}`;
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {

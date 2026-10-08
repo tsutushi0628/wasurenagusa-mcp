@@ -68,6 +68,32 @@ interface CorrectionVersionRow {
   evidence_event_ids: string;
 }
 
+export interface EffectiveVersionRow extends CorrectionVersionRow {
+  bundle_key: string;
+  topic_key: string;
+  expires_at: string | null;
+  effective_from: string;
+}
+
+export interface PrincipleMemberVersionRow extends EffectiveVersionRow {
+  principle_key: string;
+  member_key: string;
+  attached_at: string;
+}
+
+export interface EffectiveCheckerRuleSnapshot {
+  schemaVersion: number;
+  versions: EffectiveVersionRow[];
+  principleMembers: PrincipleMemberVersionRow[];
+}
+
+interface VersionActivationState {
+  status: string;
+  confirmed_at: string | null;
+  expires_at: string | null;
+  effective_from: string;
+}
+
 function evidenceEventIds(row: CorrectionVersionRow): string[] {
   const value: unknown = JSON.parse(row.evidence_event_ids);
   if (!Array.isArray(value) || value.some((eventId) => typeof eventId !== "string")) {
@@ -84,7 +110,7 @@ function sameRuleMeaning(left: CorrectionVersionRow, right: CorrectionVersionRow
     left.continuation_basis === right.continuation_basis;
 }
 
-function isEvidenceOnlyVersionContinuity(
+export function isEvidenceOnlyVersionContinuity(
   db: Database.Database,
   bundleKey: string,
   fromVersion: number,
@@ -192,7 +218,7 @@ function hasComplianceChecker(rule: ComplianceRuleDescriptor): boolean {
   return getComplianceChecker(rule) !== null;
 }
 
-function getComplianceChecker(rule: ComplianceRuleDescriptor): ComplianceChecker | null {
+export function getComplianceChecker(rule: ComplianceRuleDescriptor): ComplianceChecker | null {
   if (hasToneRule(rule)) return "tone";
   if (hasFullTextRule(rule)) return "document_delivery";
   if (hasAbbreviationRule(rule)) return "expression_policy";
@@ -426,6 +452,151 @@ function readInjectedConfirmedRules(
   });
 }
 
+export function tableExists(db: Database.Database, tableName: string): boolean {
+  return db.prepare(
+    "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?",
+  ).get(tableName) !== undefined;
+}
+
+export function activeVersionAt<T extends VersionActivationState>(rows: readonly T[], at: string): T | null {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (row.effective_from > at) continue;
+    const next = rows[index + 1];
+    if (next && next.effective_from <= at) return null;
+    if (row.status === "confirmed" && row.confirmed_at !== null && row.confirmed_at <= at &&
+      (row.expires_at === null || row.expires_at > at)) return row;
+    return null;
+  }
+  return null;
+}
+
+function activePrincipleMemberVersionAt(
+  rows: readonly PrincipleMemberVersionRow[],
+  at: string,
+): PrincipleMemberVersionRow | null {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (row.effective_from > at) continue;
+    const next = rows[index + 1];
+    if (next && next.effective_from <= at) return null;
+    if (row.status !== "candidate" && row.status !== "confirmed") return null;
+    if (row.status === "confirmed" && (row.confirmed_at === null || row.confirmed_at > at)) return null;
+    if (row.expires_at !== null && row.expires_at <= at) return null;
+    return row;
+  }
+  return null;
+}
+
+export function readEffectiveCheckerRuleSnapshot(db: Database.Database): EffectiveCheckerRuleSnapshot {
+  const schemaVersion = getSchemaVersion(db);
+  if (!tableExists(db, "owner_correction_versions")) {
+    return { schemaVersion, versions: [], principleMembers: [] };
+  }
+  const versions = db.prepare(`
+    SELECT version.bundle_key, bundle.topic_key, version.version, version.rule_text,
+      version.body_hash, version.conditions, version.condition_key, version.polarity,
+      version.visibility, version.status, version.confirmed_at, version.expires_at,
+      version.lifetime_kind, version.continuation_basis, version.evidence_event_ids,
+      version.effective_from
+    FROM owner_correction_versions AS version
+    JOIN owner_correction_bundles AS bundle ON bundle.bundle_key = version.bundle_key
+    ORDER BY version.bundle_key, version.version
+  `).all() as EffectiveVersionRow[];
+  const principleMembers = tableExists(db, "owner_correction_principle_members")
+    ? db.prepare(`
+      SELECT member.principle_key, member.member_key, member.attached_at,
+        source.topic_key, sourceVersion.bundle_key, sourceVersion.version, sourceVersion.rule_text,
+        sourceVersion.body_hash, sourceVersion.conditions, sourceVersion.condition_key,
+        sourceVersion.polarity, sourceVersion.visibility, sourceVersion.status,
+        sourceVersion.confirmed_at, sourceVersion.expires_at, sourceVersion.lifetime_kind,
+        sourceVersion.continuation_basis, sourceVersion.evidence_event_ids, sourceVersion.effective_from
+      FROM owner_correction_principle_members AS member
+      JOIN owner_correction_bundles AS source ON source.bundle_key = member.member_key
+      JOIN owner_correction_versions AS sourceVersion
+        ON sourceVersion.bundle_key = source.bundle_key
+      ORDER BY member.principle_key, member.member_key, sourceVersion.version
+    `).all() as PrincipleMemberVersionRow[]
+    : [];
+  return { schemaVersion, versions, principleMembers };
+}
+
+export function createEffectiveCheckerRuleReader(
+  snapshot: EffectiveCheckerRuleSnapshot,
+): (at: string) => ComplianceRule[] {
+  const versionsByBundle = new Map<string, EffectiveVersionRow[]>();
+  for (const version of snapshot.versions) {
+    const bundleVersions = versionsByBundle.get(version.bundle_key) ?? [];
+    bundleVersions.push(version);
+    versionsByBundle.set(version.bundle_key, bundleVersions);
+  }
+  const memberVersionsByPrinciple = new Map<string, Map<string, PrincipleMemberVersionRow[]>>();
+  for (const member of snapshot.principleMembers) {
+    const membersByKey = memberVersionsByPrinciple.get(member.principle_key) ?? new Map<string, PrincipleMemberVersionRow[]>();
+    const rows = membersByKey.get(member.member_key) ?? [];
+    rows.push(member);
+    membersByKey.set(member.member_key, rows);
+    memberVersionsByPrinciple.set(member.principle_key, membersByKey);
+  }
+
+  return (at: string) => {
+    if (snapshot.schemaVersion < CORRECTION_COMPLIANCE_SCHEMA_VERSION) return [];
+    const activeVersions = new Map<string, EffectiveVersionRow>();
+    for (const [bundleKey, bundleVersions] of versionsByBundle) {
+      const activeVersion = activeVersionAt(bundleVersions, at);
+      if (activeVersion) activeVersions.set(bundleKey, activeVersion);
+    }
+
+    const rules: ComplianceRule[] = [];
+    const membersFoldedIntoPrinciples = new Set<string>();
+    for (const [principleKey, members] of memberVersionsByPrinciple) {
+      const principleVersion = activeVersions.get(principleKey);
+      if (!principleVersion || !principleKey.startsWith(PRINCIPLE_PREFIX)) continue;
+      for (const [memberKey, memberRows] of members) {
+        if (!memberRows.some((member) => member.attached_at <= at)) continue;
+        const activeMember = activePrincipleMemberVersionAt(memberRows, at);
+        membersFoldedIntoPrinciples.add(memberKey);
+        if (!activeMember || activeMember.visibility !== "owner" ||
+          !["explicit_continuing", "inferred"].includes(activeMember.lifetime_kind)) continue;
+        const sourceRule: PrincipleSourceRuleRow = {
+          topic_key: activeMember.topic_key,
+          rule_text: activeMember.rule_text,
+          polarity: activeMember.polarity,
+          condition_key: activeMember.condition_key,
+          conditions: activeMember.conditions,
+        };
+        if (!hasSupportedPrincipleSourceCondition(sourceRule) ||
+          (activeMember.polarity !== "positive" && activeMember.polarity !== "negative")) continue;
+        const rule: ComplianceRule = {
+          bundleKey: principleKey,
+          version: principleVersion.version,
+          topicKey: activeMember.topic_key,
+          ruleText: activeMember.rule_text,
+          polarity: activeMember.polarity,
+        };
+        if (getComplianceChecker(rule) !== null) rules.push(rule);
+      }
+    }
+
+    for (const [bundleKey, version] of activeVersions) {
+      if (bundleKey.startsWith(PRINCIPLE_PREFIX) || membersFoldedIntoPrinciples.has(bundleKey)) continue;
+      const rule: ComplianceRule = {
+        bundleKey,
+        version: version.version,
+        topicKey: version.topic_key,
+        ruleText: version.rule_text,
+        polarity: version.polarity as ComplianceRule["polarity"],
+      };
+      if (getComplianceChecker(rule) !== null) rules.push(rule);
+    }
+    return rules;
+  };
+}
+
+export function readEffectiveCheckerRules(db: Database.Database, at: string): ComplianceRule[] {
+  return createEffectiveCheckerRuleReader(readEffectiveCheckerRuleSnapshot(db))(at);
+}
+
 export function persistCorrectionComplianceViolations(
   storage: SQLiteStorage,
   input: {
@@ -434,6 +605,7 @@ export function persistCorrectionComplianceViolations(
     assistantText: string;
     outputTargetText?: string;
     detectedAt: string;
+    persistViolations?: boolean;
   },
 ): ComplianceViolation[] {
   if (!isCorrectionComplianceEnabled() || input.assistantText.trim().length === 0) return [];
@@ -442,15 +614,17 @@ export function persistCorrectionComplianceViolations(
   }
 
   return storage.runCorrectionTransaction(({ db }) => {
-    const rules = readInjectedConfirmedRules(db as unknown as Database.Database, input.sessionIdHash);
-    const assessments = assessCorrectionCompliance(input.assistantText, rules, input.outputTargetText);
-    const violations = assessments
+    const injectedRules = readInjectedConfirmedRules(db as unknown as Database.Database, input.sessionIdHash);
+    const violationAssessments = assessCorrectionCompliance(input.assistantText, injectedRules, input.outputTargetText);
+    const violations = violationAssessments
       .filter((assessment) => assessment.outcome === "violation")
       .map(({ bundleKey, version, checker }) => ({ bundleKey, version, checker }));
     const checksTableExists = db.prepare(
       "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'owner_correction_compliance_checks'",
     ).get();
     if (checksTableExists) {
+      const checkRules = readEffectiveCheckerRules(db as unknown as Database.Database, input.detectedAt);
+      const assessments = assessCorrectionCompliance(input.assistantText, checkRules, input.outputTargetText);
       const assessmentByKey = new Map(assessments.map((assessment) => [
         assessment.bundleKey + ":" + assessment.version + ":" + assessment.checker,
         assessment,
@@ -461,25 +635,26 @@ export function persistCorrectionComplianceViolations(
           session_id_hash, human_ordinal, bundle_key, version, checker, is_compliant, checked_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?)
       `);
-      for (const rule of rules) {
+      for (const rule of checkRules) {
         const checker = getComplianceChecker(rule);
         if (checker === null) continue;
         const checkKey = rule.bundleKey + ":" + rule.version + ":" + checker;
         if (checkKeys.has(checkKey)) continue;
         checkKeys.add(checkKey);
         const assessment = assessmentByKey.get(checkKey);
+        if (!assessment || assessment.outcome === "unproven") continue;
         insertCheck.run(
           input.sessionIdHash,
           input.humanOrdinal,
           rule.bundleKey,
           rule.version,
           checker,
-          Number(assessment?.outcome === "compliant"),
+          Number(assessment.outcome === "compliant"),
           input.detectedAt,
         );
       }
     }
-    if (violations.length === 0) return [];
+    if (input.persistViolations === false || violations.length === 0) return [];
 
     const insert = db.prepare(`
       INSERT OR IGNORE INTO owner_correction_violations (

@@ -185,6 +185,8 @@ e 類（指図の反復）は記憶の規則にしない。理由はオーナー
 
 before の欄は T5（dev）と T18（H2、同日に before=ラウンド3前 HEAD・after=ラウンド3後を同じ判定器・同 manifest・別 scratch で）で測る。閾値は本書で固定、結果を見て触らない（触ったら再生をやり直し、本書を改版）。T5 完了時に before 欄を埋めて commit。
 
+改版 10/08（data-analyst、H2 の中身は未見）: A8 を「適用機会」分母の新定義に改定（旧定義は併記）、A14 ファネル・A15 再発自覚マーカー率を追加。用語と機械判定の手順は節3.1。新指標の閾値は before の新値を測る前に固定した。合否の場: 言い直し率の合否は本番（反映後14日 対 H2 基準）だけ。再生（dev・H2）では言い直しが transcript に固定されて注入の効きが分子に出ないため、再生の合否は配送率と測定器の検査（捕捉率・legacyA8 回帰）に限る。
+
 | ID | 指標 | 測り方 | before | 合格 |
 |---|---|---|---|---|
 | A1 | 壊れた規則文 | 台帳 intent「分からない言葉」の束の `rule_text` が正規表現 `変な|わから|知らな` のいずれかを含む割合 | 0/1（実測。確定束 `oc:v2:e2b0dbcc` の規則文「言葉を使わない」） | 1/1。かつ合成 fixture 8本で修飾語が規則文に残る |
@@ -194,12 +196,39 @@ before の欄は T5（dev）と T18（H2、同日に before=ラウンド3前 HEA
 | A5 | dev の防げた率（台帳の再発。e・x は分母に入らない） | 持ち越し online 再生、project 別 | 13/61 = 21.3%（再測定。数え方修正後。旧 15/61（欠陥ある判定）は「防げた」扱いが2件多かった。B2〜B10。B1 の再発 16 件は別集計 0/16） | before + 20pt 以上 |
 | A6 | 初見への汎化（H2） | 同上、H2。ラウンド3前 HEAD と後を同条件で | T18 | after ≥30% かつ before + 15pt 以上 |
 | A7 | 抽象化の純度・安全 | 採用された原則の構成員が台帳の別 intent をまたぐ数／差分ガード違反で採用された数／構成員 ≥3 session・言い回し ≥2 の原則数／夜間バッチの Codex 呼出数／Codex 残り 30% 未満の晩の呼出数／hook 内 LLM 呼出／1晩の枠消費（呼出前後の使用率差） | – | 0／0／≥1（dev か H2 の再生で）／≤1回/晩／0／0／≤3pt（週枠） |
-| A8 | 強弱 | 合成 suite（守られなかった +1、3日に1回、使われない −1・下限1、効いた = 動かさず時計を戻す、根拠増で調整が消えない、routing 再開で引継なし）。dev 再生の「注入後再訂正率」= 注入後に同束の根拠が付いた session 数 ÷ body つき注入のあった session 数 | 注入後再訂正率: 旧 3/72（欠陥ある数え方＝stale_version）→ 新 3/72 = 4.2%（再測定。数え方を直しても同値。HEAD 純粋ビルドは未来漏れで 7/111 = 6.3%） | suite 全通過、率 ≤ before × 0.7 |
+| A8 | 強弱／言い直し率（10/08 定義改定、H2 測定前に固定、旧値併記） | 合成 suite（守られなかった +1、3日に1回、使われない −1・下限1、効いた = 動かさず時計を戻す、根拠増で調整が消えない、routing 再開で引継なし）。**新定義** 言い直し率 = 適用機会のうち、次の人間発話 t+1 が同じ単位の言い直しだった数 ÷ 適用機会数（単位・有効区間・適用機会 O1/O2・言い直しの出どころは節3.1。注入の有無を問わない。t+1 は結果にだけ使い分母に入れない）。補助: 捕捉率 = 直前 turn が適用機会だった言い直し ÷ 全言い直し。**旧定義**（併記、合否に使わない）: 注入後に同束の根拠が付いた session 数 ÷ body つき注入のあった session 数（`summarizeInjectionAfterCorrection`、出力 `funnel.legacyA8`） | 新定義の基準 = H2 窓（10/08 以後 14日）を after ビルドで再生し evidence source で出した `funnel.overall.recorrectRate`（T18）。after = 本番反映後 14 日を `correction-funnel` CLI（本番 DB、evidence source、同じ after コード）で測る。dev 再生でも同じ値を出すが報告のみ（再生では言い直しが transcript に固定され、注入が効いても分子が動かない。動くのは分母だけ）。台帳 source は再生の突合用。旧定義: 3/72 = 4.2%（台帳基準 4/72。HEAD 純粋ビルドは未来漏れで 7/111） | suite 全通過。新定義（本番のみ合否）: 反映後14日 ≤ 基準 × 0.7。適用機会 <30 なら未算出。再生（dev・H2）は測定器の検査だけ合否: 捕捉率 ≥70%（未満なら O1/O2 を dev で直してから H2、H2 の中身で直さない）、`legacyA8` が旧測定器と同値（before ビルド）。旧定義は参考値 |
 | A9 | 降ろし | firebase-kit の pytest（`test_jev_knowledge.py`・`test_extract_jev_knowledge.py`・`test_jev_advise.py`）全通過／`hooks-selftest.sh --strict` 通過／合成 fixture の通し（提案→取込→カード→合成 prompt で差し込み）1往復／卒業カード分の差し込み ≤150 tokens／Jev 型判定 eval の型・モデル正答率が着手前と同値（API 鍵があるとき） | pytest 現行 | 全通過・差分 0。実データの卒業 0件でも合格 |
 | A10 | ラウンド2 の不変条件 | UserPromptSubmit p95（replay hook-timing）／max／timeout／誤確定（再生の確定・原則一覧目視で振る舞い命令でないもの） | UserPromptSubmit p95 92.0ms／max 96.4ms／timeout 0（hook-timing、実 bin 67回）。確定3束の誤確定 0 | p95 ≤ before + 50ms、max <4000ms、timeout 0、誤確定 ≤1 |
 | A11 | 本番14日の言い直し | 13クラス測定器（`repeat-classes.mjs`）の R7 を除いた合計の1日あたり件数。ラウンド2 反映後の窓（10/07〜10/14）を T18 着手時に測って基準とする | 8.8/日（R7 除外 105件/12日、ラウンド2 前）、ラウンド2 窓 = T18 で測定 | 基準の ≤0.7倍。オーナーが取り消した確定・原則 ≤1 |
 | A12 | Codex 先行と枠表示（firebase-kit） | 枠リーダーの合成 rollout で: plus（5時間窓+週窓）・pro（週窓のみ）・枠切れ（`rate_limit_reached_type` あり）・窓更新後（`resets_at` が過去）・観測なしの5形。枠の通知は残り 2.0%→出る、2.1%→出ない、枠切れ→出る、不明→出ない。実機の最新 rollout の読取値が末尾イベントの `used_percent` と一致。経路選択は a09 の合成招聘文で、残り 50%→route C・gpt-6-luna・max、残り 2%→route A、不明→route A、`codex_first` なしの型→常に route A。本番は R7 発話数/日 | 実装なし／R7 17件/12日=1.4/日 | 合成は全期待どおり、実機差 0、Jev 型判定 eval の正答率が着手前と同値（鍵があるとき）、R7 ≤0.7/日（14日平均） |
 | A13 | レビュー暴走停止（firebase-kit） | 合成ログ（レビュー起動の列）で: 同一成果物の3回目まで通り4回目を deny（Astra・Fable・Sol 交互でも合算）／直前と指摘の 80% 以上が一致した次の起動を deny、指摘が変われば通す／同一成果物の枠消費累計 20pt 以上で Codex レビューを deny、直近60分 50pt 以上で新規 Codex レビューを deny し実装委譲は通す／枠切れ・残り ≤2% で Codex レビューを deny／独立行『レビュー上限解除: オーナー承認済み』で通る／24時間動きなしでリセット／レビューでない起動（実装・要約役・通常の Agent）30件の合成で deny 0 | 上限なし（散文のみ） | 全期待どおり（停止の正解率 100%）、誤停止 0、guard の追加遅延 p95 ≤20ms、shadow 7日の実ログで誤停止 0 |
+| A14 | 適用機会ファネル（確定単位ごと・全体。10/08 追加） | 節3.1 の手順で、単位ごとに 適用機会 → 届いた／届かなかった → 結果（言い直された／違反のみ／守った[検査合格／未検査]）を数える。出す率: 配送率 = 届いた ÷ 適用機会、届いた機会の言い直し率、届かなかった機会の言い直し率、守った(検査合格) ÷ 届いた。再生は台帳 intent 別も出す（束キーは前後ビルドで変わるため intent で突合）。機会の出どころ内訳（O1 のみ／O2 のみ／両方）を併記 | dev: build-before2 と after ビルドを同 manifest・同台帳・別 scratch で online 再生、`reports/online.json` の `funnel`。H2: T18（before=ラウンド3前 HEAD、after=後）。本番: `correction-funnel` CLI（読取のみ）で反映後14日 | 再生（dev・H2）: 配送率 after ≥ before + 20pt。言い直し率と 届いた／届かなかった の言い直し率の差は報告のみ（再生では言い直しが transcript に固定、差は選択効果で因果でない）。本番（反映後14日、evidence source）: 届いた機会の言い直し率 ≤ 届かなかった機会の言い直し率、配送率 ≥ H2 基準。守った(検査合格) ÷ 届いた は報告のみ（検査器 3 topic のみ）。単位別は適用機会 ≥10 の行だけ合否を見る、全体は適用機会 ≥30 でなければ未算出 |
+| A15 | 本番14日の再発自覚マーカー率（「さっきも言った」系。10/08 追加。A3 の反応形「いみわからん」型とは別物） | `repeat-classes.mjs` に固定 regex `REPEAT_SIGNAL_PATTERN` を足す。語彙は `themes.mjs:90` EXPLICIT_CORRECTION の反復部分だけ: `また(?:同じ\|言わせ\|忘れ\|間違え)`／`前(?:回\|にも\|も\|から\|に).{0,16}(?:言\|伝え\|話)`／`何(?:回\|度).{0,16}(?:言わせ\|言った\|言う\|繰り返\|同じ)`／`さっきも`／`言った(?:だろ\|よね)`。`するな`・`違う`等の一般形と、単独の `何度も`（「何度も失敗する」等の非反復文に当たる）は入れない。分母 = `isExcluded`（`repeat-classes.mjs:102`）後の人間発話数 `state.utterances`。同一分・同文の同報は分子・分母とも1件。値 = 一致件数 ÷ 人間発話 × 100 | dev 窓（archive 09-23〜10-05）とラウンド2 窓（10/07〜T18 着手日）を T18 着手時に同コマンドで測る。基準 = ラウンド2 窓 | 反映後14日 ≤ 基準 × 0.7。人間発話 <500 なら n 併記で未算出。A11 と同じ窓・同じ母集団で出す |
+
+dev 測定結果 10/08（司令塔、`.wasurenagusa/reports/round3/funnel-dev.json`、before=f76a1d5＋T3 retrieval.ts、after=6826297＋ファネル＋レビュー修正10件、H2 未見）:
+- 測定器の回帰: legacyA8 before 3/72・after 5/72（既存値と一致）。
+- 修正前の値（機会 150、o2Only 124）は unproven 検査を違反・機会に数えた欠陥値。修正後は O2 0（dev の確定束に検査器つき単位の判定できた検査なし）。
+- A14: 適用機会 26→35（全部 O1）、配送率 57.7%→51.4%、言い直し率 3.8%→5.7%。**捕捉率 3.6%→7.1%＝床 70% 不合格**。言い直し 28 件中 26〜27 件は turn t に機会が立たない（オーナー発話に話題語がなく、O1 は発話側しか見ない）。→ A14・A8 新は参考値（captureRate 必ず併記）。床は動かさない。
+- A15: dev 1/1225（0.08/100）。信号なし → 未成立、参考。
+- A10: after p95 SessionStart 108ms・UPS 106ms・Stop 407ms（合成 fixture）。before ビルドは測定器の import 差で未測定。反映前 dist の合成1往復 Stop 373ms と同水準。UPS は基準 92ms＋50ms 以内。
+- 決定: H2 の本線＝A11（1日あたり言い直し）と、同じ件数を人間発話100あたりにした値（活動量差の補正）。どちらも適用機会に依存しない。A14 は補助。捕捉率を上げる＝AI の行動側で機会を判定する必要 → 次ラウンド（行動直前の判定）の入力。
+
+### 3.1 適用機会ファネルの用語と機械判定（A8 新定義・A14 共通。10/08 確定、H2 未見）
+
+目的: A5・旧 A8 は「届いたか」しか測れず、確定が早いほど旧 A8 が悪く見えた（after-dev.json `degraded`）。分母を注入でなく「その注意が当てはまる turn」に置き、届いた／守った／言い直されたを分ける。判定は全部コード（SQL + 既存関数）、オーナー採点なし。再生と本番で同じ計算モジュールを使う（新規 `src/corrections/funnel.ts`、engine と CLI の両方から呼ぶ）。
+
+- 単位: status confirmed の束 `oc:*` または原則 `pr:v1:*`。原則が confirmed の間、構成員の注入・言い直しは原則に畳む（`strength.ts:272-295` の member 扱いと同じ）。構成員は別単位にしない。
+- 有効区間: `owner_correction_versions` で status confirmed・`confirmed_at` ≤ t・（`expires_at` null か > t）・次 version の `effective_from` > t。取消（`store.ts:1188` `cancelCorrectionBundle` → rejected 版）・確定前・期限切れの turn は数えない。
+- turn t: `owner_correction_events` の全行（人間発話ごとに1行、`analyze.ts:246-307`。excerpt 120字）。t = (session_id_hash, human_ordinal)。
+- 適用機会（turn t の情報だけで決める。t+1 を見ない）: O1 または O2。
+  - O1 関連一致: `scoreCorrectionRelevance(extractCorrectionQuery(event.excerpt), 単位の有効版の rule)` ≠ null（`retrieval.ts:144`・`:261`。呼び方は `strength.ts:378-385` と同じ。hook は全文 `context.ts:1135`、指標は excerpt。差は既知で揃えない）。
+  - O2 検査可: 単位に検査器あり（`compliance.ts:195` `getComplianceChecker`）かつ turn t の AI 応答（`getLatestAssistantText`、`analyze.ts:488`）の判定が compliant か violation（unproven は機会でない）。本番の材料 = `owner_correction_compliance_checks`。**検査の対象を注入済み束から「有効な検査器つき単位すべて」へ広げる**（`compliance.ts:375` `readInjectedConfirmedRules` の読出し。`owner_correction_violations` の書込は注入済みのみ維持、`injection-policy.ts:180-215` の再注入経路が violations を読むため）。再生の engine は compliance を呼んでいない（`simulate-engine.mjs:1242` の import に無い）→ Stop 経路で同関数を呼ぶ。
+- 届いた: 同 session・同 compact epoch の `owner_correction_injections` に body_included=1・stdout_status='emitted'・human_ordinal ≤ t の行があり、注入版が t の有効版と同じ意味（`isEvidenceOnlyVersionContinuity`、`compliance.ts:87`。判定器 `adjudicatePrevention` の hasBody `simulate-engine.mjs:663-668` と同じ述語を共有関数にして二重定義を避ける）。turn の epoch: 本番は `owner_correction_pending.output_epoch`（`matched_event_id` 経由、`context.ts:882`）、受領行が無ければ同 session の注入行の最大 epoch（compact 後に再配送が無いと届いたを多く数える、既知）。再生は timeline の epoch。
+- 結果（届いた／届かなかった の各群で排他、1 turn 1結果）: 言い直された = t+1（同 session の次の人間発話）が同じ単位の言い直し。違反のみ = 言い直しなし・t の検査が violation。守った = どちらもなし（内訳: 検査合格 = t の検査 compliant／未検査 = 検査器なしか unproven）。
+- 言い直しの出どころ: 再生の正 = 台帳 `recurrence:"yes"` 行の intent_id が単位の intent と一致（単位の intent = 根拠 event の台帳 intent_id の集合。before-dev.json `a8_decomposition.ledger_based_A8` と同じ突合）。本番 = `owner_correction_evidence` に単位（構成員含む）の行。再生は両方を出し差（件数）を併記。「同じ定義」が成り立つのは 単位・有効区間・適用機会・届いた（全部 `owner_correction_*` の SQL）で、言い直しの出どころだけ再生と本番で違う。
+- 捕捉率: 全言い直し（台帳 yes 行）のうち直前 turn t が適用機会だった割合。O1/O2 の狭さの検査。機会の外で起きた言い直しは分母に入れず `gap` に数える。
+- 出力: 再生 `reports/online.json` の `funnel`（`afterInjectionCorrectionRate` を置換、旧値は `funnel.legacyA8`）。本番 `node dist/cli/correction-funnel.js --since <日付> --until <日付> --json`（読取のみ、`immutable=1`）で同じ形。キー: `funnel.definition`（"v1-20261008"）、`funnel.overall`（`opportunities`・`delivered`・`undelivered` の各 `{recorrected, violationOnly, kept, keptChecked, keptUnchecked}`、`recorrectedTotal`・`recorrectedCaptured`・`captureRate`・`deliveryRate`・`recorrectRate`・`recorrectRateDelivered`・`recorrectRateUndelivered`）、`funnel.byUnit[]`（`unitKey`・`kind`・`topicKey`・`ruleText`・同じ計数）、`funnel.byIntent[]`（再生のみ）、`funnel.recorrectionSource`（"ledger"｜"evidence"）、`funnel.evidenceComparison`（再生のみ）、`funnel.opportunitySources`（`o1Only`・`o2Only`・`both`）、`funnel.legacyA8`。
+- 性能: Stop の検査対象が数束増えるだけ。A10 を再測定（p95 ≤ before + 50ms は不変）。
 
 ## 4. 実装タスク（Codex、1回1変更、依存順）
 
@@ -536,7 +565,7 @@ SessionStart だけの配送を「使われた」に数えていない／同 ses
 4. `node dist/cli/correction-import.js --migrate-v13`（dry-run で DDL 差分を先に確認）→ `--apply`。
 5. 合成1往復は本番 DB の複製（`MEMORY_DIR` 差替え）で: UserPromptSubmit に短文命令、Stop（transcript 付き）、別 session_id で SessionStart。stdout・stderr・`owner_correction_*` を確認、本番 DB 無変化。
 6. firebase-kit で `FORCE_SELFTEST=1 bash .claude/hooks/hooks-selftest.sh --strict`。
-7. 環境変数: `WASURENAGUSA_PRINCIPLES=shadow`、`WASURENAGUSA_STRENGTH=shadow`、`WASURENAGUSA_GRADUATION=off`、`WASURENAGUSA_CORRECTION_LOOP=on`。夜間バッチ用: `WASURENAGUSA_CODEX_BIN`（`codex` の絶対パス）・`WASURENAGUSA_CODEX_QUOTA_CMD`（firebase-kit の枠リーダーの呼び出し）を `scheduler-setup` で plist へ埋める。firebase-kit 側（T10・T16・T17）は commit で全 session に効くため、`REVIEW_LOOP_GUARD=shadow`・`JEV_CODEX_FIRST` 既定を確認してから commit する。
+7. 環境変数: `WASURENAGUSA_PRINCIPLES=shadow`、`WASURENAGUSA_STRENGTH=shadow`、`WASURENAGUSA_GRADUATION=off`、`WASURENAGUSA_CORRECTION_LOOP=on`、`WASURENAGUSA_CORRECTION_COMPLIANCE=on`（節3.1 O2 と守った(検査合格) の材料。off だと A14 は O1 だけに退化し検査合格は常に 0）。夜間バッチ用: `WASURENAGUSA_CODEX_BIN`（`codex` の絶対パス）・`WASURENAGUSA_CODEX_QUOTA_CMD`（firebase-kit の枠リーダーの呼び出し）を `scheduler-setup` で plist へ埋める。firebase-kit 側（T10・T16・T17）は commit で全 session に効くため、`REVIEW_LOOP_GUARD=shadow`・`JEV_CODEX_FIRST` 既定を確認してから commit する。
 8. shadow 7日後に原則・強度の記録を見て（誤合流 0、強度の上下が意図どおり）、`PRINCIPLES=on`→24h 観測→`STRENGTH=on`→24h 観測。`GRADUATION=on` と Jev の取込は最後（提案の diff をオーナー確認、firebase-kit 側で通常 commit）。
 
 止め方（効く順）:
