@@ -1,5 +1,5 @@
 export type CorrectionPrinciplesMode = "off" | "shadow" | "on";
-export type CorrectionGraduationMode = "off" | "on";
+export type CorrectionGraduationMode = "off" | "shadow" | "on";
 export type CorrectionStrengthMode = "off" | "shadow" | "on";
 export type CorrectionLoopMode = "off" | "on";
 export type CorrectionInjectMode = "off" | "on";
@@ -92,7 +92,7 @@ export function readCorrectionFeatureModes(env: NodeJS.ProcessEnv = process.env)
     graduation: readEnvironmentMode({
       name: "WASURENAGUSA_GRADUATION",
       value: env.WASURENAGUSA_GRADUATION,
-      acceptedValues: ["off", "on"],
+      acceptedValues: ["off", "shadow", "on"],
       defaultValue: "off",
       invalidValue: "off",
       lowercase: true,

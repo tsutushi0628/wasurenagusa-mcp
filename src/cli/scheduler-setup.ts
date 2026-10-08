@@ -122,6 +122,15 @@ function getDefaultAbstractionQuotaCommand(): string {
   return resolve(getPackageRoot(), "..", "firebase-kit", ".claude", "hooks", "scripts", "codex-quota.py");
 }
 
+function getDefaultJevImportCommand(): string {
+  const scriptPath = join(dirname(getDefaultAbstractionQuotaCommand()), "extract-jev-knowledge.py");
+  return `python3 ${shellQuote(scriptPath)}`;
+}
+
+function getDefaultJevImportOutputPath(): string {
+  return resolve(dirname(getDefaultAbstractionQuotaCommand()), "..", "jev-knowledge.graduated.json");
+}
+
 function resolveAbstractionQuotaCommand(env: NodeJS.ProcessEnv = process.env): string {
   return env.WASURENAGUSA_CODEX_QUOTA_CMD?.trim() || getDefaultAbstractionQuotaCommand();
 }
@@ -203,8 +212,12 @@ export function buildGraduationPlistXml(
   nodePath: string,
   scriptPath: string,
   logPath: string,
+  jevImportCommand = getDefaultJevImportCommand(),
+  jevImportOutputPath = getDefaultJevImportOutputPath(),
 ): string {
   const workingDirectory = resolve(dirname(scriptPath), "..", "..");
+  let pathValue = "";
+  if (process.env.PATH !== undefined) pathValue = process.env.PATH;
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
@@ -230,6 +243,15 @@ export function buildGraduationPlistXml(
     '  <string>' + escapeXml(logPath) + '</string>',
     '  <key>StandardErrorPath</key>',
     '  <string>' + escapeXml(logPath) + '</string>',
+    '  <key>EnvironmentVariables</key>',
+    '  <dict>',
+    '    <key>PATH</key>',
+    '    <string>' + escapeXml(pathValue) + '</string>',
+    '    <key>WASURENAGUSA_JEV_IMPORT_CMD</key>',
+    '    <string>' + escapeXml(jevImportCommand) + '</string>',
+    '    <key>WASURENAGUSA_JEV_IMPORT_OUT</key>',
+    '    <string>' + escapeXml(jevImportOutputPath) + '</string>',
+    '  </dict>',
     '</dict>',
     '</plist>',
   ].join("\n");
@@ -622,7 +644,14 @@ function getGraduationCrontabEntry(): string {
   const nodePath = process.execPath;
   const scriptPath = getGraduationJobPath();
   const logPath = join(getLogDir(), "graduation-export.log");
-  return "0 6 * * * " + shellQuote(nodePath) + " " + shellQuote(scriptPath) + " >> " + shellQuote(logPath) +
+  const jevImportCommand = getDefaultJevImportCommand();
+  const jevImportOutputPath = getDefaultJevImportOutputPath();
+  let pathValue = "";
+  if (process.env.PATH !== undefined) pathValue = process.env.PATH;
+  return "0 6 * * * PATH=" + shellQuote(pathValue) +
+    " WASURENAGUSA_JEV_IMPORT_CMD=" + shellQuote(jevImportCommand) +
+    " WASURENAGUSA_JEV_IMPORT_OUT=" + shellQuote(jevImportOutputPath) +
+    " " + shellQuote(nodePath) + " " + shellQuote(scriptPath) + " >> " + shellQuote(logPath) +
     " 2>&1 " + GRADUATION_CRONTAB_MARKER;
 }
 

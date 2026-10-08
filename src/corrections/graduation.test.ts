@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -7,7 +7,11 @@ import { initializeCorrectionSchema } from "../storage/correction-schema.js";
 import { migrateV11ToV12, migrateV12ToV13 } from "../storage/migration.js";
 import { SQLiteStorage } from "../storage/sqlite.js";
 import { persistCorrectionComplianceViolations } from "./compliance.js";
-import { createCorrectionGraduationProposal, resolveGraduationMode } from "./graduation.js";
+import {
+  createCorrectionGraduationProposal,
+  recordSuccessfulCorrectionGraduationImport,
+  resolveGraduationMode,
+} from "./graduation.js";
 import { addCorrectionPrincipleMembers, confirmCorrectionPrinciple, createCorrectionPrinciple } from "./principles.js";
 import { runStrengthJob } from "./strength.js";
 
@@ -142,6 +146,24 @@ describe("owner correction graduation", () => {
         ) VALUES (?, 1, ?, 'synthetic-hash', ?, 'general', 'negative', 'owner', ?, ?, NULL,
           ?, 'synthetic-continuation', '[]', ?, 'synthetic-fixture')
       `).run(input.bundleKey, ruleText, conditions, status, confirmedAt, input.lifetimeKind, input.confirmedAt);
+      if (status === "confirmed") {
+        const eventId = `synthetic-bundle-evidence-${input.bundleKey}`;
+        const observedAt = input.confirmedAt;
+        db.prepare(`
+          INSERT INTO owner_correction_events (
+            event_id, session_id_hash, source_uuid_hash, human_ordinal, observed_at, available_at,
+            source_kind, excerpt, previous_action, action_first_locator_hash, action_last_locator_hash,
+            project, scope, raw_text_hash, source_locator_hash, processed_at
+          ) VALUES (?, ?, NULL, 1, ?, ?, 'user', '合成束根拠', 'action_unknown', NULL, NULL,
+            'owner', 'owner', ?, ?, ?)
+        `).run(eventId, `synthetic-bundle-session-${input.bundleKey}`, observedAt, observedAt,
+          `synthetic-bundle-raw-${input.bundleKey}`, `synthetic-bundle-locator-${input.bundleKey}`, observedAt);
+        db.prepare(`
+          INSERT INTO owner_correction_evidence (
+            event_id, bundle_key, source, score, detector_version, conditions, polarity
+          ) VALUES (?, ?, 'request_repeat', 2, 'fixture-v1', '[]', 'negative')
+        `).run(eventId, input.bundleKey);
+      }
     });
   }
 
@@ -321,9 +343,48 @@ describe("owner correction graduation", () => {
     expect(entry).toMatchObject({
       topic_key: "principle",
       delivery: "scene",
-      triggers: expect.arrayContaining(["略号"]),
+      triggers: expect.arrayContaining(["工程略号"]),
     });
     expect(entry?.types).toEqual(Array.from({ length: 38 }, (_value, index) => `a${String(index + 1).padStart(2, "0")}`));
+  });
+
+  it("規則文から引き金語を順序どおり抽出し、一般語だけならtopic固定語に戻す", () => {
+    const confirmedAt = "2026-10-01T00:00:00.000Z";
+    const codexRuleKey = `oc:v2:${"1".repeat(64)}`;
+    const genericRuleKey = `oc:v2:${"2".repeat(64)}`;
+    const longRuleKey = `oc:v2:${"3".repeat(64)}`;
+    addBundle({
+      bundleKey: codexRuleKey,
+      topicKey: "verification",
+      lifetimeKind: "inferred",
+      confirmedAt,
+      ruleText: "Codexの枠を毎回確認する仕組みはいいんだが、まいかい出力するな。",
+    });
+    addBundle({
+      bundleKey: genericRuleKey,
+      topicKey: "verification",
+      lifetimeKind: "inferred",
+      confirmedAt,
+      ruleText: "毎回出力確認する仕組みで応答し回答を使用する作業が必要な場合",
+    });
+    addBundle({
+      bundleKey: longRuleKey,
+      topicKey: "unknown",
+      lifetimeKind: "inferred",
+      confirmedAt,
+      ruleText: "alpha テスト 漢字 beta gamma delta epsilon zeta eta theta iota",
+    });
+
+    const proposal = createCorrectionGraduationProposal(storage, {
+      at: "2026-10-08T00:00:00.000Z",
+      sourceHead: "a".repeat(40),
+    });
+    const findTriggers = (bundleKey: string): string[] | undefined =>
+      proposal?.principles.find((entry) => entry.principle_key === bundleKey)?.triggers;
+
+    expect(findTriggers(codexRuleKey)).toEqual(["Codex"]);
+    expect(findTriggers(genericRuleKey)).toEqual(["出典", "原本", "検証", "確認"]);
+    expect(findTriggers(longRuleKey)).toEqual(["alpha", "テスト", "漢字", "beta", "gamma", "delta", "epsilon", "zeta"]);
   });
 
   it("検査器のない構成元だけの原則は既存のsettled記録があっても卒業させない", () => {
@@ -397,13 +458,13 @@ describe("owner correction graduation", () => {
     expect(proposal?.principles.find((principle) => principle.principle_key === principleKey)).toMatchObject({
       topic_key: "principle",
       delivery: "scene",
-      triggers: expect.arrayContaining(["略号"]),
-      evidence: { sessions: 5, days: 3, injected_sessions: 5, failures_after_injection: 0, violations: 0 },
+      triggers: expect.arrayContaining(["工程略号"]),
+      evidence: { sessions: 2, days: 1, injected_sessions: 2, failures_after_injection: 0, violations: 0 },
     });
     expect(sourceStatuses).toEqual({ bundle_status: "candidate", version_status: "candidate" });
   });
 
-  it("H1の適用機会がない原則は卒業提案に出ない", () => {
+  it("H1の適用機会がなくsettledがない原則も卒業提案に出る", () => {
     const confirmedAt = "2026-09-20T00:00:00.000Z";
     const memberKey = `oc:v2:${"d".repeat(64)}`;
     const principleKey = addCandidatePrinciple(memberKey, confirmedAt);
@@ -414,7 +475,7 @@ describe("owner correction graduation", () => {
       sourceHead: "c".repeat(40),
     });
 
-    expect(proposal?.principles.map((principle) => principle.principle_key)).not.toContain(principleKey);
+    expect(proposal?.principles.map((principle) => principle.principle_key)).toContain(principleKey);
     const settledEvents = storage.runCorrectionTransaction(({ db }) => db.prepare(`
       SELECT at FROM owner_correction_strength_events
       WHERE bundle_key = ? AND reason = 'manual'
@@ -457,14 +518,82 @@ describe("owner correction graduation", () => {
       sourceHead: "d".repeat(40),
     });
 
-    expect(proposal?.principles.map((principle) => principle.principle_key)).not.toContain(principleKey);
+    expect(proposal?.principles.map((principle) => principle.principle_key)).toContain(principleKey);
+  });
+
+  it("settledなし・確定後7日未満でもconfirmed owner継続束を提案する", () => {
+    const bundleKey = `oc:v2:${"9".repeat(64)}`;
+    addBundle({
+      bundleKey,
+      topicKey: "verification",
+      lifetimeKind: "explicit_continuing",
+      confirmedAt: "2026-10-05T00:00:00.000Z",
+    });
+
+    const proposal = createCorrectionGraduationProposal(storage, {
+      at: "2026-10-08T00:00:00.000Z",
+      sourceHead: "a".repeat(40),
+    });
+
+    expect(proposal?.principles.find((principle) => principle.principle_key === bundleKey)).toMatchObject({
+      delivery: "scene",
+      evidence: {
+        sessions: 1,
+        days: 1,
+        injected_sessions: 1,
+      },
+    });
+    const settledEvents = storage.runCorrectionTransaction(({ db }) => db.prepare(`
+      SELECT at FROM owner_correction_strength_events
+      WHERE bundle_key = ? AND reason = 'manual'
+    `).all(bundleKey));
+    expect(settledEvents).toEqual([]);
+  });
+
+  it("project可視・model_routing・取消・期限切れ・係争は提案しない", () => {
+    const confirmedAt = "2026-10-05T00:00:00.000Z";
+    const eligibleKey = `oc:v2:${"1".repeat(64)}`;
+    const projectKey = `oc:v2:${"2".repeat(64)}`;
+    const routingKey = `oc:v2:${"3".repeat(64)}`;
+    const cancelledKey = `oc:v2:${"4".repeat(64)}`;
+    const expiredKey = `oc:v2:${"5".repeat(64)}`;
+    const disputedKey = `oc:v2:${"6".repeat(64)}`;
+    addBundle({ bundleKey: eligibleKey, topicKey: "verification", lifetimeKind: "inferred", confirmedAt });
+    addBundle({ bundleKey: projectKey, topicKey: "verification", lifetimeKind: "inferred", confirmedAt });
+    addBundle({ bundleKey: routingKey, topicKey: "model_routing", lifetimeKind: "routing", confirmedAt });
+    addBundle({ bundleKey: cancelledKey, topicKey: "verification", lifetimeKind: "inferred", confirmedAt });
+    addBundle({ bundleKey: expiredKey, topicKey: "verification", lifetimeKind: "inferred", confirmedAt });
+    addBundle({ bundleKey: disputedKey, topicKey: "verification", lifetimeKind: "inferred", confirmedAt });
+    storage.runCorrectionTransaction(({ db }) => {
+      db.prepare("UPDATE owner_correction_bundles SET visibility = 'project' WHERE bundle_key = ?").run(projectKey);
+      db.prepare("UPDATE owner_correction_versions SET visibility = 'project' WHERE bundle_key = ?").run(projectKey);
+      db.prepare("UPDATE owner_correction_bundles SET status = 'rejected' WHERE bundle_key = ?").run(cancelledKey);
+      db.prepare("UPDATE owner_correction_versions SET status = 'rejected' WHERE bundle_key = ?").run(cancelledKey);
+      db.prepare("UPDATE owner_correction_bundles SET expires_at = '2026-10-07T00:00:00.000Z' WHERE bundle_key = ?").run(expiredKey);
+      db.prepare("UPDATE owner_correction_versions SET expires_at = '2026-10-07T00:00:00.000Z' WHERE bundle_key = ?").run(expiredKey);
+      db.prepare("UPDATE owner_correction_bundles SET status = 'disputed' WHERE bundle_key = ?").run(disputedKey);
+      db.prepare("UPDATE owner_correction_versions SET status = 'disputed' WHERE bundle_key = ?").run(disputedKey);
+    });
+
+    const proposal = createCorrectionGraduationProposal(storage, {
+      at: "2026-10-08T00:00:00.000Z",
+      sourceHead: "b".repeat(40),
+    });
+    const keys = proposal?.principles.map((principle) => principle.principle_key) ?? [];
+
+    expect(keys).toContain(eligibleKey);
+    expect(keys).not.toContain(projectKey);
+    expect(keys).not.toContain(routingKey);
+    expect(keys).not.toContain(cancelledKey);
+    expect(keys).not.toContain(expiredKey);
+    expect(keys).not.toContain(disputedKey);
   });
 
   it("settledな原則をscene提案に載せ、routing・taskの寿命は載せず、提案に生根拠を含めない", () => {
     const confirmedAt = "2026-09-28T00:00:00.000Z";
     const settledAt = "2026-10-01T00:00:00.000Z";
     const principleKey = `pr:v1:${"a".repeat(64)}`;
-    const memberKey = "oc:v2:synthetic-member";
+    const memberKey = `oc:v2:${"c".repeat(64)}`;
     addBundle({
       bundleKey: principleKey,
       topicKey: "verification",
@@ -483,7 +612,7 @@ describe("owner correction graduation", () => {
         term: SYNTHETIC_SECRET_LIKE,
       },
     });
-    const complianceMemberKey = "oc:v2:synthetic-compliance-member";
+    const complianceMemberKey = `oc:v2:${"b".repeat(64)}`;
     addBundle({
       bundleKey: complianceMemberKey,
       topicKey: "expression_policy",
@@ -545,6 +674,7 @@ describe("owner correction graduation", () => {
       topicKey: "unknown",
       lifetimeKind: "explicit_continuing",
       confirmedAt,
+      ruleText: "毎回出力確認する仕組みが必要な場合",
     });
     addSettledEvent(alwaysKey, settledAt);
     const recentKey = `pr:v1:${"e".repeat(64)}`;
@@ -576,20 +706,21 @@ describe("owner correction graduation", () => {
     });
 
     expect(proposal).toMatchObject({ schema: 1, generated_at: "2026-10-07T00:00:00.000Z" });
-    expect(proposal?.principles).toHaveLength(2);
+    expect(proposal?.principles).toHaveLength(5);
     expect(proposal?.principles.find((entry) => entry.principle_key === principleKey)).toMatchObject({
       principle_key: principleKey,
       topic_key: "verification",
       delivery: "scene",
-      triggers: expect.arrayContaining(["検証", "合成資料"]),
+      triggers: expect.arrayContaining(["検証"]),
       evidence: {
-        sessions: 5,
-        days: 3,
-        injected_sessions: 5,
+        sessions: 3,
+        days: 1,
+        injected_sessions: 3,
         failures_after_injection: 0,
         violations: 0,
       },
     });
+    expect(proposal?.principles.find((entry) => entry.principle_key === principleKey)?.triggers).not.toContain("合成資料");
     expect(proposal?.principles.map((entry) => entry.principle_key)).not.toContain("oc:v2:synthetic-routing");
     expect(proposal?.principles.map((entry) => entry.principle_key)).not.toContain(routingMemberPrincipleKey);
     expect(proposal?.principles.map((entry) => entry.principle_key)).not.toContain("oc:v2:synthetic-task");
@@ -609,7 +740,7 @@ describe("owner correction graduation", () => {
     const confirmedAt = "2026-09-28T00:00:00.000Z";
     const settledAt = "2026-10-01T00:00:00.000Z";
     const principleKey = `pr:v1:${"b".repeat(64)}`;
-    const memberKey = "oc:v2:synthetic-member-revoked";
+    const memberKey = `oc:v2:${"e".repeat(64)}`;
     addBundle({ bundleKey: principleKey, topicKey: "verification", lifetimeKind: "inferred", confirmedAt });
     addBundle({
       bundleKey: memberKey,
@@ -632,6 +763,12 @@ describe("owner correction graduation", () => {
       sourceHead: "b".repeat(40),
     });
     expect(initial?.principles.map((entry) => entry.principle_key)).toContain(principleKey);
+    const knowledgePath = join(tempDir, "jev-knowledge.json");
+    writeFileSync(knowledgePath, JSON.stringify({
+      version: 1,
+      cards: [{ id: "g-synthetic", evidence_ids: [principleKey] }],
+    }), "utf8");
+    recordSuccessfulCorrectionGraduationImport(storage, initial!, knowledgePath, "2026-10-07T00:00:00.000Z");
     addNewEvidence(memberKey, "2026-10-08T00:00:00.000Z");
 
     const afterEvidence = createCorrectionGraduationProposal(storage, {

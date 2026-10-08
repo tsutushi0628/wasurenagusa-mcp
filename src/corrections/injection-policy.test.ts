@@ -8,7 +8,10 @@ import { migrateV11ToV12, migrateV12ToV13 } from "../storage/migration.js";
 import { SQLiteStorage } from "../storage/sqlite.js";
 import { detectOwnerCorrections } from "./detector.js";
 import { extractOwnerEvent } from "./events.js";
-import { createCorrectionGraduationProposal } from "./graduation.js";
+import {
+  createCorrectionGraduationProposal,
+  recordSuccessfulCorrectionGraduationImport,
+} from "./graduation.js";
 import { selectCorrectionInjections, type CorrectionInjectionRequest } from "./injection-policy.js";
 import { renderCorrectionRules } from "./render.js";
 import { correctionConditionKey, serializeCorrectionRuleInput } from "./rule-template.js";
@@ -411,14 +414,21 @@ describe("owner correction injection policy", () => {
     expect(selected.rules.every((rule) => rule.bundleKey.startsWith("confirmed-"))).toBe(true);
   });
 
-  it("提案だけでは配送を止めず、Jev受取後にprompt・refreshから外し、startには残す", () => {
+  it("提案だけでは配送を止めず、Jev受取後にSessionStart・prompt・refreshから外す", () => {
     migrateToV13();
     process.env.WASURENAGUSA_GRADUATION = "on";
     process.env.WASURENAGUSA_PRINCIPLES = "on";
     delete process.env.WASURENAGUSA_JEV_KNOWLEDGE_PATH;
     const principleKey = `pr:v1:${"c".repeat(64)}`;
     const memberKey = `oc:v2:${"d".repeat(64)}`;
+    const alwaysKey = `oc:v2:${"a".repeat(64)}`;
     addRule({ bundleKey: principleKey, topicKey: "principle", lastSeenAt: "2026-09-28T00:00:00.000Z" });
+    addRule({
+      bundleKey: alwaysKey,
+      topicKey: "unknown",
+      ruleText: "毎回出力確認する仕組みが必要な場合",
+      lastSeenAt: "2026-09-28T00:00:00.000Z",
+    });
     const complianceMemberKey = "oc:v2:" + "e".repeat(64);
     addRule({
       bundleKey: complianceMemberKey,
@@ -442,11 +452,18 @@ describe("owner correction injection policy", () => {
     storage.runCorrectionTransaction(({ db }) => {
       db.prepare("INSERT INTO owner_correction_principle_members (principle_key, member_key, attached_at, attach_source) VALUES (?, ?, '2026-09-28T00:00:00.000Z', 'cluster')").run(principleKey, complianceMemberKey);
     });
+    addCorrectionEvidence(memberKey, 1, "request_repeat");
+    addCorrectionEvidence(complianceMemberKey, 1, "request_repeat");
+    addCorrectionEvidence(alwaysKey, 1, "request_repeat");
     const proposal = createCorrectionGraduationProposal(storage, {
       at: "2026-10-07T00:00:00.000Z",
       sourceHead: "f".repeat(40),
     });
     expect(proposal?.principles.map((principle) => principle.principle_key)).toContain(principleKey);
+    expect(proposal?.principles.find((principle) => principle.principle_key === alwaysKey)).toMatchObject({
+      delivery: "always",
+      triggers: [],
+    });
 
     const knowledgePath = join(tempDir, "jev-knowledge.json");
     writeFileSync(knowledgePath, JSON.stringify({ version: 1, cards: [] }), "utf8");
@@ -468,6 +485,7 @@ describe("owner correction injection policy", () => {
       version: 1,
       cards: [{ id: "g-synthetic", evidence_ids: [principleKey] }],
     }), "utf8");
+    recordSuccessfulCorrectionGraduationImport(storage, proposal!, knowledgePath, "2026-10-08T00:00:00.000Z");
 
     const prompt = selectCorrectionInjections(storage, request({
       at: "2026-10-08T00:00:00.000Z",
@@ -487,7 +505,20 @@ describe("owner correction injection policy", () => {
 
     expect(prompt.rules.map((rule) => rule.bundleKey)).not.toContain(principleKey);
     expect(refresh.rules.map((rule) => rule.bundleKey)).not.toContain(principleKey);
-    expect(start.rules.map((rule) => rule.bundleKey)).toContain(principleKey);
+    expect(start.rules.map((rule) => rule.bundleKey)).not.toContain(principleKey);
+    expect(prompt.rules.map((rule) => rule.bundleKey)).toContain(alwaysKey);
+    expect(refresh.rules.map((rule) => rule.bundleKey)).toContain(alwaysKey);
+    expect(start.rules.map((rule) => rule.bundleKey)).toContain(alwaysKey);
+
+    process.env.WASURENAGUSA_JEV_KNOWLEDGE_PATH = join(tempDir, "missing-jev-knowledge.json");
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const unreadable = selectCorrectionInjections(storage, request({
+      at: "2026-10-08T00:00:00.000Z",
+      trigger: "prompt",
+      humanOrdinal: 1,
+    }));
+    stderrSpy.mockRestore();
+    expect(unreadable.rules.map((rule) => rule.bundleKey)).toContain(principleKey);
   });
 
   it("schema v12では卒業表を参照せず既存の注入を続ける", () => {
@@ -548,14 +579,27 @@ describe("owner correction injection policy", () => {
   it("卒業後に新根拠が届いた発話では取消してprompt注入へ戻す", () => {
     migrateToV13();
     process.env.WASURENAGUSA_GRADUATION = "on";
-    addRule({ bundleKey: "graduation-revoked", topicKey: "verification" });
+    const bundleKey = `oc:v2:${"7".repeat(64)}`;
+    const knowledgePath = join(tempDir, "jev-knowledge.json");
+    process.env.WASURENAGUSA_JEV_KNOWLEDGE_PATH = knowledgePath;
+    addRule({ bundleKey, topicKey: "verification" });
     storage.runCorrectionTransaction(({ db }) => {
       db.prepare(`
         INSERT INTO owner_correction_graduations (bundle_key, graduated_at, proposal_hash)
         VALUES (?, '2026-10-02T00:00:00.000Z', 'synthetic-proposal-hash')
-      `).run("graduation-revoked");
+      `).run(bundleKey);
     });
-    addCorrectionEvidence("graduation-revoked", 1);
+    writeFileSync(knowledgePath, JSON.stringify({
+      version: 1,
+      cards: [{ id: "g-synthetic", evidence_ids: [bundleKey] }],
+    }), "utf8");
+    const beforeEvidence = selectCorrectionInjections(storage, request({
+      at: "2026-10-02T12:00:00.000Z",
+      trigger: "prompt",
+      humanOrdinal: 1,
+    }));
+    expect(beforeEvidence.rules.map((rule) => rule.bundleKey)).not.toContain(bundleKey);
+    addCorrectionEvidence(bundleKey, 1);
 
     const result = selectCorrectionInjections(storage, request({
       at: "2026-10-04T00:00:00.000Z",
@@ -564,10 +608,25 @@ describe("owner correction injection policy", () => {
     }));
     const graduation = storage.runCorrectionTransaction(({ db }) => db.prepare(`
       SELECT revoked_at FROM owner_correction_graduations WHERE bundle_key = ?
-    `).get("graduation-revoked") as { revoked_at: string | null });
+    `).get(bundleKey) as { revoked_at: string | null });
 
     expect(graduation.revoked_at).toBe("2026-10-04T00:00:00.000Z");
-    expect(result.rules.map((rule) => rule.bundleKey)).toContain("graduation-revoked");
+    expect(result.rules.map((rule) => rule.bundleKey)).toContain(bundleKey);
+
+    const nextProposal = createCorrectionGraduationProposal(storage, {
+      at: "2026-10-05T00:00:00.000Z",
+      sourceHead: "e".repeat(40),
+    });
+    expect(nextProposal?.principles).toEqual([]);
+    writeFileSync(knowledgePath, JSON.stringify({ version: 1, cards: [] }), "utf8");
+    recordSuccessfulCorrectionGraduationImport(storage, nextProposal!, knowledgePath, "2026-10-05T00:00:00.000Z");
+    const restored = selectCorrectionInjections(storage, request({
+      at: "2026-10-05T00:00:00.000Z",
+      trigger: "prompt",
+      humanOrdinal: 3,
+    }));
+    expect(result.rules.map((rule) => rule.bundleKey)).toContain(bundleKey);
+    expect(restored.rules.map((rule) => rule.bundleKey)).toContain(bundleKey);
   });
 
   it("卒業offではJev反映済みの原則をprompt注入へ戻す", () => {

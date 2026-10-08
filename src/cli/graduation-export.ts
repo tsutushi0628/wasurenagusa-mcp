@@ -6,7 +6,10 @@ import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { config, getCliMemoryDirectory } from "../config.js";
 import { readCorrectionFeatureModes } from "../corrections/environment-mode.js";
-import { createCorrectionGraduationProposal } from "../corrections/graduation.js";
+import {
+  createCorrectionGraduationProposal,
+  recordSuccessfulCorrectionGraduationImport,
+} from "../corrections/graduation.js";
 import { CORRECTION_PRINCIPLES_SCHEMA_VERSION } from "../storage/correction-schema.js";
 import { getSchemaVersion } from "../storage/schema.js";
 import { SQLiteStorage } from "../storage/sqlite.js";
@@ -18,8 +21,9 @@ export interface GraduationExportArguments {
 }
 
 export interface GraduationExportResult {
-  mode: "off" | "on";
+  mode: "off" | "shadow" | "on";
   status: "disabled" | "schema_unavailable" | "written";
+  importStatus?: "shadow" | "not_configured" | "imported" | "failed";
   skippedReason?: "correction_loop_off" | "feature_off";
   generatedAt?: string;
   principleCount: number;
@@ -63,6 +67,40 @@ function readSchemaVersion(storage: SQLiteStorage): number {
   return storage.runCorrectionTransaction(({ db }) => getSchemaVersion(db as unknown as Database.Database));
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function getJevImportOutputPath(packageRoot: string): string {
+  const configuredPath = process.env.WASURENAGUSA_JEV_IMPORT_OUT?.trim();
+  if (configuredPath !== undefined && configuredPath !== "") return resolve(configuredPath);
+  return resolve(packageRoot, "..", "firebase-kit", ".claude", "hooks", "jev-knowledge.graduated.json");
+}
+
+function runJevImport(command: string, proposalPath: string, knowledgePath: string, packageRoot: string): boolean {
+  const commandText = `${command} --graduation ${shellQuote(proposalPath)} --out ${shellQuote(knowledgePath)}`;
+  try {
+    execFileSync("/bin/sh", ["-c", commandText], {
+      cwd: packageRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return true;
+  } catch (error) {
+    let stderr = "";
+    if (error !== null && typeof error === "object" && "stderr" in error) {
+      const errorStderr = (error as { stderr: unknown }).stderr;
+      if (errorStderr !== null && errorStderr !== undefined) stderr = String(errorStderr).trim();
+    }
+    let reason: string;
+    if (stderr !== "") reason = stderr;
+    else if (error instanceof Error) reason = error.message;
+    else reason = String(error);
+    process.stderr.write(`graduation-export Jev import failed: ${reason}\n`);
+    return false;
+  }
+}
+
 export function runGraduationExportCli(args: string[] = process.argv.slice(2)): GraduationExportResult {
   const parsedArgs = parseGraduationExportArguments(args);
   const featureModes = readCorrectionFeatureModes();
@@ -98,9 +136,31 @@ export function runGraduationExportCli(args: string[] = process.argv.slice(2)): 
       writeFileSync(outputPath, `${JSON.stringify(generatedProposal, null, 2)}\n`, "utf8");
     });
     if (proposal === null) return { mode, status: "schema_unavailable", principleCount: 0 };
+    let importStatus: GraduationExportResult["importStatus"] = mode === "shadow" ? "shadow" : "not_configured";
+    if (mode === "on") {
+      const importCommand = process.env.WASURENAGUSA_JEV_IMPORT_CMD?.trim();
+      if (importCommand === undefined || importCommand === "") {
+        process.stderr.write("graduation-export Jev import skipped: WASURENAGUSA_JEV_IMPORT_CMD is not configured\n");
+      } else {
+        const knowledgePath = getJevImportOutputPath(packageRoot);
+        if (!runJevImport(importCommand, outputPath, knowledgePath, packageRoot)) {
+          importStatus = "failed";
+        } else {
+          try {
+            recordSuccessfulCorrectionGraduationImport(storage, proposal, knowledgePath);
+            importStatus = "imported";
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            process.stderr.write(`graduation-export Jev import failed: ${reason}\n`);
+            importStatus = "failed";
+          }
+        }
+      }
+    }
     return {
       mode,
       status: "written",
+      importStatus,
       generatedAt,
       principleCount: proposal.principles.length,
       outputPath,
@@ -116,6 +176,7 @@ if (isMainModule(import.meta.url)) {
     process.stdout.write(`${JSON.stringify({
       mode: result.mode,
       status: result.status,
+      import_status: result.importStatus,
       skipped_reason: result.skippedReason,
       generated_at: result.generatedAt,
       principles: result.principleCount,

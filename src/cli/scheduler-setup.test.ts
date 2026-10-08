@@ -89,10 +89,14 @@ describe("会話記録アーカイブのlaunchd設定", () => {
   });
 
   it("卒業提案CLIを引数なしで毎日06時に起動する", () => {
+    const jevImportCommand = "python3 /projects/firebase-kit/.claude/hooks/scripts/extract-jev-knowledge.py";
+    const jevImportOutputPath = "/projects/firebase-kit/.claude/hooks/jev-knowledge.graduated.json";
     const plist = buildGraduationPlistXml(
       "/usr/bin/node",
       "/installed/package/dist/cli/graduation-export.js",
       "/scheduler/graduation-export.log",
+      jevImportCommand,
+      jevImportOutputPath,
     );
 
     expect(plist).toContain("com.wasurenagusa.correction-graduation");
@@ -101,6 +105,10 @@ describe("会話記録アーカイブのlaunchd設定", () => {
     );
     expect(plist).toContain("<key>Hour</key>\n    <integer>6</integer>");
     expect(plist).toContain("<key>Minute</key>\n    <integer>0</integer>");
+    expect(plist).toContain("<key>WASURENAGUSA_JEV_IMPORT_CMD</key>");
+    expect(plist).toContain(`<string>${jevImportCommand}</string>`);
+    expect(plist).toContain("<key>WASURENAGUSA_JEV_IMPORT_OUT</key>");
+    expect(plist).toContain(`<string>${jevImportOutputPath}</string>`);
     expect(plist).not.toContain("WASURENAGUSA_GRADUATION");
   });
 

@@ -585,7 +585,7 @@ export function selectCorrectionInjections(
   const retrieval = retrieveCorrectionCandidates(storage, input, featureModes);
   const candidateInjectionEnabled = featureModes.candidateInjection === "on";
   const reflectedGraduations = getActiveCorrectionGraduationKeys(storage, input.at, undefined, featureModes.graduation);
-  const excludeGraduated = input.trigger === "prompt" || input.trigger === "refresh";
+  const excludeGraduated = input.trigger === "start" || input.trigger === "prompt" || input.trigger === "refresh";
   const isAvailable = (rule: RetrievedCorrectionRule): boolean =>
     !excludeGraduated || !reflectedGraduations.has(rule.bundleKey);
   const history = readSessionHistory(storage, input, featureModes.principles);

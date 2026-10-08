@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type Database from "better-sqlite3";
 import { CORRECTION_PRINCIPLES_SCHEMA_VERSION } from "../storage/correction-schema.js";
 import { getSchemaVersion } from "../storage/schema.js";
@@ -9,7 +11,6 @@ import { parseCorrectionRuleInput } from "./rule-template.js";
 import { getStrengthBaseIntensity } from "./strength.js";
 import { readEnvironmentMode } from "./environment-mode.js";
 
-const MINIMUM_CONFIRMATION_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const PRINCIPLE_PREFIX = "pr:v1:";
 const JEV_AGENT_TYPES = Array.from({ length: 38 }, (_value, index) => `a${String(index + 1).padStart(2, "0")}`);
 const TOPIC_TRIGGERS: Record<string, readonly string[]> = {
@@ -26,12 +27,19 @@ const TOPIC_TRIGGERS: Record<string, readonly string[]> = {
   unknown: [],
   principle: [],
 };
+const RULE_TEXT_GENERIC_WORDS = [
+  "毎回", "出力", "確認", "仕組み", "応答", "回答", "使用", "作業", "必要", "場合",
+  "規則", "原則", "ルール", "適用", "方法", "内容", "条件", "対象", "処理", "対応",
+  "作成", "実行", "利用", "提供", "記載", "共通", "全員",
+] as const;
+const RULE_TEXT_GENERIC_WORD_PATTERN = new RegExp(RULE_TEXT_GENERIC_WORDS.join("|"), "gu");
+const RULE_TEXT_WORD_PATTERN = /[A-Za-z0-9]+|[\p{Script=Katakana}ー]+|[\p{Script=Han}々〆ヶ]+/gu;
 const NEGATIVE_EXCLUSION_MARKERS = ["ただし", "例外", "以外", "を除く"] as const;
 const SECRET_VALUE = /(?:\bAKIA[0-9A-Z]{16}\b|\bAIza[0-9A-Za-z_-]{20,}\b|\bsk-[A-Za-z0-9]{20,}\b|\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_-]{20,}\b|\bBearer\s+\S+|-----BEGIN(?: [A-Z]+)? PRIVATE KEY-----|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b)/iu;
 const PATH_VALUE = /(?:^|[\s"'(])(?:\/|~\/|\.\.?\/|[A-Za-z]:[\\/])[^\s"')]+|\b[\p{L}\p{N}_.-]+[\\/][\p{L}\p{N}_.\\/-]+|\.[A-Za-z0-9_-]{1,12}(?:\s|$)/u;
 const UNSAFE_PROPOSAL_TEXT = /[\u0000-\u001f\u007f]|https?:\/\/|\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/iu;
 
-export type GraduationMode = "off" | "on";
+export type GraduationMode = "off" | "shadow" | "on";
 export type GraduationDelivery = "scene" | "always";
 
 export interface CorrectionGraduationEvidence {
@@ -88,13 +96,7 @@ interface GraduationSourceRow {
   polarity: "positive" | "negative";
 }
 
-interface SettledEventRow {
-  at: string;
-  basis: string;
-}
-
-interface SettledEvidence {
-  at: string;
+interface BundleEvidenceMetrics {
   sessions: number;
   days: number;
 }
@@ -134,6 +136,26 @@ function isSafeProposalText(value: string): boolean {
   const normalized = value.normalize("NFKC").trim();
   if (normalized.length === 0 || PATH_VALUE.test(normalized) || SECRET_VALUE.test(normalized)) return false;
   return !UNSAFE_PROPOSAL_TEXT.test(normalized);
+}
+
+function extractRuleTextTriggers(ruleTexts: readonly string[]): string[] {
+  const triggers: string[] = [];
+  for (const ruleText of ruleTexts) {
+    const searchableText = ruleText.normalize("NFKC").replace(RULE_TEXT_GENERIC_WORD_PATTERN, " ");
+    const words = searchableText.match(RULE_TEXT_WORD_PATTERN) ?? [];
+    for (const word of words) {
+      const wordLength = Array.from(word).length;
+      const isAsciiWord = /^[A-Za-z0-9]+$/u.test(word) && /[A-Za-z]/u.test(word);
+      const isKatakanaWord = /^[\p{Script=Katakana}ー]+$/u.test(word) && /\p{Script=Katakana}/u.test(word);
+      const isKanjiWord = /^[\p{Script=Han}々〆ヶ]+$/u.test(word) && /\p{Script=Han}/u.test(word);
+      const minimumLength = isKanjiWord ? 2 : 3;
+      if ((!isAsciiWord && !isKatakanaWord && !isKanjiWord) || wordLength < minimumLength) continue;
+      if (!isSafeProposalText(word) || triggers.includes(word)) continue;
+      triggers.push(word);
+      if (triggers.length === 8) return triggers;
+    }
+  }
+  return triggers;
 }
 
 function assertGraduationTables(db: Pick<Database.Database, "prepare">): void {
@@ -181,7 +203,7 @@ export function resolveGraduationMode(raw: string | undefined): GraduationMode {
   return readEnvironmentMode({
     name: "WASURENAGUSA_GRADUATION",
     value: raw,
-    acceptedValues: ["off", "on"],
+    acceptedValues: ["off", "shadow", "on"],
     defaultValue: "off",
     invalidValue: "off",
     lowercase: true,
@@ -189,17 +211,21 @@ export function resolveGraduationMode(raw: string | undefined): GraduationMode {
 }
 
 export function isCorrectionGraduationEnabled(): boolean {
-  return resolveGraduationMode(process.env.WASURENAGUSA_GRADUATION) === "on";
+  return resolveGraduationMode(process.env.WASURENAGUSA_GRADUATION) !== "off";
 }
 
-function readEvidenceSources(db: Pick<Database.Database, "prepare">, bundleKey: string): GraduationSourceRow[] {
+function readEvidenceBundleKeys(db: Pick<Database.Database, "prepare">, bundleKey: string): string[] {
   const sourceKeys = bundleKey.startsWith(PRINCIPLE_PREFIX)
     ? (db.prepare(`
         SELECT member_key FROM owner_correction_principle_members
         WHERE principle_key = ? ORDER BY member_key
       `).all(bundleKey) as Array<{ member_key: string }>).map((row) => row.member_key)
     : [bundleKey];
-  const keys = uniqueSorted([...sourceKeys, bundleKey]);
+  return uniqueSorted([...sourceKeys, bundleKey]);
+}
+
+function readEvidenceSources(db: Pick<Database.Database, "prepare">, bundleKey: string): GraduationSourceRow[] {
+  const keys = readEvidenceBundleKeys(db, bundleKey);
   if (keys.length === 0) throw new Error("correction graduation source bundles are missing");
   const placeholders = keys.map(() => "?").join(", ");
   return db.prepare(`
@@ -212,78 +238,29 @@ function readEvidenceSources(db: Pick<Database.Database, "prepare">, bundleKey: 
   `).all(...keys) as GraduationSourceRow[];
 }
 
-function parseSettledEvidence(value: string): Omit<SettledEvidence, "at"> | null {
-  const parsed: unknown = JSON.parse(value);
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("correction graduation settled evidence must be an object");
-  }
-  const record = parsed as Record<string, unknown>;
-  if (record.signal !== "settled") return null;
-  if (!Number.isSafeInteger(record.sessionCount) || !Number.isSafeInteger(record.dayCount)) {
-    throw new Error("correction graduation settled evidence is incomplete");
-  }
-  const sessions = record.sessionCount as number;
-  const days = record.dayCount as number;
-  if (sessions < 5 || days < 3) return null;
-  return { sessions, days };
-}
-
-function readLatestSettledEvidence(
+function readBundleEvidenceMetrics(
   db: Pick<Database.Database, "prepare">,
   bundleKey: string,
   at: string,
-  confirmedAt: string,
-): SettledEvidence | null {
-  const events = db.prepare(`
-    SELECT at, basis FROM owner_correction_strength_events
-    WHERE bundle_key = ? AND reason = 'manual' AND julianday(at) <= julianday(?)
-    ORDER BY at DESC
-  `).all(bundleKey, at) as SettledEventRow[];
-  for (const event of events) {
-    const evidence = parseSettledEvidence(event.basis);
-    if (!evidence) continue;
-    if (Date.parse(event.at) < Date.parse(confirmedAt)) continue;
-    const laterFailure = db.prepare(`
-      SELECT 1 AS present FROM owner_correction_strength_events
-      WHERE bundle_key = ? AND reason = 'failure'
-        AND julianday(at) > julianday(?) AND julianday(at) <= julianday(?)
-      LIMIT 1
-    `).get(bundleKey, event.at, at);
-    if (laterFailure) continue;
-    const laterEvidence = hasEvidenceAfter(db, bundleKey, event.at, at);
-    if (laterEvidence) continue;
-    return { at: event.at, ...evidence };
-  }
-  return null;
-}
-
-function hasEvidenceAfter(
-  db: Pick<Database.Database, "prepare">,
-  bundleKey: string,
-  after: string,
-  through: string,
-): boolean {
-  return Boolean(db.prepare(`
-    SELECT 1 AS present
+): BundleEvidenceMetrics {
+  const keys = readEvidenceBundleKeys(db, bundleKey);
+  const placeholders = keys.map(() => "?").join(", ");
+  const metrics = db.prepare(`
+    SELECT COUNT(DISTINCT event.session_id_hash) AS sessions,
+      COUNT(DISTINCT date(event.observed_at)) AS days
     FROM owner_correction_evidence AS evidence
     JOIN owner_correction_events AS event ON event.event_id = evidence.event_id
-    WHERE julianday(event.observed_at) > julianday(?) AND julianday(event.observed_at) <= julianday(?)
-      AND (
-        evidence.bundle_key = ?
-        OR EXISTS (
-          SELECT 1 FROM owner_correction_principle_members AS member
-          WHERE member.principle_key = ? AND member.member_key = evidence.bundle_key
-        )
-      )
-    LIMIT 1
-  `).get(after, through, bundleKey, bundleKey));
+    WHERE evidence.bundle_key IN (${placeholders})
+      AND julianday(event.observed_at) <= julianday(?)
+  `).get(...keys, at) as BundleEvidenceMetrics;
+  if (metrics.sessions < 1) throw new Error("correction graduation evidence requires at least one source session");
+  return metrics;
 }
 
 function readGraduationBundles(
   db: Pick<Database.Database, "prepare">,
   at: string,
 ): GraduationBundleRow[] {
-  const minimumConfirmationAt = new Date(Date.parse(at) - MINIMUM_CONFIRMATION_AGE_MS).toISOString();
   return db.prepare(`
     SELECT bundle.bundle_key, bundle.memory_id, currentVersion.rule_text, bundle.topic_key, bundle.visibility,
       bundle.status, bundle.intensity, bundle.lifetime_kind, bundle.confirmed_at, bundle.expires_at
@@ -302,7 +279,7 @@ function readGraduationBundles(
       AND (bundle.expires_at IS NULL OR julianday(bundle.expires_at) > julianday(?))
       ${principleMemberEligibilitySql()}
     ORDER BY bundle.bundle_key
-  `).all(minimumConfirmationAt, at) as GraduationBundleRow[];
+  `).all(at, at) as GraduationBundleRow[];
 }
 
 function validateBundleForProposal(bundle: GraduationBundleRow): void {
@@ -318,17 +295,24 @@ function validateBundleForProposal(bundle: GraduationBundleRow): void {
 function deriveEntry(
   db: Pick<Database.Database, "prepare">,
   bundle: GraduationBundleRow,
-  settled: SettledEvidence,
+  evidenceMetrics: BundleEvidenceMetrics,
 ): CorrectionGraduationEntry {
   validateBundleForProposal(bundle);
   const sources = readEvidenceSources(db, bundle.bundle_key);
-  const triggers = [...TOPIC_TRIGGERS[bundle.topic_key]];
+  const orderedSources = [
+    ...sources.filter((source) => source.bundle_key === bundle.bundle_key),
+    ...sources.filter((source) => source.bundle_key !== bundle.bundle_key),
+  ];
+  const ruleTextTriggers = extractRuleTextTriggers(orderedSources.map((source) => source.rule_text));
+  const fallbackTriggers: string[] = [];
+  const conditionTriggers: string[] = [];
+  if (ruleTextTriggers.length === 0) fallbackTriggers.push(...TOPIC_TRIGGERS[bundle.topic_key]);
   const excludePatterns: string[] = [];
-  for (const source of sources) {
+  for (const source of orderedSources) {
     if (bundle.topic_key === "principle" && source.bundle_key !== bundle.bundle_key) {
       const sourceTopicTriggers = TOPIC_TRIGGERS[source.topic_key];
       if (sourceTopicTriggers === undefined) throw new Error("correction graduation source topic is unsupported");
-      triggers.push(...sourceTopicTriggers);
+      if (ruleTextTriggers.length === 0) fallbackTriggers.push(...sourceTopicTriggers);
     }
     if (source.polarity === "negative") {
       for (const marker of NEGATIVE_EXCLUSION_MARKERS) {
@@ -346,23 +330,26 @@ function deriveEntry(
     }
     for (const value of Object.values(requiredValues)) {
       const normalized = value.normalize("NFKC").replace(/\s+/gu, " ").trim();
-      if (isSafeProposalText(normalized) && Array.from(normalized).length <= 40) triggers.push(normalized);
+      if (isSafeProposalText(normalized) && Array.from(normalized).length <= 40) conditionTriggers.push(normalized);
     }
   }
-  const sortedTriggers = uniqueSorted(triggers.filter(isSafeProposalText));
+  const proposalTriggers = (ruleTextTriggers.length > 0
+    ? ruleTextTriggers.filter(isSafeProposalText)
+    : uniqueSorted([...fallbackTriggers, ...conditionTriggers].filter(isSafeProposalText))
+  ).slice(0, 8);
   const sortedExclusions = uniqueSorted(excludePatterns.filter(isSafeProposalText));
   return {
     principle_key: bundle.bundle_key,
     rule_text: bundle.rule_text,
     topic_key: bundle.topic_key,
-    delivery: sortedTriggers.length > 0 ? "scene" : "always",
-    triggers: sortedTriggers,
+    delivery: proposalTriggers.length > 0 ? "scene" : "always",
+    triggers: proposalTriggers,
     exclude_patterns: sortedExclusions,
     types: [...JEV_AGENT_TYPES],
     evidence: {
-      sessions: settled.sessions,
-      days: settled.days,
-      injected_sessions: settled.sessions,
+      sessions: evidenceMetrics.sessions,
+      days: evidenceMetrics.days,
+      injected_sessions: evidenceMetrics.sessions,
       failures_after_injection: 0,
       violations: 0,
     },
@@ -470,25 +457,22 @@ function buildProposal(
   db: Pick<Database.Database, "prepare">,
   input: CorrectionGraduationProposalOptions,
   writeProposal: CorrectionGraduationProposalWriter | undefined,
+  mode: GraduationMode,
 ): CorrectionGraduationProposal {
   const at = canonicalTime(input.at);
   validateSourceHead(input.sourceHead);
-  revokeGraduationsWithNewEvidence(db, at);
+  if (mode === "on") revokeGraduationsWithNewEvidence(db, at);
   const history = readGraduationHistory(db, at);
   const activeKeys = new Set(history.filter((row) => row.revoked_at === null).map((row) => row.bundle_key));
   const previouslyGraduatedKeys = new Set(history.map((row) => row.bundle_key));
   const entries: CorrectionGraduationEntry[] = [];
-  const newGraduationKeys: string[] = [];
   for (const bundle of readGraduationBundles(db, at)) {
     if (bundle.confirmed_at === null) continue;
     if (bundle.bundle_key.startsWith(PRINCIPLE_PREFIX)
       && !hasCorrectionComplianceCheckerForPrinciple(db as Database.Database, bundle.bundle_key)) continue;
-    const settled = readLatestSettledEvidence(db, bundle.bundle_key, at, bundle.confirmed_at);
-    if (!settled) continue;
     const isActive = activeKeys.has(bundle.bundle_key);
     if (!isActive && previouslyGraduatedKeys.has(bundle.bundle_key)) continue;
-    entries.push(deriveEntry(db, bundle, settled));
-    if (!isActive) newGraduationKeys.push(bundle.bundle_key);
+    entries.push(deriveEntry(db, bundle, readBundleEvidenceMetrics(db, bundle.bundle_key, at)));
   }
   entries.sort((left, right) => compareText(left.principle_key, right.principle_key));
   const proposal: CorrectionGraduationProposal = {
@@ -497,14 +481,7 @@ function buildProposal(
     source_head: input.sourceHead.toLowerCase(),
     principles: entries,
   };
-  const proposalHash = createHash("sha256").update(JSON.stringify(proposal), "utf8").digest("hex");
   if (writeProposal !== undefined) writeProposal(proposal);
-  for (const bundleKey of newGraduationKeys) {
-    db.prepare(`
-      INSERT INTO owner_correction_graduations (bundle_key, graduated_at, proposal_hash, revoked_at, revoke_reason)
-      VALUES (?, ?, ?, NULL, NULL)
-    `).run(bundleKey, at, proposalHash);
-  }
   return proposal;
 }
 
@@ -513,12 +490,97 @@ export function createCorrectionGraduationProposal(
   input: CorrectionGraduationProposalOptions,
   writeProposal?: CorrectionGraduationProposalWriter,
 ): CorrectionGraduationProposal | null {
-  if (!isCorrectionGraduationEnabled()) return null;
+  const mode = resolveGraduationMode(process.env.WASURENAGUSA_GRADUATION);
+  if (mode === "off") return null;
   const at = canonicalTime(input.at);
   return storage.runCorrectionTransaction(({ db }) => {
     if (getSchemaVersion(db as unknown as Database.Database) < CORRECTION_PRINCIPLES_SCHEMA_VERSION) return null;
     assertGraduationTables(db as unknown as Database.Database);
-    return buildProposal(db as unknown as Database.Database, { ...input, at }, writeProposal);
+    return buildProposal(db as unknown as Database.Database, { ...input, at }, writeProposal, mode);
+  });
+}
+
+function defaultJevKnowledgePath(): string {
+  const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+  return resolve(packageRoot, "..", "firebase-kit", ".claude", "hooks", "jev-knowledge.graduated.json");
+}
+
+function resolveJevKnowledgePath(knowledgePath: string | undefined): string | undefined {
+  if (knowledgePath !== undefined && knowledgePath.trim() !== "") return knowledgePath;
+  const path = defaultJevKnowledgePath();
+  if (!existsSync(path)) return undefined;
+  return path;
+}
+
+export function readCorrectionGraduationKnowledgeKeys(knowledgePath: string): ReadonlySet<string> {
+  const parsed: unknown = JSON.parse(readFileSync(knowledgePath, "utf8"));
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("correction graduation Jev knowledge file must be an object");
+  }
+  const knowledge = parsed as Record<string, unknown>;
+  if (knowledge.version !== 1 || !Array.isArray(knowledge.cards)) {
+    throw new Error("correction graduation Jev knowledge file is invalid");
+  }
+  const principleKeys = new Set<string>();
+  for (const card of knowledge.cards) {
+    if (card === null || typeof card !== "object" || Array.isArray(card)) {
+      throw new Error("correction graduation Jev knowledge card is invalid");
+    }
+    const evidenceIds = (card as Record<string, unknown>).evidence_ids;
+    if (evidenceIds === undefined) continue;
+    if (!Array.isArray(evidenceIds) || evidenceIds.some((evidenceId) => typeof evidenceId !== "string")) {
+      throw new Error("correction graduation Jev knowledge evidence IDs are invalid");
+    }
+    for (const evidenceId of evidenceIds) principleKeys.add(evidenceId);
+  }
+  return principleKeys;
+}
+
+export function recordSuccessfulCorrectionGraduationImport(
+  storage: Pick<SQLiteStorage, "runCorrectionTransaction">,
+  proposal: CorrectionGraduationProposal,
+  knowledgePath: string,
+  value: string = new Date().toISOString(),
+): void {
+  if (resolveGraduationMode(process.env.WASURENAGUSA_GRADUATION) !== "on") return;
+  const at = canonicalTime(value);
+  const knowledgeKeys = readCorrectionGraduationKnowledgeKeys(knowledgePath);
+  const proposalKeys = new Set(proposal.principles
+    .filter((entry) => entry.delivery === "scene" && knowledgeKeys.has(entry.principle_key))
+    .map((entry) => entry.principle_key));
+  const proposalHash = createHash("sha256").update(JSON.stringify(proposal), "utf8").digest("hex");
+  storage.runCorrectionTransaction(({ db }) => {
+    if (getSchemaVersion(db as unknown as Database.Database) < CORRECTION_PRINCIPLES_SCHEMA_VERSION) return;
+    assertGraduationTables(db as unknown as Database.Database);
+    revokeGraduationsWithNewEvidence(db as unknown as Database.Database, at);
+    const eligibleKeys = new Set(readGraduationBundles(db as unknown as Database.Database, at)
+      .filter((bundle) => !bundle.bundle_key.startsWith(PRINCIPLE_PREFIX)
+        || hasCorrectionComplianceCheckerForPrinciple(db as Database.Database, bundle.bundle_key))
+      .map((bundle) => bundle.bundle_key));
+    const reflectedKeys = new Set([...proposalKeys].filter((bundleKey) => eligibleKeys.has(bundleKey)));
+    const activeRows = db.prepare(`
+      SELECT bundle_key, graduated_at FROM owner_correction_graduations
+      WHERE revoked_at IS NULL AND julianday(graduated_at) <= julianday(?)
+      ORDER BY bundle_key, graduated_at
+    `).all(at) as RevokedGraduationRow[];
+    for (const row of activeRows) {
+      if (reflectedKeys.has(row.bundle_key)) continue;
+      db.prepare(`
+        UPDATE owner_correction_graduations
+        SET revoked_at = ?, revoke_reason = 'jev_import_replaced'
+        WHERE bundle_key = ? AND graduated_at = ? AND revoked_at IS NULL
+      `).run(at, row.bundle_key, row.graduated_at);
+    }
+    const history = readGraduationHistory(db as unknown as Database.Database, at);
+    const activeKeys = new Set(history.filter((row) => row.revoked_at === null).map((row) => row.bundle_key));
+    const previouslyGraduatedKeys = new Set(history.map((row) => row.bundle_key));
+    for (const bundleKey of reflectedKeys) {
+      if (activeKeys.has(bundleKey) || previouslyGraduatedKeys.has(bundleKey)) continue;
+      db.prepare(`
+        INSERT INTO owner_correction_graduations (bundle_key, graduated_at, proposal_hash, revoked_at, revoke_reason)
+        VALUES (?, ?, ?, NULL, NULL)
+      `).run(bundleKey, at, proposalHash);
+    }
   });
 }
 
@@ -534,27 +596,14 @@ export function getActiveCorrectionGraduationKeys(
     if (getSchemaVersion(db as unknown as Database.Database) < CORRECTION_PRINCIPLES_SCHEMA_VERSION) return new Set<string>();
     assertGraduationTables(db as unknown as Database.Database);
     revokeGraduationsWithNewEvidence(db as unknown as Database.Database, at);
+    const resolvedKnowledgePath = resolveJevKnowledgePath(knowledgePath);
     let reflectedPrincipleKeys = new Set<string>();
-    if (knowledgePath !== undefined && knowledgePath.trim() !== "") {
-      const parsed: unknown = JSON.parse(readFileSync(knowledgePath, "utf8"));
-      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-        throw new Error("correction graduation Jev knowledge file must be an object");
-      }
-      const knowledge = parsed as Record<string, unknown>;
-      if (knowledge.version !== 1 || !Array.isArray(knowledge.cards)) {
-        throw new Error("correction graduation Jev knowledge file is invalid");
-      }
-      reflectedPrincipleKeys = new Set<string>();
-      for (const card of knowledge.cards) {
-        if (card === null || typeof card !== "object" || Array.isArray(card)) {
-          throw new Error("correction graduation Jev knowledge card is invalid");
-        }
-        const evidenceIds = (card as Record<string, unknown>).evidence_ids;
-        if (evidenceIds === undefined) continue;
-        if (!Array.isArray(evidenceIds) || evidenceIds.some((evidenceId) => typeof evidenceId !== "string")) {
-          throw new Error("correction graduation Jev knowledge evidence IDs are invalid");
-        }
-        for (const evidenceId of evidenceIds) reflectedPrincipleKeys.add(evidenceId);
+    if (resolvedKnowledgePath !== undefined) {
+      try {
+        reflectedPrincipleKeys = new Set(readCorrectionGraduationKnowledgeKeys(resolvedKnowledgePath));
+      } catch (error) {
+        // Jev 側が読めないときは移したことにせず、こちらの差し込みを続ける
+        process.stderr.write(`[graduation] Jev knowledge unreadable: ${error instanceof Error ? error.message : String(error)}\n`);
       }
     }
     if (reflectedPrincipleKeys.size === 0) return new Set<string>();
@@ -562,17 +611,21 @@ export function getActiveCorrectionGraduationKeys(
       SELECT graduation.bundle_key
       FROM owner_correction_graduations AS graduation
       JOIN owner_correction_bundles AS bundle ON bundle.bundle_key = graduation.bundle_key
+      JOIN memories AS memory ON memory.id = bundle.memory_id
       JOIN owner_correction_versions AS currentVersion
         ON currentVersion.bundle_key = bundle.bundle_key AND currentVersion.version = bundle.version
       WHERE graduation.revoked_at IS NULL AND julianday(graduation.graduated_at) <= julianday(?)
-        AND bundle.status = 'confirmed' AND bundle.visibility = 'owner'
+        AND bundle.status = 'confirmed' AND memory.state = 'active' AND memory.category = 'dont'
+        AND bundle.visibility = 'owner'
         AND bundle.lifetime_kind IN ('explicit_continuing','inferred')
         AND bundle.topic_key <> 'model_routing'
+        AND (bundle.expires_at IS NULL OR julianday(bundle.expires_at) > julianday(?))
         AND currentVersion.status = 'confirmed' AND currentVersion.visibility = 'owner'
         AND currentVersion.lifetime_kind IN ('explicit_continuing','inferred')
+        AND (currentVersion.expires_at IS NULL OR julianday(currentVersion.expires_at) > julianday(?))
         ${principleMemberEligibilitySql()}
       ORDER BY graduation.bundle_key
-    `).all(at) as Array<{ bundle_key: string }>;
+    `).all(at, at, at) as Array<{ bundle_key: string }>;
     return new Set(rows.filter((row) => reflectedPrincipleKeys.has(row.bundle_key)).map((row) => row.bundle_key));
   });
 }
