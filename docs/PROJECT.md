@@ -1,7 +1,7 @@
 ---
 schema_version: 1
-verified_at: 2026-10-07T20:51:53Z
-verified_head: f76a1d5
+verified_at: 2026-10-08T07:50:31Z
+verified_head: 246ebc8
 source_worklog: worklog-20261004-owner-correction-loop.md
 ---
 # wasurenagusa-mcp
@@ -24,10 +24,10 @@ source_worklog: worklog-20261004-owner-correction-loop.md
 - `.wasurenagusa/`: ランタイムデータ（記憶DB、設定、バックアップ、ログ）
 
 ## 4. 現在地
-- 焦点: 訂正の検出・保存・注入ループは本番反映済み（ラウンド2 まで、schema v12、10/07 Push `f76a1d5`）。学習化ラウンド3（設計 `docs/spec-learning-round3.md`: 再生の評価基盤・強度・原則化・卒業提案・Codex 先行・G1〜G3・Astra 5回レビュー反映）は実装・QA PASS まで済み、作業ツリーに未コミット。本番は schema 12 のまま、dist 未反映。
-- 次の一手: オーナーの y/n を取ってラウンド3 を本番反映（schema 13、手順は worklog `docs/findings/worklog-20261004-owner-correction-loop.md` の復帰ブロック）。反映前に `pnpm run build` を直接叩かない。反映後は 10/08〜10/21 の14日観察（H2）。
-- 残作業: (a) ラウンド3 の本番反映・コミット・Push。(b) H2 の14日観察。(c) 次ラウンド＝頻出する注意1種で察する→確かめる→直すを本番で一周させる。(d) 分からない言葉・確認しろ・要約の型・モデル指定の未対応分（設計書 `docs/spec-owner-correction-loop.md` 節 11）。
-- オーナー未回答: ラウンド3 の本番反映 y/n。合格基準 A8 の定義変更提案。G3 を将来 on にするか。忘却の自動アーカイブ安全網欠如への対処方針（2026-07-19 から未回答）。
+- 焦点: 訂正ループ（Wasurenagusa）。ラウンド3 は本番反映済み（schema 13、LOOP=on）。確定した注意を Jev カードへ移す方式（卒業）も本番 on。push 済み、0.23.0 = 246ebc8。
+- 次の一手: `cd ~/projects/wasurenagusa-mcp && npm publish`（0.23.0。先にオーナーが npm login）
+- 残作業: npm publish 0.23.0（ブロック原因＝このマシンが npm 未ログイン）／本番後14日の観察（10/08 12:07〜10/22、H2）／次ラウンド（設計書 `docs/spec-learning-round3.md` を起点）
+- オーナー未回答: G3 を将来 on にするか。A8 の定義変更提案（参考値扱い中）。忘却の自動アーカイブ安全網の対処方針（2026-07-19 から未回答）
 ## 5. 制約と注意事項
 - 本番DBの書き換え（忘却バックフィルの遡及処理等）はオーナー承認必須。
 - 依存関係管理はpnpm専用。`preinstall`でnpm/yarn installを拒否する（`cfea62d`でpnpm共有ストアへ移行）。
