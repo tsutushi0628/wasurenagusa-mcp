@@ -5,7 +5,7 @@ const mockCreateGenerateTextFn = vi.fn(() => mockGenerateText);
 
 vi.mock("../llm/provider.js", () => ({
   createGenerateTextFn: () => mockCreateGenerateTextFn(),
-  DEFAULT_MODELS: { gemini: "gemini-3.1-flash-lite", openai: "gpt-5-nano", anthropic: "claude-haiku-4-5-20251001" },
+  DEFAULT_MODELS: { gemini: "gemini-3.1-flash-lite", openai: "gpt-5-nano", anthropic: "claude-haiku-5-5" },
 }));
 
 vi.mock("../analyzer/prompt-loader.js", () => ({

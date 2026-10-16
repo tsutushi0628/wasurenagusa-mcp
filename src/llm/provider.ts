@@ -19,7 +19,7 @@ export const DEFAULT_EMBEDDING_MODEL = "gemini-embedding-001";
 export const DEFAULT_MODELS: Record<LLMProvider, string> = {
   gemini: "gemini-3.1-flash-lite",
   openai: "gpt-5-nano",
-  anthropic: "claude-haiku-4-5-20251001",
+  anthropic: "claude-haiku-5-5",
 };
 
 let cachedAi: Genkit | null = null;
