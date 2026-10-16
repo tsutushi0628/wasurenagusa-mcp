@@ -1,8 +1,8 @@
 ---
 schema_version: 1
-verified_at: 2026-10-10T18:22:26Z
-verified_head: c376ab1
-source_worklog: worklog-20261004-owner-correction-loop.md
+verified_at: 2026-10-16T16:19:25Z
+verified_head: 4c3fe3e
+source_worklog: worklog-20261016-wasurenagusa-fixes.md
 ---
 # wasurenagusa-mcp
 
@@ -24,9 +24,9 @@ source_worklog: worklog-20261004-owner-correction-loop.md
 - `.wasurenagusa/`: ランタイムデータ（記憶DB、設定、バックアップ、ログ）
 
 ## 4. 現在地
-- 焦点: 訂正ループ（Wasurenagusa）。ラウンド3・Jev 一本化は本番反映済み（schema 13、LOOP=on）。push 済み、0.23.0 = 246ebc8。
+- 焦点: 訂正ループ（Wasurenagusa）。ラウンド3・Jev 一本化は本番反映済み（schema 13、LOOP=on）。夜間の卒業処理の2晩の失敗を修正して push 済み。Anthropic 既定モデルは最新 Haiku 5.5。
 - 次の一手: `cd ~/projects/wasurenagusa-mcp && npm publish --otp <6桁>`（0.23.0）
-- 残作業: npm publish 0.23.0（ブロック原因＝npm の2段階認証が無効）／未コミット修正 `scripts/replay/repeat-classes.mjs`（オーナー y/n 後にコミット）／本番後14日の観察（10/08 12:07〜10/22、H2）／次ラウンド（設計書 `docs/spec-learning-round3.md` を起点）
+- 残作業: npm publish 0.23.0（ブロック原因＝npm の2段階認証が無効）／src/llm/provider.ts の未コミット差分（セッション末の git 状態に残存）／未コミット修正 `scripts/replay/repeat-classes.mjs`（オーナー y/n 後にコミット）／本番後14日の観察（10/08 12:07〜10/22、H2）／次ラウンド（設計書 `docs/spec-learning-round3.md` を起点）
 - オーナー未回答: 忘却の自動アーカイブ安全網の対処方針（2026-07-19 から未回答）
 ## 5. 制約と注意事項
 - 本番DBの書き換え（忘却バックフィルの遡及処理等）はオーナー承認必須。
@@ -36,5 +36,6 @@ source_worklog: worklog-20261004-owner-correction-loop.md
 - `src/cli/spec-update.ts`のunhandled rejectionで`npm test`がexit 1になる（実テスト失敗ではない）。
 
 ## 6. 根拠となる最近の記録
+- [worklog-20261016-wasurenagusa-fixes](findings/worklog-20261016-wasurenagusa-fixes.md)
 - [worklog-20261004-owner-correction-loop](findings/worklog-20261004-owner-correction-loop.md)
 - [handoff-20260720-a1-atomicity-b2b4-foundation-shipped](findings/handoff-20260720-a1-atomicity-b2b4-foundation-shipped.md)
