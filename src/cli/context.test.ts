@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import { Readable } from "stream";
 
-import { getDreamContent, getSuccessContent } from "./context.js";
+import { getDreamContent, getSuccessContent, main } from "./context.js";
 import { SQLiteStorage } from "../storage/sqlite.js";
 import { config } from "../config.js";
 
@@ -168,5 +169,136 @@ describe("context.ts: getSuccessContent (F4)", () => {
     storage.close();
 
     expect(out).toBe("");
+  });
+});
+
+describe("context.ts: hook失敗時のstderr", () => {
+  let originalStdin: PropertyDescriptor | undefined;
+
+  afterEach(() => {
+    if (originalStdin) Object.defineProperty(process, "stdin", originalStdin);
+    vi.restoreAllMocks();
+  });
+
+  it("例外名とメッセージ先頭200字を1行で出力する", async () => {
+    const privatePrompt = "PRIVATE_MEMORY_BODY_DO_NOT_LOG";
+    const errorMessage = `${"api_"}key=PRIVATE_SECRET_VALUE\u2028\u2029${"x".repeat(300)}`;
+    const openExistingForHook = vi.spyOn(SQLiteStorage, "openExistingForHook").mockImplementation(() => {
+      const error = new TypeError(errorMessage);
+      error.stack = `${error.name}: ${error.message}\n${privatePrompt}`;
+      throw error;
+    });
+    originalStdin = Object.getOwnPropertyDescriptor(process, "stdin");
+    Object.defineProperty(process, "stdin", {
+      value: Readable.from([Buffer.from(JSON.stringify({
+        session_id: "synthetic-hook-session",
+        cwd: process.cwd(),
+        hook_event_name: "UserPromptSubmit",
+        prompt: privatePrompt,
+      }), "utf-8")]),
+      configurable: true,
+    });
+    const stderrSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    expect(await main()).toBe("failed");
+
+    expect(openExistingForHook).toHaveBeenCalledOnce();
+    expect(stderrSpy).toHaveBeenCalledOnce();
+    const diagnostic = stderrSpy.mock.calls[0][0] as string;
+    expect(diagnostic).toBe(`[context] hook failed: TypeError: =[REDACTED]  ${"x".repeat(187)}`);
+    expect(diagnostic).not.toContain("PRIVATE_SECRET_VALUE");
+    expect(diagnostic).not.toContain(privatePrompt);
+    expect(diagnostic).not.toContain("\n");
+  });
+
+  it("U+2028 で区切られた秘密鍵の本文を出力しない", async () => {
+    const keyBody = "MIIEpAFAKEKEYBODYDONOTLOG";
+    const errorMessage = `-----BEGIN RSA ${"PRIVATE"} KEY-----\u2028${keyBody}\u2028-----END RSA ${"PRIVATE"} KEY-----`;
+    const openExistingForHook = vi.spyOn(SQLiteStorage, "openExistingForHook").mockImplementation(() => {
+      throw new Error(errorMessage);
+    });
+    originalStdin = Object.getOwnPropertyDescriptor(process, "stdin");
+    Object.defineProperty(process, "stdin", {
+      value: Readable.from([Buffer.from(JSON.stringify({
+        session_id: "synthetic-hook-session",
+        cwd: process.cwd(),
+        hook_event_name: "UserPromptSubmit",
+        prompt: "synthetic prompt",
+      }), "utf-8")]),
+      configurable: true,
+    });
+    const stderrSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    expect(await main()).toBe("failed");
+
+    expect(openExistingForHook).toHaveBeenCalledOnce();
+    const diagnostic = stderrSpy.mock.calls[0][0] as string;
+    expect(diagnostic).not.toContain(keyBody);
+    expect(diagnostic).not.toContain("\n");
+  });
+
+  it("空メッセージの例外は例外名をメッセージとして出力する", async () => {
+    const openExistingForHook = vi.spyOn(SQLiteStorage, "openExistingForHook").mockImplementation(() => {
+      throw new Error("");
+    });
+    originalStdin = Object.getOwnPropertyDescriptor(process, "stdin");
+    Object.defineProperty(process, "stdin", {
+      value: Readable.from([Buffer.from(JSON.stringify({
+        session_id: "synthetic-hook-session",
+        cwd: process.cwd(),
+        hook_event_name: "UserPromptSubmit",
+        prompt: "",
+      }), "utf-8")]),
+      configurable: true,
+    });
+    const stderrSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    expect(await main()).toBe("failed");
+
+    expect(openExistingForHook).toHaveBeenCalledOnce();
+    expect(stderrSpy).toHaveBeenCalledWith("[context] hook failed: Error: Error");
+  });
+
+  it("直接起動時の複数行の未捕捉例外は本文を省略する", async () => {
+    const originalArgv1 = process.argv[1];
+    const stderrSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const closeError = new Error(`${"api_"}key=PRIVATE_CLOSE_SECRET\nPRIVATE_CLOSE_ERROR_TAIL_DO_NOT_LOG`);
+    originalStdin = Object.getOwnPropertyDescriptor(process, "stdin");
+    Object.defineProperty(process, "stdin", {
+      value: Readable.from([Buffer.from(JSON.stringify({
+        session_id: "synthetic-hook-session",
+        cwd: process.cwd(),
+        hook_event_name: "UserPromptSubmit",
+        prompt: "",
+      }), "utf-8")]),
+      configurable: true,
+    });
+    vi.resetModules();
+    process.argv[1] = join(process.cwd(), "src/cli/context.ts");
+
+    try {
+      const { SQLiteStorage: directRunSQLiteStorage } = await import("../storage/index.js");
+      const openExistingForHook = vi.spyOn(directRunSQLiteStorage, "openExistingForHook").mockReturnValue({
+        supportsCorrectionHooks: false,
+        close: () => {
+          throw closeError;
+        },
+      } as unknown as SQLiteStorage);
+
+      await import("./context.js");
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+      expect(openExistingForHook).toHaveBeenCalledOnce();
+      expect(stderrSpy).toHaveBeenCalledOnce();
+      expect(stderrSpy).toHaveBeenCalledWith("[context] hook failed: Error: multiline error message omitted");
+      const diagnostic = stderrSpy.mock.calls[0][0] as string;
+      expect(diagnostic).not.toContain("PRIVATE_CLOSE_SECRET");
+      expect(diagnostic).not.toContain("PRIVATE_CLOSE_ERROR_TAIL_DO_NOT_LOG");
+      expect(diagnostic).not.toContain("\n");
+    } finally {
+      process.argv[1] = originalArgv1;
+      vi.restoreAllMocks();
+      vi.resetModules();
+    }
   });
 });

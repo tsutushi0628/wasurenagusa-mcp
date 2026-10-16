@@ -19,7 +19,7 @@
  */
 
 import { basename, join } from "path";
-import { isDirectRun } from "../utils/cli-entry.js";
+import { formatCliErrorDetails, isDirectRun } from "../utils/cli-entry.js";
 export { isDirectRun } from "../utils/cli-entry.js";
 import { findProjectRoot } from "../utils/projectRoot.js";
 import { SQLiteStorage } from "../storage/index.js";
@@ -1262,13 +1262,30 @@ export async function main(): Promise<ContextHookStatus> {
       console.error("[context] hook timeout");
       return "timeout";
     } else {
-      console.error("[context] hook failed");
+      console.error(`[context] hook failed: ${describeHookFailure(error)}`);
       return "failed";
     }
   } finally {
     storage?.close();
   }
 }
+
+function describeHookFailure(error: unknown): string {
+  let errorName = "UnknownError";
+  let errorMessage = "Unknown thrown value";
+  if (error instanceof Error) {
+    errorName = error.name.replace(/[\r\n\u2028\u2029]/g, " ").slice(0, 100);
+    // U+2028/2029 は秘密鍵検出の `.` を越えられないため、伏せ字処理の前に空白へ置き換える
+    const normalized = Object.assign(new Error(error.message.replace(/[\u2028\u2029]/g, " ")), { name: error.name });
+    errorMessage = formatCliErrorDetails(normalized)
+      .split("\n", 1)[0]
+      .slice(0, 200);
+  }
+  return `${errorName}: ${errorMessage}`;
+}
+
 if (isDirectRun(process.argv[1], import.meta.url)) {
-  main().catch(() => console.error("[context] hook failed"));
+  main().catch((error) => {
+    console.error(`[context] hook failed: ${describeHookFailure(error)}`);
+  });
 }
