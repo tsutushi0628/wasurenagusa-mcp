@@ -64,7 +64,7 @@
   ],
   "dependencies": {
     "@anthropic-ai/tokenizer": "0.0.4",
-    "@genkit-ai/anthropic": "^0.2.0",
+    "@genkit-ai/anthropic": "^0.5.0",
     "@genkit-ai/compat-oai": "^1.42.0",
     "@genkit-ai/google-genai": "^1.42.0",
     "@google/generative-ai": "^0.24.1",
@@ -78,7 +78,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20.19.43",
-    "fast-check": "4.9.0",
+    "fast-check": "4.10.2",
     "firebase-admin": "^13.10.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3",
