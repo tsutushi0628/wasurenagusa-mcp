@@ -73,7 +73,7 @@
 18. **Keep-Alive** - タスクがない場合でもpingを送信し、5時間ウィンドウを回転させる
 
 ### コア機能
-19. **LLM自動判定** - Genkit経由のマルチプロバイダー（Gemini/OpenAI/Anthropic、デフォルト: Gemini）で会話を自動分類・保存
+19. **LLM自動判定** - マルチプロバイダー（Gemini/OpenAI/Anthropic、デフォルト: Gemini）で会話を自動分類・保存
 20. **プロジェクト横断記憶** - シンボリックリンクで`.wasurenagusa/`を集約。各エントリにproject/scopeフィールドを持ち、フィルタリング可能
 21. **AIリトライ検出** - AI自身の失敗パターンを自動検出・記録
 22. **動的記憶取得** - agentモード: SessionStart時はdont原文+config+owner-profileのみ注入。話題関連記憶はAIがmemory_searchで動的に取得。injectionモード: 短期・中期・長期記憶を一括注入（従来方式）。記憶想起の仕組みはプロジェクト側hooksに移譲済み

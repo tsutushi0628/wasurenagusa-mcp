@@ -55,7 +55,7 @@ wasurenagusa-mcp/
 │   │   └── search-hint.ts    # 検索ヒント文言（詳細取得の案内／ゼロ件案内）の唯一の判定源。他モジュールに依存しない葉モジュール
 │   ├── analyzer/
 │   │   ├── index.ts              # Gemini連携エクスポート
-│   │   ├── gemini.ts             # LLM呼び出し・判定（genkit経由）
+│   │   ├── gemini.ts             # LLM呼び出し・判定（llm/provider.ts 経由）
 │   │   ├── prompt-loader.ts      # プロンプトファイル読み込み
 │   │   └── conversation-meta.ts  # 会話メタ情報計算（諦め検知用）
 │   ├── consolidator/
@@ -80,7 +80,7 @@ wasurenagusa-mcp/
 │   │   ├── project-scanner.ts    # ~/projects/配下のプロジェクト自動検出
 │   │   └── task-markdown.ts      # tasks.mdパーサー＆ライター
 │   ├── llm/
-│   │   └── provider.ts           # マルチLLMプロバイダー（genkit経由、Gemini/OpenAI/Anthropic切替）
+│   │   └── provider.ts           # マルチLLMプロバイダー（各社 REST API を fetch で直接、Gemini/OpenAI/Anthropic切替）
 │   ├── vector/
 │   │   ├── local-embedding.ts    # ローカルEmbedding生成（@huggingface/transformers, 384次元、v2メイン）
 │   │   ├── embedding-service.ts  # Gemini Embedding生成（768次元、v1レガシー）
@@ -403,7 +403,7 @@ export class MarkdownStorage {
 - `formatEntry` / `getFileHeader` 関数（Markdownフォーマッター）
 - `readTranscript` 関数（トランスクリプトJSONLパーサー）
 - `findProjectRoot` 関数
-- `createGenerateTextFn` 関数（マルチLLMプロバイダー初期化、genkit経由）
+- `createGenerateTextFn` 関数（マルチLLMプロバイダー、REST API 直接）
 - `EmbeddingService` クラス（Gemini Embedding生成）
 - `VectorStore` クラス（ベクトルデータストア）
 - `TagEnricher` クラス（重み付きタグ拡張）

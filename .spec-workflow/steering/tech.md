@@ -26,10 +26,7 @@ MCPサーバー（Model Context Protocol Server）- Claude Codeの機能を拡�
 |-----------|-----------|------|
 | **@modelcontextprotocol/sdk** | ^1.0.0 | MCPサーバー実装の基盤 |
 | **@google/generative-ai** | ^0.24.1 | Gemini API呼び出し（自動判定） |
-| **genkit** | ^1.29.0 | マルチLLM抽象化基盤 |
-| **@genkit-ai/google-genai** | ^1.29.0 | Geminiプロバイダー（genkit用） |
-| **@genkit-ai/compat-oai** | ^1.29.0 | OpenAIプロバイダー（genkit用） |
-| **@genkit-ai/anthropic** | ^0.2.0 | Anthropicプロバイダー（genkit用） |
+| （依存なし） | - | マルチLLM呼び出しは src/llm/provider.ts が各社 REST API を fetch で直接呼ぶ。2026-10 に genkit を外した（genkit が OpenTelemetry 1.25 系に固定、直った版のない脆弱性が残るため） |
 | **dotenv** | ^16.4.0 | 環境変数管理 |
 | **better-sqlite3** | ^12.8.0 | SQLiteデータベースアクセス |
 | **sqlite-vec** | ^0.1.9 | SQLiteベクトル検索拡張 |
