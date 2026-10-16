@@ -6,6 +6,9 @@ updates:
       - /
     schedule:
       interval: weekly
+    # 出てから3日たっていない版は提案しない（乗っ取られた版を避ける。2026-10-16）。脆弱性の直しの提案には効かない
+    cooldown:
+      default-days: 3
     open-pull-requests-limit: 5
     # 大きな版上げは動作確認と合わせて人が進める。脆弱性の直しはこの設定に関係なく提案される
     ignore:
