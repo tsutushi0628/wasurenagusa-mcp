@@ -619,9 +619,10 @@ export function persistCorrectionComplianceViolations(
     const violations = violationAssessments
       .filter((assessment) => assessment.outcome === "violation")
       .map(({ bundleKey, version, checker }) => ({ bundleKey, version, checker }));
-    const checksTableExists = db.prepare(
-      "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'owner_correction_compliance_checks'",
-    ).get();
+    const checksTableExists = tableExists(
+      db as unknown as Database.Database,
+      "owner_correction_compliance_checks",
+    );
     if (checksTableExists) {
       const checkRules = readEffectiveCheckerRules(db as unknown as Database.Database, input.detectedAt);
       const assessments = assessCorrectionCompliance(input.assistantText, checkRules, input.outputTargetText);

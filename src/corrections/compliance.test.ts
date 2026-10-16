@@ -619,6 +619,14 @@ describe("確定規則の遵守検査", () => {
         is_compliant: 0,
       }]);
       expect(storage.connection.prepare("SELECT bundle_key FROM owner_correction_violations").all()).toEqual([]);
+
+      storage.connection.prepare("DROP TABLE owner_correction_compliance_checks").run();
+      expect(persistCorrectionComplianceViolations(storage, {
+        sessionIdHash: "synthetic-session",
+        humanOrdinal: 3,
+        assistantText: "確認しました。対応します。",
+        detectedAt: "2026-10-01T00:03:00.000Z",
+      })).toEqual([]);
     } finally {
       storage.close();
       if (previousValue === undefined) delete process.env.WASURENAGUSA_CORRECTION_COMPLIANCE;
