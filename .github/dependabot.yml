@@ -1,0 +1,24 @@
+# Dependabot の依存更新設定。配備するフォルダを directories に並べる。
+version: 2
+updates:
+  - package-ecosystem: npm
+    directories:
+      - /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    # 大きな版上げは動作確認と合わせて人が進める。脆弱性の直しはこの設定に関係なく提案される
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
+    groups:
+      security-fixes:
+        applies-to: security-updates
+        patterns:
+          - "*"
+      minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
