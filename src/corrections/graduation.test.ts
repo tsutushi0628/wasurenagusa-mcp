@@ -383,8 +383,30 @@ describe("owner correction graduation", () => {
       proposal?.principles.find((entry) => entry.principle_key === bundleKey)?.triggers;
 
     expect(findTriggers(codexRuleKey)).toEqual(["Codex"]);
-    expect(findTriggers(genericRuleKey)).toEqual(["出典", "原本", "検証", "確認"]);
+    expect(findTriggers(genericRuleKey)).toEqual(["出典", "原本", "検証"]);
     expect(findTriggers(longRuleKey)).toEqual(["alpha", "テスト", "漢字", "beta", "gamma", "delta", "epsilon", "zeta"]);
+  });
+
+  it("Jev取込が捨てる一般語しか引き金語に残らない原則はalwaysで出す", () => {
+    const confirmedAt = "2026-10-01T00:00:00.000Z";
+    const questionRuleKey = `oc:v2:${"4".repeat(64)}`;
+    addBundle({
+      bundleKey: questionRuleKey,
+      topicKey: "response_policy",
+      lifetimeKind: "inferred",
+      confirmedAt,
+      ruleText: "おい質問に答えろ",
+    });
+
+    const proposal = createCorrectionGraduationProposal(storage, {
+      at: "2026-10-08T00:00:00.000Z",
+      sourceHead: "a".repeat(40),
+    });
+
+    expect(proposal?.principles.find((entry) => entry.principle_key === questionRuleKey)).toMatchObject({
+      delivery: "always",
+      triggers: [],
+    });
   });
 
   it("検査器のない構成元だけの原則は既存のsettled記録があっても卒業させない", () => {

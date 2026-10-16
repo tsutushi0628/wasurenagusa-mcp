@@ -32,6 +32,14 @@ const RULE_TEXT_GENERIC_WORDS = [
   "規則", "原則", "ルール", "適用", "方法", "内容", "条件", "対象", "処理", "対応",
   "作成", "実行", "利用", "提供", "記載", "共通", "全員",
 ] as const;
+// Jev 取込（firebase-kit .claude/hooks/scripts/extract-jev-knowledge.py の GENERIC_TRIGGERS）が
+// 引き金語として捨てる語。ここで先に外さないと、引き金語がそれだけの原則で取込全体が失敗する。
+const JEV_GENERIC_TRIGGERS: ReadonlySet<string> = new Set([
+  "ある", "いる", "お願い", "お願いする", "これ", "ください", "こと", "する", "した", "して", "できる",
+  "それ", "ため", "なる", "もの", "作業", "対応", "内容", "方法", "情報", "確認", "質問", "回答",
+  "返答", "必要", "問題", "場合", "今回", "利用", "実装", "設計", "検討", "設定", "結果", "処理",
+  "状況", "対象", "入力", "出力", "提供", "担当", "資料", "報告", "要求", "一般", "全部", "全て", "すべて",
+]);
 const RULE_TEXT_GENERIC_WORD_PATTERN = new RegExp(RULE_TEXT_GENERIC_WORDS.join("|"), "gu");
 const RULE_TEXT_WORD_PATTERN = /[A-Za-z0-9]+|[\p{Script=Katakana}ー]+|[\p{Script=Han}々〆ヶ]+/gu;
 const NEGATIVE_EXCLUSION_MARKERS = ["ただし", "例外", "以外", "を除く"] as const;
@@ -282,6 +290,11 @@ function readGraduationBundles(
   `).all(at, at) as GraduationBundleRow[];
 }
 
+function isJevSpecificTrigger(trigger: string): boolean {
+  const normalized = trigger.trim();
+  return Array.from(normalized).length >= 2 && !JEV_GENERIC_TRIGGERS.has(normalized.toLowerCase());
+}
+
 function validateBundleForProposal(bundle: GraduationBundleRow): void {
   if (!/^(?:pr:v1|oc:v1|oc:v2):[0-9a-f]{64}$/iu.test(bundle.bundle_key)) {
     throw new Error("correction graduation bundle key is invalid");
@@ -336,7 +349,7 @@ function deriveEntry(
   const proposalTriggers = (ruleTextTriggers.length > 0
     ? ruleTextTriggers.filter(isSafeProposalText)
     : uniqueSorted([...fallbackTriggers, ...conditionTriggers].filter(isSafeProposalText))
-  ).slice(0, 8);
+  ).filter(isJevSpecificTrigger).slice(0, 8);
   const sortedExclusions = uniqueSorted(excludePatterns.filter(isSafeProposalText));
   return {
     principle_key: bundle.bundle_key,
