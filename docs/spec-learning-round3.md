@@ -133,8 +133,8 @@ LLM 設計原則（`firebase-kit/.claude/refs/llm-design.md`）への適合:
 - 提案ファイル（wasurenagusa が書く。取込は firebase-kit 側）`.wasurenagusa/reports/graduation/proposal-<日付>.json`: `{schema:1, generated_at, source_head, principles:[{principle_key, rule_text, topic_key, delivery, triggers, exclude_patterns, types, evidence:{sessions, days, injected_sessions, failures_after_injection, violations}}]}`。7日を過ぎた提案は取込拒否。卒業を取り消した原則は次回の提案に載らない = 取込側が「卒業由来のカードを毎回全再生成」するので自動で消える。
 - 取込: `extract-jev-knowledge.py --graduation <proposal>` が `g-<hash8>` の id でカードを作り、手定義カード（k01〜k22）は不変。出力は `--out` へ書き、差分を表示。反映は通常の commit 手順（オーナー確認）。自動書込なし。
 - 差し込み量: 卒業カード分は1回の差し込みで ≤150 tokens、全体は既存の `MAX_CARDS=5` に従う。
-- 卒業後の取消: 卒業した原則に新しい言い直し根拠が付いたら、`owner_correction_graduations.revoked_at` を立て、強度 +1、wasurenagusa の注入に戻す。
-- wasurenagusa 側: 卒業中の原則は `prompt`・`refresh` 注入から外し（予算を空ける）、`start` は維持。
+- 卒業後の取消: 卒業した原則に新しい言い直し根拠が付いたら、`owner_correction_graduations.revoked_at` を立て、強度 +1 とする。
+- wasurenagusa 側: `start`・`prompt`・`refresh`・`compact` の注入から外す根拠は、案件ルートの `.claude/rulings/rulings.json`（`WASURENAGUSA_RULINGS_PATH` で上書き可）の指摘との一致とする。対象は `project` が null または訂正の取り出しに使う案件名と一致する active/fixed の指摘。本文か証拠が一致した訂正と、その訂正を束ねた確定原則を外す。卒業状態は注入可否の判定に使わない。Jev は卒業ファイルを読まない。
 - 現実的な見込み: 現状 confirmed 1。卒業が実データで0件でも本ラウンドの合格とする（節3 A9）。抽象化で確定が増えてから効く。通しの確認は合成 fixture で行う。
 
 ### 2.4 e 類の置き換え設計（オーナー裁定 10/07）
@@ -461,12 +461,12 @@ SessionStart だけの配送を「使われた」に数えていない／同 ses
 
 ### T14 卒業提案の書出（L4、wasurenagusa 側）
 
-触るファイル: 新規 `src/corrections/graduation.ts`、新規 `src/cli/graduation-export.ts`、`src/corrections/injection-policy.ts`（卒業中を `prompt`・`refresh` 注入から外す）、各 test。
+触るファイル: 新規 `src/corrections/graduation.ts`、新規 `src/cli/graduation-export.ts`、`src/corrections/injection-policy.ts`（指摘リストとの一致で注入から外す）、各 test。
 
 #### Done
 1. 節2.3 の卒業条件・配送形（scene／always）・提案ファイル形式 `schema:1`。`WASURENAGUSA_GRADUATION=off|on`（既定 off、提案ファイルを書くだけ）。
-2. 卒業の記録（`owner_correction_graduations`）、卒業後の取消（新根拠で `revoked_at`、強度 +1、注入復帰）。
-3. 卒業中の原則は `prompt`・`refresh` 注入から外れ `start` は維持。
+2. 卒業の記録（`owner_correction_graduations`）、卒業後の取消（新根拠で `revoked_at`、強度 +1）。
+3. `start`・`prompt`・`refresh`・`compact` の注入は、節2.3 の指摘リストとの一致で外す。卒業状態は注入可否の判定に使わない。Jev は卒業ファイルを読まない。
 4. 提案ファイルに生文・パス・秘密値が入らない（規則文は既に伏せ字検査済み）。7日超は取込側が拒否するための `generated_at` を入れる。
 
 #### レビュー観点

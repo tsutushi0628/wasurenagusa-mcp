@@ -3,7 +3,7 @@ import Database from "better-sqlite3";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { Readable } from "node:stream";
+import { Readable, Writable } from "node:stream";
 import { SQLiteStorage } from "../storage/sqlite.js";
 import { initializeCorrectionSchema } from "../storage/correction-schema.js";
 import { initializeSchema } from "../storage/schema.js";
@@ -15,6 +15,10 @@ import {
 } from "../corrections/session-store.js";
 import { detectOwnerCorrections } from "../corrections/detector.js";
 import { extractOwnerEvent } from "../corrections/events.js";
+import { addUserPromptPendingReceipt, emitContextOutput } from "./context.js";
+import { renderCorrectionRules, type CorrectionRule } from "../corrections/render.js";
+import { selectCorrectionInjections, type CorrectionInjectionTrigger } from "../corrections/injection-policy.js";
+import { migrateV11ToV12, migrateV12ToV13, migrateV13ToV14 } from "../storage/migration.js";
 
 const { mockState } = vi.hoisted(() => ({
   mockState: {
@@ -209,6 +213,290 @@ describe("analyze Stop correction recovery", () => {
     `).run("synthetic-index-entry", "2026-01-01T00:00:00.000Z", "dont", "synthetic-index-title", "synthetic-index-content", "[]", "fixture-project", "project");
     database.close();
   }
+
+  describe.each([13, 14])("matched pending output ledger on schema v%s", (schemaVersion) => {
+    const prompt = "合成の作業を続けてください";
+
+    beforeEach(async () => {
+      const database = new Database(join(memoryPath, "memory.db"));
+      migrateV11ToV12(database);
+      migrateV12ToV13(database);
+      if (schemaVersion >= 14) migrateV13ToV14(database);
+      database.close();
+      await runStopCorrection("seed-answer", "seed-answer", "今後は質問に答えてください", "2026-10-03T00:00:00.000Z");
+      await runStopCorrection("seed-tone", "seed-tone", "今後は常体で答えて", "2026-10-03T00:00:00.000Z");
+    });
+
+    async function emitPendingRules(
+      ruleCount: number,
+      writeSucceeds: boolean,
+      trigger: CorrectionInjectionTrigger,
+      uuid = "pending-human",
+    ) {
+      const storage = SQLiteStorage.openExistingForHook(join(memoryPath, "memory.db"));
+      const stdout = new Writable({
+        write(_chunk, _encoding, callback) {
+          if (!writeSucceeds) {
+            callback(Object.assign(new Error("synthetic pipe failure"), { code: "EPIPE" }));
+            return;
+          }
+          callback();
+        },
+      });
+      try {
+        const rules = storage.runCorrectionTransaction(({ db }) => db.prepare(`
+          SELECT bundle_key AS bundleKey, version, rule_text AS ruleText, topic_key AS title,
+            'restore' AS delivery
+          FROM owner_correction_bundles WHERE status = 'confirmed' ORDER BY bundle_key LIMIT ?
+        `).all(ruleCount) as CorrectionRule[]);
+        expect(rules).toHaveLength(ruleCount);
+        const receiptId = addUserPromptPendingReceipt(
+          storage, hashSessionId("fixture-session"), "fixture-session", uuid, 0,
+          prompt, "2026-10-03T00:01:00.000Z", true,
+        );
+        const rendered = renderCorrectionRules({ trigger, rules });
+        expect(rendered.ledger).toHaveLength(ruleCount);
+        const result = await emitContextOutput({
+          output: rendered.text + "\n合成の追加コンテキスト", rendered, storage,
+          sessionIdHash: hashSessionId("fixture-session"), compactEpoch: 2, humanOrdinal: 0,
+          trigger, pendingReceiptId: receiptId, deadlineAt: Date.now() + 3500, stdout,
+        });
+        return { receiptId, result };
+      } finally {
+        stdout.destroy();
+        storage.close();
+      }
+    }
+
+    function readInjections() {
+      const storage = SQLiteStorage.openExistingForHook(join(memoryPath, "memory.db"));
+      try {
+        return storage.runCorrectionTransaction(({ db }) => db.prepare(`
+          SELECT * FROM owner_correction_injections WHERE session_id_hash = ? ORDER BY output_order
+        `).all(hashSessionId("fixture-session")));
+      } finally {
+        storage.close();
+      }
+    }
+
+    async function stopPendingPrompt(content: string): Promise<void> {
+      const transcript = writeTranscript([
+        user("pending-human", content, "2026-10-03T00:01:00.000Z"),
+        assistant("pending-response", "合成の応答", "2026-10-03T00:01:01.000Z"),
+      ]);
+      attachStdin(transcript);
+      await runMain();
+    }
+
+    it("confirms emitted output at Stop and suppresses the same version on the next prompt", async () => {
+      const request = {
+        projectRoot,
+        sessionIdHash: hashSessionId("fixture-session"), compactEpoch: 2, humanOrdinal: 2,
+        trigger: "prompt" as const, project: "fixture-project", scope: "general", query: prompt,
+        at: new Date(Date.now() + 1000).toISOString(),
+        featureModes: {
+          correctionLoop: "on" as const, correctionInject: "on" as const, compliance: "off" as const,
+          principles: "off" as const, graduation: "off" as const, strength: "off" as const,
+          reinjection: "off" as const, candidateInjection: "off" as const, ownerScopeBehavior: "off" as const,
+        },
+      };
+      const before = SQLiteStorage.openExistingForHook(join(memoryPath, "memory.db"));
+      let selectedBundleKeys: string[];
+      try {
+        selectedBundleKeys = selectCorrectionInjections(before, request).rules.map((rule) => rule.bundleKey);
+      } finally {
+        before.close();
+      }
+      const { receiptId, result } = await emitPendingRules(1, true, "prompt");
+      expect(result.status).toBe("emitted");
+      const entry = result.rendered.ledger[0];
+      expect(selectedBundleKeys).toContain(entry.bundleKey);
+      let outputHumanOrdinal = 1;
+      if (schemaVersion === 13) {
+        expect(readInjections()).toHaveLength(1);
+        outputHumanOrdinal = 0;
+      } else {
+        expect(readInjections()).toEqual([]);
+      }
+      await stopPendingPrompt(prompt);
+      expect(readInjections()).toEqual([expect.objectContaining({
+        session_id_hash: hashSessionId("fixture-session"), compact_epoch: 2,
+        bundle_key: entry.bundleKey, version: entry.version, human_ordinal: outputHumanOrdinal, trigger: "prompt",
+        emitted_at: expect.any(String), output_order: entry.outputOrder,
+        body_hash: entry.bodyHash, output_hash: result.rendered.outputHash,
+        token_estimate: result.rendered.tokenCount, body_included: 1, stdout_status: "emitted",
+      })]);
+      expect(readCorrectionState().pending).toContainEqual({ receipt_id: receiptId, matched_event_id: expect.any(String) });
+      const storage = SQLiteStorage.openExistingForHook(join(memoryPath, "memory.db"));
+      try {
+        const selection = selectCorrectionInjections(storage, request);
+        expect(selection.rules.map((rule) => rule.bundleKey)).not.toContain(entry.bundleKey);
+        expect(selection.unreached.map((rule) => rule.bundleKey)).not.toContain(entry.bundleKey);
+      } finally {
+        storage.close();
+      }
+    });
+
+    it.skipIf(schemaVersion === 13)("confirms every rule in a two-rule refresh output with its original metadata", async () => {
+      const { receiptId, result } = await emitPendingRules(2, true, "refresh");
+      expect(result.status).toBe("emitted");
+      await stopPendingPrompt(prompt);
+      expect(readInjections()).toEqual(result.rendered.ledger.map((entry) => expect.objectContaining({
+        bundle_key: entry.bundleKey, version: entry.version, human_ordinal: 1, trigger: "refresh",
+        compact_epoch: 2, output_order: entry.outputOrder, body_hash: entry.bodyHash,
+        output_hash: entry.outputHash, token_estimate: entry.tokenEstimate,
+        body_included: 1, stdout_status: "emitted",
+      })));
+      const database = new Database(join(memoryPath, "memory.db"));
+      try {
+        const pending = database.prepare(`
+          SELECT output_callback_succeeded_at FROM owner_correction_pending WHERE receipt_id = ?
+        `).get(receiptId) as { output_callback_succeeded_at: string | null };
+        expect(pending.output_callback_succeeded_at).toEqual(expect.any(String));
+        expect(readInjections()).toEqual([
+          expect.objectContaining({ emitted_at: pending.output_callback_succeeded_at }),
+          expect.objectContaining({ emitted_at: pending.output_callback_succeeded_at }),
+        ]);
+      } finally {
+        database.close();
+      }
+    });
+
+    it("does not add ledger rows when Stop runs twice", async () => {
+      await emitPendingRules(2, true, "prompt");
+      await stopPendingPrompt(prompt);
+      const first = readInjections();
+      expect(first).toHaveLength(2);
+      attachStdin(transcriptPath);
+      await runMain();
+      expect(readInjections()).toEqual(first);
+    });
+
+    it("does not confirm a pending output whose stdout callback failed", async () => {
+      const { receiptId, result } = await emitPendingRules(1, false, "prompt");
+      expect(result.status).toBe("write_failed");
+      await stopPendingPrompt(prompt);
+      expect(readInjections()).toEqual([]);
+      expect(readCorrectionState().pending).toContainEqual({ receipt_id: receiptId, matched_event_id: expect.any(String) });
+    });
+
+    it.skipIf(schemaVersion === 13)("does not confirm a successful pending output that did not match the transcript", async () => {
+      const { receiptId, result } = await emitPendingRules(1, true, "prompt");
+      expect(result.status).toBe("emitted");
+      await stopPendingPrompt("別の合成発話");
+      expect(readInjections()).toEqual([]);
+      expect(readCorrectionState().pending).toContainEqual({ receipt_id: receiptId, matched_event_id: null });
+    });
+
+    it.skipIf(schemaVersion === 13).each([
+      { name: "null output", assignment: "output_ledger = 'null'", reason: "output ledger has invalid shape" },
+      { name: "array output", assignment: "output_ledger = '[]'", reason: "output ledger has invalid shape" },
+      { name: "scalar output", assignment: "output_ledger = '1'", reason: "output ledger has invalid shape" },
+      { name: "missing entries", assignment: "output_ledger = json_remove(output_ledger, '$.entries')", reason: "output ledger has invalid shape" },
+      { name: "null entries", assignment: "output_ledger = json_set(output_ledger, '$.entries', NULL)", reason: "output ledger has invalid shape" },
+      { name: "object entries", assignment: "output_ledger = json_set(output_ledger, '$.entries', json('{}'))", reason: "output ledger has invalid shape" },
+      { name: "string entries", assignment: "output_ledger = json_set(output_ledger, '$.entries', 'invalid')", reason: "output ledger has invalid shape" },
+      { name: "missing trigger", assignment: "output_ledger = json_remove(output_ledger, '$.trigger')", reason: "output ledger has invalid shape" },
+      { name: "invalid trigger", assignment: "output_ledger = json_set(output_ledger, '$.trigger', 'invalid')", reason: "output ledger has invalid shape" },
+      { name: "null entry", assignment: "output_ledger = json_set(output_ledger, '$.entries[1]', NULL)", reason: "output ledger has invalid shape" },
+      { name: "missing bundle key", assignment: "output_ledger = json_remove(output_ledger, '$.entries[1].bundleKey')", reason: "output ledger has invalid shape" },
+      { name: "invalid version", assignment: "output_ledger = json_set(output_ledger, '$.entries[1].version', '1')", reason: "output ledger has invalid shape" },
+      { name: "missing body hash", assignment: "output_ledger = json_remove(output_ledger, '$.entries[1].bodyHash')", reason: "output ledger has invalid shape" },
+      { name: "invalid output hash", assignment: "output_ledger = json_set(output_ledger, '$.entries[1].outputHash', 1)", reason: "output ledger has invalid shape" },
+      { name: "negative output order", assignment: "output_ledger = json_set(output_ledger, '$.entries[1].outputOrder', -1)", reason: "output ledger has invalid shape" },
+      { name: "invalid token estimate", assignment: "output_ledger = json_set(output_ledger, '$.entries[1].tokenEstimate', 1.5)", reason: "output ledger has invalid shape" },
+      { name: "missing output epoch", assignment: "output_epoch = NULL", reason: "output is incomplete" },
+      { name: "missing output hash", assignment: "output_hash = NULL", reason: "output is incomplete" },
+      {
+        name: "empty ledger",
+        assignment: "output_ledger = json_set(output_ledger, '$.entries', json('[]'))",
+        reason: "output has no ledger entries",
+      },
+      {
+        name: "second rule without a body",
+        assignment: "output_ledger = json_set(output_ledger, '$.entries[1].bodyIncluded', json('false'))",
+        reason: "output ledger is inconsistent",
+      },
+      {
+        name: "second rule with a different output hash",
+        assignment: "output_ledger = json_set(output_ledger, '$.entries[1].outputHash', 'synthetic-mismatch')",
+        reason: "output ledger is inconsistent",
+      },
+    ])("skips only the inconsistent receipt and completes Stop: $name", async ({ assignment, reason }) => {
+      const inconsistent = await emitPendingRules(2, true, "prompt");
+      const valid = await emitPendingRules(1, true, "prompt", "valid-pending-human");
+      const database = new Database(join(memoryPath, "memory.db"));
+      try {
+        database.prepare(`UPDATE owner_correction_pending SET ${assignment} WHERE receipt_id = ?`)
+          .run(inconsistent.receiptId);
+      } finally {
+        database.close();
+      }
+      const transcriptRecords = [
+        user("pending-human", prompt, "2026-10-03T00:01:00.000Z"),
+        assistant("pending-response", "合成の応答", "2026-10-03T00:01:01.000Z"),
+        user("valid-pending-human", prompt, "2026-10-03T00:01:02.000Z"),
+        assistant("valid-pending-response", "合成の応答", "2026-10-03T00:01:03.000Z"),
+        user("next-correction", "今後は質問に答えてください", "2026-10-03T00:01:04.000Z"),
+        assistant("next-response", "合成の応答", "2026-10-03T00:01:05.000Z"),
+      ];
+      const transcript = writeTranscript(transcriptRecords);
+      attachStdin(transcript);
+      consoleErrorSpy.mockClear();
+
+      await expect(runMain()).resolves.toBeUndefined();
+
+      const entry = valid.result.rendered.ledger[0];
+      const injections = readInjections();
+      expect(injections).toEqual([expect.objectContaining({
+        bundle_key: entry.bundleKey, version: entry.version, human_ordinal: 2,
+        output_hash: valid.result.rendered.outputHash, body_included: 1, stdout_status: "emitted",
+      })]);
+      const state = readCorrectionState();
+      expect(state.pending).toEqual(expect.arrayContaining([
+        { receipt_id: inconsistent.receiptId, matched_event_id: expect.any(String) },
+        { receipt_id: valid.receiptId, matched_event_id: expect.any(String) },
+      ]));
+      expect(state.events).toHaveLength(5);
+      expect(state.bundles).toContainEqual(expect.objectContaining({ occurrence_count: 2 }));
+      const progressDatabase = new Database(join(memoryPath, "memory.db"));
+      let progress: unknown;
+      try {
+        progress = progressDatabase.prepare(`
+          SELECT human_ordinal, transcript_offset FROM owner_correction_sessions WHERE session_id_hash = ?
+        `).get(hashSessionId("fixture-session"));
+      } finally {
+        progressDatabase.close();
+      }
+      expect(progress).toEqual({
+        human_ordinal: 3,
+        transcript_offset: Buffer.byteLength(transcriptRecords.map((record) => JSON.stringify(record)).join("\n") + "\n"),
+      });
+      expect(consoleErrorSpy.mock.calls).toEqual([
+        [`[analyze] pending correction ${inconsistent.receiptId}: ${reason}`],
+      ]);
+
+      attachStdin(transcriptPath);
+      await expect(runMain()).resolves.toBeUndefined();
+      expect(readInjections()).toEqual(injections);
+      expect(readCorrectionState()).toEqual(state);
+      expect(consoleErrorSpy).toHaveBeenCalledOnce();
+    });
+
+    it.skipIf(schemaVersion === 13)("rolls back matching and every ledger row if confirming the second rule fails", async () => {
+      const { receiptId } = await emitPendingRules(2, true, "prompt");
+      const database = new Database(join(memoryPath, "memory.db"));
+      database.exec(`
+        CREATE TRIGGER reject_second_injection BEFORE INSERT ON owner_correction_injections
+        WHEN NEW.output_order = 2 BEGIN SELECT RAISE(ABORT, 'synthetic ledger failure'); END
+      `);
+      database.close();
+      await expect(stopPendingPrompt(prompt)).rejects.toThrow("synthetic ledger failure");
+      expect(readInjections()).toEqual([]);
+      expect(readCorrectionState().pending).toContainEqual({ receipt_id: receiptId, matched_event_id: null });
+      expect(readCorrectionState().events).toHaveLength(2);
+    });
+  });
 
   it("persists a continuing correction before any API-key gated analysis", async () => {
     process.env.GEMINI_API_KEY = "fixture-api-key";

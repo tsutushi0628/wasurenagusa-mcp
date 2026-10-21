@@ -1,12 +1,228 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync } from "fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { Readable } from "stream";
 
-import { getDreamContent, getSuccessContent, main } from "./context.js";
+import { estimateTokens, getDreamContent, getSuccessContent, main } from "./context.js";
 import { SQLiteStorage } from "../storage/sqlite.js";
+import { initializeSchema } from "../storage/schema.js";
+import type { MemoryCategory } from "../types.js";
+import * as configModule from "../config.js";
 import { config } from "../config.js";
+
+describe("context.ts: SessionStartの記憶索引", () => {
+  let tmpDir: string;
+  let projectRoot: string;
+  let storage: SQLiteStorage;
+  let originalStdin: PropertyDescriptor | undefined;
+  let entries: Array<{ id: string; title: string; category: MemoryCategory; project: string | null }>;
+
+  beforeEach(() => {
+    const temporaryRoot = join(process.cwd(), ".tmp");
+    mkdirSync(temporaryRoot, { recursive: true });
+    tmpDir = mkdtempSync(join(temporaryRoot, "context-index-"));
+    projectRoot = join(tmpDir, "myproject");
+    const memoryPath = join(projectRoot, ".wasurenagusa");
+    mkdirSync(join(projectRoot, ".git"), { recursive: true });
+    mkdirSync(memoryPath, { recursive: true });
+    writeFileSync(join(memoryPath, "owner-profile.md"), "");
+    storage = new SQLiteStorage(join(memoryPath, config.sqliteFile));
+    initializeSchema(storage.connection);
+    vi.spyOn(configModule, "getMemoryPath").mockReturnValue(memoryPath);
+    vi.stubEnv("WASURENAGUSA_CORRECTION_LOOP", "off");
+    vi.stubEnv("WASURENAGUSA_INJECTION_TOKEN_BUDGET", undefined);
+    originalStdin = Object.getOwnPropertyDescriptor(process, "stdin");
+
+    entries = [];
+    const remainingCategories: MemoryCategory[] = ["dont", "log", "config", "dream", "success", "dont"];
+    const insert = storage.connection.prepare(
+      "INSERT INTO memories (id, timestamp, category, title, content, tags, project, last_read_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    );
+    for (let index = 0; index < 60; index++) {
+      let category: MemoryCategory;
+      let project: string | null = "myproject";
+      if (index < 3) {
+        category = "decision";
+      } else if (index < 7) {
+        if (index % 2 === 0) {
+          category = "config";
+        } else {
+          category = "snippet";
+        }
+      } else if (index < 12) {
+        project = "otherproject";
+        if (index % 2 === 0) {
+          category = "snippet";
+        } else {
+          category = "decision";
+        }
+      } else if (index < 17) {
+        category = remainingCategories[(index - 12) % remainingCategories.length];
+        project = "otherproject";
+      } else if (index < 21) {
+        if (index % 2 === 0) {
+          category = "snippet";
+        } else {
+          category = "decision";
+        }
+        if (index === 17 || index === 20) {
+          project = null;
+        } else {
+          project = "unknown";
+        }
+      } else {
+        category = remainingCategories[(index - 12) % remainingCategories.length];
+        if (index < 26) {
+          if (index % 2 === 0) {
+            project = "unknown";
+          } else {
+            project = null;
+          }
+          if (index === 23) category = "config";
+        }
+      }
+
+      const entry = {
+        id: `synthetic-memory-${String(index).padStart(2, "0")}`,
+        title: `合成記憶${String(index).padStart(2, "0")}`,
+        category,
+        project,
+      };
+      entries.push(entry);
+      let readIndex = index;
+      if (index === 6) readIndex = 5;
+      let lastReadAt: string | null = new Date(Date.UTC(2020, 0, 1, 0, readIndex)).toISOString();
+      if ([0, 3, 7, 12].includes(index)) lastReadAt = null;
+      const timestamp = new Date(Date.UTC(2019, 0, 1, 0, 60 - index)).toISOString();
+      insert.run(entry.id, timestamp, category, entry.title, `synthetic body ${index}`, "[]", project, lastReadAt);
+    }
+  });
+
+  afterEach(() => {
+    if (originalStdin) Object.defineProperty(process, "stdin", originalStdin);
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    storage.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  async function runSessionStart(): Promise<string> {
+    Object.defineProperty(process, "stdin", {
+      value: Readable.from([Buffer.from(JSON.stringify({
+        session_id: "synthetic-index-session",
+        cwd: projectRoot,
+        hook_event_name: "SessionStart",
+        source: "startup",
+      }), "utf-8")]),
+      configurable: true,
+    });
+    const chunks: string[] = [];
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation((
+      (chunk: string | Uint8Array, ...args: unknown[]): boolean => {
+        if (typeof chunk === "string") {
+          chunks.push(chunk);
+        } else {
+          chunks.push(Buffer.from(chunk).toString("utf8"));
+        }
+        const callback = args.find((argument) => typeof argument === "function") as (() => void) | undefined;
+        if (callback) callback();
+        return true;
+      }
+    ) as typeof process.stdout.write);
+    try {
+      expect(await main()).toBe("emitted");
+      expect(stdoutSpy).toHaveBeenCalledOnce();
+      return chunks.join("");
+    } finally {
+      stdoutSpy.mockRestore();
+    }
+  }
+
+  it("2案件と案件未所属の全7種類60件から20件を①案件decision→②案件snippet/config→③未所属decision/snippet→④その他の順に注入する", async () => {
+    const output = await runSessionStart();
+    const indexLines = output.split("\n").filter((line) => /^\[[a-z]+\] /.test(line));
+    const expectedIndices = [2, 1, 0, 56, 50, 44, 38, 32, 26, 5, 6, 4, 3, 20, 19, 18, 17, 59, 58, 57];
+
+    expect(indexLines).toHaveLength(20);
+    expect(indexLines).toEqual(expectedIndices.map((index) => {
+      const entry = entries[index];
+      return `[${entry.category}] ${entry.title} (${entry.id})`;
+    }));
+    expect(output).not.toContain("synthetic body");
+  });
+
+  it("案件decisionが0件なら②のsnippet/configから始まる", async () => {
+    storage.connection.prepare("UPDATE memories SET category = 'dont' WHERE project = ? AND category = 'decision'")
+      .run("myproject");
+
+    const output = await runSessionStart();
+    const indexLines = output.split("\n").filter((line) => /^\[[a-z]+\] /.test(line));
+    const expectedIndices = [56, 50, 44, 38, 32, 26, 5, 6, 4, 3, 20, 19, 18, 17, 59, 58, 57, 55, 54, 53];
+
+    expect(indexLines).toHaveLength(20);
+    expect(indexLines).toEqual(expectedIndices.map((index) => {
+      const entry = entries[index];
+      return `[${entry.category}] ${entry.title} (${entry.id})`;
+    }));
+  });
+
+  it("他案件のdecisionとsnippetとconfigは最近読まれていても索引に出さない", async () => {
+    storage.connection.prepare("UPDATE memories SET last_read_at = '2099-01-01T00:00:00.000Z' WHERE project = ?")
+      .run("otherproject");
+
+    const output = await runSessionStart();
+    const indexLines = output.split("\n").filter((line) => /^\[[a-z]+\] /.test(line));
+    const allEntries = storage.getMinimalIndexEntries("myproject", entries.length);
+    const otherEntries = entries.filter((entry) => entry.project === "otherproject");
+
+    expect(otherEntries.map((entry) => entry.category)).toEqual(expect.arrayContaining(["decision", "snippet", "config"]));
+    expect(indexLines).toHaveLength(20);
+    expect(allEntries).toHaveLength(50);
+    for (const entry of otherEntries) {
+      expect(indexLines.join("\n")).not.toContain(entry.id);
+      expect(allEntries.map((indexEntry) => indexEntry.id)).not.toContain(entry.id);
+    }
+  });
+
+  it("案件指定がなければNULLとunknownのdecisionとsnippetを先に並べて未所属の記憶だけ返す", () => {
+    const indexEntries = storage.getMinimalIndexEntries(undefined, entries.length);
+    const expectedIndices = [20, 19, 18, 17, 25, 24, 23, 22, 21];
+
+    expect(indexEntries).toEqual(expectedIndices.map((index) => {
+      const { id, title, category } = entries[index];
+      return { id, title, category };
+    }));
+  });
+
+  it("記憶インデックスの見出しとメモリ活用ルールの全文を維持する", async () => {
+    const output = await runSessionStart();
+
+    expect(output.split("\n")[0]).toBe("## 記憶インデックス（詳細はサブエージェント経由で memory_get_detail を使用）");
+    expect(output.slice(output.indexOf("## メモリ活用ルール"))).toBe([
+      "## メモリ活用ルール",
+      "- 詳細が必要な場合はサブエージェントに memory_search / memory_get_detail を委譲すること",
+      "- メインコンテキストに記憶の生データを持ち込まない",
+      "- 「覚えろ」と言われたら memory_save で保存すること（MEMORY.mdへの書き込み禁止）",
+    ].join("\n"));
+  });
+
+  it("同じ60件のDBで開始時の注入全体のトークン概算が変更前の50件索引より少ない", async () => {
+    const legacyEntries = storage.connection.prepare(
+      "SELECT id, title, category FROM memories WHERE state = 'active' AND (project IS NULL OR project = 'unknown' OR project = ?) ORDER BY last_read_at IS NULL, last_read_at DESC, timestamp DESC LIMIT ?",
+    ).all("myproject", 50) as ReturnType<SQLiteStorage["getMinimalIndexEntries"]>;
+    expect(legacyEntries).toHaveLength(50);
+    const legacyIndexSpy = vi.spyOn(SQLiteStorage.prototype, "getMinimalIndexEntries").mockReturnValue(legacyEntries);
+    const legacyOutput = await runSessionStart();
+    legacyIndexSpy.mockRestore();
+
+    const output = await runSessionStart();
+
+    expect(legacyOutput.split("\n").filter((line) => /^\[[a-z]+\] /.test(line))).toHaveLength(50);
+    expect(output.split("\n").filter((line) => /^\[[a-z]+\] /.test(line))).toHaveLength(20);
+    expect(estimateTokens(output)).toBeLessThan(estimateTokens(legacyOutput));
+  });
+});
 
 /**
  * heart-extension F3 / F4: context.ts の dream / success セクション組み立てを検証する。

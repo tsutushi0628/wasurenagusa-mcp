@@ -9,8 +9,8 @@ import {
   migrateCorrectionComplianceDatabase,
   migrateCorrectionDatabase,
 } from "../corrections/import.js";
-import { CORRECTION_PRINCIPLES_DDL } from "../storage/correction-schema.js";
-import { migrateV12ToV13 } from "../storage/migration.js";
+import { CORRECTION_PENDING_OUTPUT_DDL, CORRECTION_PRINCIPLES_DDL } from "../storage/correction-schema.js";
+import { migrateV12ToV13, migrateV13ToV14 } from "../storage/migration.js";
 import { isDirectRun } from "../utils/cli-entry.js";
 import { findProjectRoot } from "../utils/projectRoot.js";
 
@@ -20,6 +20,7 @@ type ParsedArguments = {
   migrateV11: boolean;
   migrateV12: boolean;
   migrateV13: boolean;
+  migrateV14: boolean;
   backfillRuleText: boolean;
 };
 
@@ -35,6 +36,7 @@ function parseArguments(args: string[]): ParsedArguments {
   let migrateV11 = false;
   let migrateV12 = false;
   let migrateV13 = false;
+  let migrateV14 = false;
   let backfillRuleText = false;
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
@@ -81,13 +83,20 @@ function parseArguments(args: string[]): ParsedArguments {
       backfillRuleText = true;
       continue;
     }
+    if (argument === "--migrate-v14") {
+      if (migrateV14) {
+        throw new CorrectionImportError("--migrate-v14 cannot be repeated");
+      }
+      migrateV14 = true;
+      continue;
+    }
     throw new CorrectionImportError("unsupported argument");
   }
 
   if (migrateV11 && migrateV12) {
     throw new CorrectionImportError("choose either --source or one migration");
   }
-  const migrationCount = Number(migrateV11) + Number(migrateV12) + Number(migrateV13) + Number(backfillRuleText);
+  const migrationCount = Number(migrateV11) + Number(migrateV12) + Number(migrateV13) + Number(migrateV14) + Number(backfillRuleText);
   if (migrationCount > 1) {
     throw new CorrectionImportError("choose one migration");
   }
@@ -100,13 +109,16 @@ function parseArguments(args: string[]): ParsedArguments {
   if (migrateV13 && sourcePath !== undefined) {
     throw new CorrectionImportError("choose either --source or --migrate-v13");
   }
+  if (migrateV14 && sourcePath !== undefined) {
+    throw new CorrectionImportError("choose either --source or --migrate-v14");
+  }
   if (backfillRuleText && sourcePath !== undefined) {
     throw new CorrectionImportError("choose either --source or --backfill-rule-text");
   }
   if (migrationCount === 0 && sourcePath === undefined) {
     throw new CorrectionImportError("choose either --source or --migrate-v11");
   }
-  return { sourcePath, apply, migrateV11, migrateV12, migrateV13, backfillRuleText };
+  return { sourcePath, apply, migrateV11, migrateV12, migrateV13, migrateV14, backfillRuleText };
 }
 
 function formatRuleTextBackfillSummary(
@@ -134,6 +146,15 @@ function runV13Migration(targetPath: string, apply: boolean): { schemaVersion: n
   const db = new Database(targetPath, { fileMustExist: true, readonly: !apply });
   try {
     return migrateV12ToV13(db, apply);
+  } finally {
+    db.close();
+  }
+}
+
+function runV14Migration(targetPath: string, apply: boolean): { schemaVersion: number; ddlCount: number } {
+  const db = new Database(targetPath, { fileMustExist: true, readonly: !apply });
+  try {
+    return migrateV13ToV14(db, apply);
   } finally {
     db.close();
   }
@@ -204,6 +225,20 @@ export function runCorrectionImportCli(
       const summary = backfillCorrectionRuleText(targetPath, parsed.apply);
       return { exitCode: 0, stdout: formatRuleTextBackfillSummary(summary, parsed.apply), stderr: "" };
     }
+    if (parsed.migrateV14) {
+      const summary = runV14Migration(targetPath, parsed.apply);
+      let ddlPreview = "";
+      if (!parsed.apply) {
+        ddlPreview = "\n" + CORRECTION_PENDING_OUTPUT_DDL.trim().split(/\r?\n/u)
+          .map((line) => "+ " + line).join("\n");
+      }
+      return {
+        exitCode: 0,
+        stdout: "mode=migrate apply=" + Number(parsed.apply)
+          + " schema=" + summary.schemaVersion + " ddl=" + summary.ddlCount + ddlPreview + "\n",
+        stderr: "",
+      };
+    }
     const summary = importCorrectionMemories({
       sourcePath: parsed.sourcePath as string,
       targetPath,
@@ -219,11 +254,13 @@ export function runCorrectionImportCli(
       "--migrate-v11 cannot be repeated",
       "--migrate-v12 cannot be repeated",
       "--migrate-v13 cannot be repeated",
+      "--migrate-v14 cannot be repeated",
       "--backfill-rule-text cannot be repeated",
       "unsupported argument",
       "choose either --source or --migrate-v11",
       "choose either --source or --migrate-v12",
       "choose either --source or --migrate-v13",
+      "choose either --source or --migrate-v14",
       "choose either --source or --backfill-rule-text",
       "choose either --source or one migration",
       "choose one migration",

@@ -156,6 +156,7 @@ describe("訂正原則", () => {
 
   function inputFor(sessionIdHash: string, trigger: "start" | "prompt" = "start") {
     return {
+      projectRoot: directory,
       project: "fixture-project",
       scope: "backend",
       query: "合成検証規則",

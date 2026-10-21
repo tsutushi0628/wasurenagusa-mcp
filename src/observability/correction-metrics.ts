@@ -18,6 +18,7 @@ export interface CorrectionMetricInput {
   durationMs: number;
   tokens: number;
   missingCount: number;
+  rulingsExcludedCount?: number;
   eventIdHash?: string;
   detectorVersion?: string;
   reasonCode?: CorrectionReasonCode;
@@ -37,6 +38,7 @@ const METRIC_INPUT_KEYS = new Set([
   "durationMs",
   "tokens",
   "missingCount",
+  "rulingsExcludedCount",
   "eventIdHash",
   "detectorVersion",
   "reasonCode",
@@ -52,6 +54,7 @@ interface MetricFileEntry {
   ms?: number;
   tok?: number;
   miss?: number;
+  rulings_excluded?: number;
   st?: readonly [number, number, number, number, number, number, number];
   hash?: string;
   v?: string;
@@ -96,6 +99,11 @@ function validateInput(input: CorrectionMetricInput): void {
   if (!Number.isSafeInteger(input.durationMs) || input.durationMs < 0) throw new Error("Invalid correction metric input");
   if (!Number.isSafeInteger(input.tokens) || input.tokens < 0) throw new Error("Invalid correction metric input");
   if (!Number.isSafeInteger(input.missingCount) || input.missingCount < 0) throw new Error("Invalid correction metric input");
+  if (input.rulingsExcludedCount !== undefined && (
+    !Number.isSafeInteger(input.rulingsExcludedCount) || input.rulingsExcludedCount < 0
+  )) {
+    throw new Error("Invalid correction metric input");
+  }
   const stageMetricsRequired = input.eventKind === "SessionStart" || input.eventKind === "UserPromptSubmit";
   const stageDurationsMs = input.stageDurationsMs;
   if (stageMetricsRequired && stageDurationsMs === undefined) throw new Error("Invalid correction metric input");
@@ -260,6 +268,7 @@ function getSampleEntry(input: CorrectionMetricInput, now: Date): MetricFileEntr
   if (input.eventIdHash !== undefined) entry.hash = input.eventIdHash;
   if (input.detectorVersion !== undefined) entry.v = input.detectorVersion;
   if (input.reasonCode !== undefined) entry.reason_code = input.reasonCode;
+  if (input.rulingsExcludedCount !== undefined) entry.rulings_excluded = input.rulingsExcludedCount;
   return entry;
 }
 

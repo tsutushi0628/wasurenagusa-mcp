@@ -60,8 +60,10 @@ import {
   createPendingReceiptId,
   hashRawText,
   hashSessionId,
+  prepareCorrectionInjectionInsert,
   queuePendingReceipt,
   resolveSessionProject,
+  supportsPendingOutputLedger,
 } from "../corrections/session-store.js";
 
 export const CONTEXT_HOOK_STDIN_LIMIT_BYTES = 1024 * 1024;
@@ -199,6 +201,7 @@ export function writeStdoutOnce(
   text: string,
   stdout: NodeJS.WriteStream = process.stdout,
   timeoutMs = Number.POSITIVE_INFINITY,
+  onTimeout?: () => void,
 ): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false;
@@ -225,7 +228,11 @@ export function writeStdoutOnce(
 
     stdout.once("error", onError);
     if (Number.isFinite(timeoutMs)) {
-      timer = setTimeout(() => finish(false, true), Math.max(0, timeoutMs));
+      timer = setTimeout(() => {
+        if (settled) return;
+        onTimeout?.();
+        finish(false, true);
+      }, Math.max(0, timeoutMs));
     }
     try {
       stdout.write(text, (error?: Error | null) => {
@@ -286,17 +293,22 @@ export async function emitContextOutput({
     return { status: "timeout", rendered: finalRender, writeAttempted: false };
   }
 
+  let writeTimedOut = false;
   const writeSucceeded = await writeStdoutOnce(
     output,
     stdout,
     deadlineAt - Date.now() - CONTEXT_HOOK_OUTPUT_RESERVE_MS,
+    () => {
+      writeTimedOut = true;
+    },
   );
   const writeCompletedAt = Date.now();
   lap?.("write");
   if (!writeSucceeded) {
-    const status = deadlineAt - writeCompletedAt <= CONTEXT_HOOK_OUTPUT_RESERVE_MS
-      ? "timeout"
-      : "write_failed";
+    let status: "timeout" | "write_failed" = "write_failed";
+    if (writeTimedOut || deadlineAt - writeCompletedAt <= CONTEXT_HOOK_OUTPUT_RESERVE_MS) {
+      status = "timeout";
+    }
     return { status, rendered: finalRender, writeAttempted: true };
   }
   if (deadlineAt - writeCompletedAt <= CONTEXT_HOOK_OUTPUT_RESERVE_MS) {
@@ -308,9 +320,10 @@ export async function emitContextOutput({
 
   if (pendingReceiptId) {
     try {
-      recordPendingOutput(storage, pendingReceiptId, compactEpoch, finalRender);
-      const status = finalRender.ledger.length === 1 ? "emitted" : "ledger_unknown";
-      return { status, rendered: finalRender, writeAttempted: true };
+      const recordedAllEntries = recordPendingOutput(storage, pendingReceiptId, compactEpoch, trigger, finalRender);
+      if (recordedAllEntries) {
+        return { status: "emitted", rendered: finalRender, writeAttempted: true };
+      }
     } catch {
       return { status: "ledger_unknown", rendered: finalRender, writeAttempted: true };
     } finally {
@@ -320,13 +333,7 @@ export async function emitContextOutput({
 
   try {
     storage.runCorrectionTransaction(({ db }) => {
-      const insert = db.prepare(`
-        INSERT INTO owner_correction_injections (
-          session_id_hash, compact_epoch, bundle_key, version, human_ordinal, trigger,
-          emitted_at, output_order, body_hash, output_hash, token_estimate, body_included, stdout_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'emitted')
-        ON CONFLICT(session_id_hash, compact_epoch, bundle_key, version, human_ordinal, trigger) DO NOTHING
-      `);
+      const insert = prepareCorrectionInjectionInsert(db);
       const select = db.prepare(`
         SELECT output_order, body_hash, output_hash, token_estimate, body_included, stdout_status
         FROM owner_correction_injections
@@ -908,26 +915,26 @@ function recordPendingOutput(
   storage: SQLiteStorage,
   receiptId: string,
   compactEpoch: number,
+  trigger: CorrectionInjectionTrigger,
   rendered: CorrectionRenderResult,
-): void {
+): boolean {
   const entry = rendered.ledger[0];
-  if (!receiptId || !entry) return;
-  storage.runCorrectionTransaction(({ db }) => {
+  if (!receiptId || !entry) return false;
+  return storage.runCorrectionTransaction(({ db }) => {
+    if (!supportsPendingOutputLedger(db)) return false;
+    const parameters: (string | number)[] = [
+      compactEpoch, entry.outputOrder, entry.bundleKey, entry.version,
+      rendered.outputHash, new Date().toISOString(), JSON.stringify({ trigger, entries: rendered.ledger }),
+    ];
+    parameters.push(receiptId);
     const result = db.prepare(`
       UPDATE owner_correction_pending
       SET output_epoch = ?, output_order = ?, output_bundle_key = ?, output_version = ?,
-        output_hash = ?, output_callback_succeeded_at = ?
+        output_hash = ?, output_callback_succeeded_at = ?, output_ledger = ?
       WHERE receipt_id = ? AND output_callback_succeeded_at IS NULL
-    `).run(
-      compactEpoch,
-      entry.outputOrder,
-      entry.bundleKey,
-      entry.version,
-      rendered.outputHash,
-      new Date().toISOString(),
-      receiptId,
-    );
+    `).run(...parameters);
     if (result.changes !== 1) throw new Error("pending correction output record failed");
+    return true;
   });
 }
 
@@ -1124,12 +1131,14 @@ export async function main(): Promise<ContextHookStatus> {
       unreached: [],
       alwaysOnCount: 0,
       ftsCandidateCount: 0,
+      rulingsExcludedCount: 0,
       correctionMatchedReinjectionKeys: [],
     };
     let correctionRender = makeEmptyCorrectionRender(injectionPlan.renderTrigger, injectionPlan.budgetTokens);
     if (correctionInjectionEnabled && shouldProcessPrompt) {
       requireHookTime(deadlineAt);
       selection = selectCorrectionInjections(storage, {
+        projectRoot,
         project: sessionProject,
         scope: correctionScope,
         query: hookInput.prompt ?? "",
@@ -1190,6 +1199,7 @@ export async function main(): Promise<ContextHookStatus> {
         durationMs,
         tokens,
         missingCount,
+        rulingsExcludedCount: selection.rulingsExcludedCount,
         reasonCode: automatedPrompt ? "automated_prompt" : undefined,
       });
       requireHookTime(deadlineAt);
@@ -1249,6 +1259,7 @@ export async function main(): Promise<ContextHookStatus> {
         durationMs,
         tokens,
         missingCount,
+        rulingsExcludedCount: selection.rulingsExcludedCount,
         reasonCode: automatedPrompt ? "automated_prompt" : undefined,
         stageDurationsMs,
       });

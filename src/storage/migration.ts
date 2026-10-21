@@ -9,6 +9,8 @@ import { computeContentHash } from "./content-hash.js";
 import {
   CORRECTION_COMPLIANCE_DDL,
   CORRECTION_COMPLIANCE_SCHEMA_VERSION,
+  CORRECTION_PENDING_OUTPUT_DDL,
+  CORRECTION_PENDING_OUTPUT_SCHEMA_VERSION,
   CORRECTION_PRINCIPLES_DDL,
   CORRECTION_PRINCIPLES_SCHEMA_VERSION,
   CORRECTION_PRINCIPLES_TABLE_NAMES,
@@ -697,6 +699,30 @@ export function migrateV12ToV13(
     ).run(CORRECTION_PRINCIPLES_SCHEMA_VERSION);
   });
   transaction();
+  return { schemaVersion: getSchemaVersion(db), ddlCount };
+}
+
+export function migrateV13ToV14(
+  db: Database.Database,
+  apply = true,
+): { schemaVersion: number; ddlCount: number } {
+  const schemaVersion = getSchemaVersion(db);
+  if (schemaVersion !== CORRECTION_PRINCIPLES_SCHEMA_VERSION) {
+    throw new Error("owner correction pending output schema requires schema version 13");
+  }
+  const columns = db.prepare("PRAGMA table_info(owner_correction_pending)").all() as Array<{ name: string }>;
+  if (columns.length === 0 || columns.some((column) => column.name === "output_ledger")) {
+    throw new Error("schema version 13 has missing or partial owner correction pending output schema");
+  }
+  const ddlCount = 1;
+  if (!apply) return { schemaVersion, ddlCount };
+
+  db.transaction(() => {
+    db.exec(CORRECTION_PENDING_OUTPUT_DDL);
+    db.prepare(
+      "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, datetime('now'))",
+    ).run(CORRECTION_PENDING_OUTPUT_SCHEMA_VERSION);
+  })();
   return { schemaVersion: getSchemaVersion(db), ddlCount };
 }
 

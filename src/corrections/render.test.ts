@@ -173,9 +173,31 @@ describe("renderCorrectionRules", () => {
     expect(promptResult.omittedBundleKeys).toEqual(["refresh-title-limit"]);
   });
 
-  it("定期再注入は2件・1件160文字・合計320文字・450 tokens以内に保つ", () => {
+  it("定期再注入でも未配送のrestore規則を2件出力し、台帳候補に残す", () => {
+    const rules = [
+      rule("refresh-restore-1", "常体で回答する。", { delivery: "restore" }),
+      rule("refresh-restore-2", "全文を表示する。", { delivery: "restore" }),
+      rule("refresh-after-restore", "出典を確認する。", { delivery: "refresh" }),
+    ];
+
+    const result = renderCorrectionRules({ trigger: "refresh", rules });
+
+    expect(result.includedRules.map((entry) => entry.bundleKey)).toEqual([
+      "refresh-restore-1", "refresh-restore-2",
+    ]);
+    expect(result.ledger.map((entry) => entry.bundleKey)).toEqual([
+      "refresh-restore-1", "refresh-restore-2",
+    ]);
+    expect(result.text).toContain("常体で回答する。");
+    expect(result.text).toContain("全文を表示する。");
+    expect(result.text).not.toContain("出典を確認する。");
+    expect(result.omittedBundleKeys).toEqual(["refresh-after-restore"]);
+    expect(result.tokenCount).toBeLessThanOrEqual(450);
+  });
+
+  it.each(["refresh", "restore"] as const)("定期再注入は2件・1件160文字・合計320文字・450 tokens以内に保つ（%s）", (delivery) => {
     const rules = Array.from({ length: 3 }, (_, index) =>
-      rule(`refresh-${index}`, "あ".repeat(160), { delivery: "refresh" }),
+      rule(`refresh-${index}`, "あ".repeat(160), { delivery }),
     );
 
     const result = renderCorrectionRules({ trigger: "refresh", rules });

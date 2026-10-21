@@ -18,7 +18,9 @@ import {
   hashRawText,
   hashSessionId,
   hashTranscriptPosition,
+  prepareCorrectionInjectionInsert,
   resolveSessionProject,
+  supportsPendingOutputLedger,
   type SessionCorrectionEvent,
   type SessionProgress,
 } from "../corrections/session-store.js";
@@ -43,6 +45,8 @@ import {
 } from "../corrections/compliance.js";
 import { Analyzer } from "../analyzer/index.js";
 import { SQLiteStorage } from "../storage/index.js";
+import type { CorrectionInjectionLedgerEntry } from "../corrections/render.js";
+import type { CorrectionInjectionTrigger } from "../corrections/injection-policy.js";
 import { getMemoryPath, config } from "../config.js";
 import { getCorrectionLoopMode } from "../corrections/environment-mode.js";
 import { findProjectRoot } from "../utils/projectRoot.js";
@@ -341,6 +345,27 @@ function readStopSessionState(
   });
 }
 
+function isPendingOutputLedger(output: unknown): output is {
+  trigger: CorrectionInjectionTrigger;
+  entries: Array<Omit<CorrectionInjectionLedgerEntry, "bodyIncluded"> & { bodyIncluded: boolean }>;
+} {
+  if (typeof output !== "object" || output === null || Array.isArray(output)) return false;
+  if (!("trigger" in output) || !("entries" in output) || !Array.isArray(output.entries)) return false;
+  if (output.trigger !== "start" && output.trigger !== "prompt" && output.trigger !== "refresh" && output.trigger !== "compact") {
+    return false;
+  }
+  return output.entries.every((entry: unknown) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return false;
+    return "bundleKey" in entry && typeof entry.bundleKey === "string" && entry.bundleKey.length > 0
+      && "version" in entry && typeof entry.version === "number" && Number.isSafeInteger(entry.version) && entry.version > 0
+      && "bodyHash" in entry && typeof entry.bodyHash === "string"
+      && "outputHash" in entry && typeof entry.outputHash === "string"
+      && "tokenEstimate" in entry && typeof entry.tokenEstimate === "number" && Number.isSafeInteger(entry.tokenEstimate) && entry.tokenEstimate >= 0
+      && "outputOrder" in entry && typeof entry.outputOrder === "number" && Number.isSafeInteger(entry.outputOrder) && entry.outputOrder >= 0
+      && "bodyIncluded" in entry && typeof entry.bodyIncluded === "boolean";
+  });
+}
+
 function commitStopBatch(
   storage: SQLiteStorage,
   sessionIdHash: string,
@@ -369,13 +394,49 @@ function commitStopBatch(
     if (!committed.committed) return null;
 
     const candidatesByEvent = new Map(prepared.map(({ event, candidates }) => [event.eventId, candidates]));
+    let outputLedgerColumn = "NULL AS output_ledger";
+    if (supportsPendingOutputLedger(db)) {
+      outputLedgerColumn = "output_ledger";
+    }
+    const insert = prepareCorrectionInjectionInsert(db);
     for (const match of committed.matchedReceipts) {
       if (!hasDeadlineTimeRemaining(deadline)) throw new StopDeadlineExceededError();
       const pending = db.prepare(`
-        SELECT receipt_id FROM owner_correction_pending
+        SELECT output_epoch, output_hash, output_callback_succeeded_at, ${outputLedgerColumn}
+        FROM owner_correction_pending
         WHERE receipt_id = ? AND matched_event_id = ?
-      `).get(match.receiptId, match.eventId) as { receipt_id: string } | undefined;
+      `).get(match.receiptId, match.eventId) as {
+        output_epoch: number | null;
+        output_hash: string | null;
+        output_callback_succeeded_at: string | null;
+        output_ledger: string | null;
+      } | undefined;
       if (!pending) throw new Error("matched pending correction receipt was not found");
+      if (pending.output_callback_succeeded_at === null || pending.output_ledger === null) continue;
+      if (pending.output_epoch === null || pending.output_hash === null) {
+        console.error(`[analyze] pending correction ${match.receiptId}: output is incomplete`);
+        continue;
+      }
+      const output: unknown = JSON.parse(pending.output_ledger);
+      if (!isPendingOutputLedger(output)) {
+        console.error(`[analyze] pending correction ${match.receiptId}: output ledger has invalid shape`);
+        continue;
+      }
+      if (output.entries.length === 0) {
+        console.error(`[analyze] pending correction ${match.receiptId}: output has no ledger entries`);
+        continue;
+      }
+      if (output.entries.some((entry) => !entry.bodyIncluded || entry.outputHash !== pending.output_hash)) {
+        console.error(`[analyze] pending correction ${match.receiptId}: output ledger is inconsistent`);
+        continue;
+      }
+      for (const entry of output.entries) {
+        if (!hasDeadlineTimeRemaining(deadline)) throw new StopDeadlineExceededError();
+        insert.run(
+          sessionIdHash, pending.output_epoch, entry.bundleKey, entry.version, match.humanOrdinal, output.trigger,
+          pending.output_callback_succeeded_at, entry.outputOrder, entry.bodyHash, pending.output_hash, entry.tokenEstimate,
+        );
+      }
     }
 
     const transaction = { db, save };

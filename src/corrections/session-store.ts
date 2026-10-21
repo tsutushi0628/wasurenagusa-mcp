@@ -1,7 +1,23 @@
 import { createHash, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
+import { CORRECTION_PENDING_OUTPUT_SCHEMA_VERSION } from "../storage/correction-schema.js";
+import { getSchemaVersion } from "../storage/schema.js";
 
 export const MAX_PENDING_CANDIDATES = 3;
+
+export function supportsPendingOutputLedger(db: Pick<Database.Database, "prepare">): boolean {
+  return getSchemaVersion(db as Database.Database) >= CORRECTION_PENDING_OUTPUT_SCHEMA_VERSION;
+}
+
+export function prepareCorrectionInjectionInsert(db: Pick<Database.Database, "prepare">): Database.Statement {
+  return db.prepare(`
+    INSERT INTO owner_correction_injections (
+      session_id_hash, compact_epoch, bundle_key, version, human_ordinal, trigger,
+      emitted_at, output_order, body_hash, output_hash, token_estimate, body_included, stdout_status
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'emitted')
+    ON CONFLICT(session_id_hash, compact_epoch, bundle_key, version, human_ordinal, trigger) DO NOTHING
+  `);
+}
 
 export interface SessionProgress {
   humanOrdinal: number;

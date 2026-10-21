@@ -1749,8 +1749,8 @@ export class SQLiteStorage {
 
   /**
    * 注入ビルダ用の最小索引を取得する（design.md「最小索引」定義・タスク4.2）。
-   * state='active' のタイトル行のみを、直近アクセス上位（last_read_at）を優先しつつ
-   * timestamp降順で上限 limit 件まで返す。本文（content）は含めない
+   * state='active' のタイトル行を、案件のdecision、案件のsnippet/config、案件未所属のdecision/snippet、
+   * その他の順に返す。各段内はlast_read_at降順、timestamp降順で上限 limit 件まで返す。本文（content）は含めない
    * （全文を持ち回るコード経路を作らないため。索引のみ→詳細は memory_get_detail へpull）。
    */
   getMinimalIndexEntries(currentProject: string | undefined, limit: number): Array<{
@@ -1759,13 +1759,20 @@ export class SQLiteStorage {
     category: MemoryCategory;
   }> {
     let query =
-      "SELECT id, title, category FROM memories WHERE state = 'active'";
+      "SELECT id, title, category FROM memories WHERE state = 'active' AND (project IS NULL OR project = 'unknown'";
     const params: string[] = [];
     if (currentProject) {
-      query += " AND (project IS NULL OR project = 'unknown' OR project = ?)";
+      query += " OR project = ?";
       params.push(currentProject);
     }
-    query += " ORDER BY last_read_at IS NULL, last_read_at DESC, timestamp DESC LIMIT ?";
+    query += ") ORDER BY CASE";
+    if (currentProject) {
+      query += " WHEN project = ? AND category = 'decision' THEN 0";
+      query += " WHEN project = ? AND category IN ('snippet', 'config') THEN 1";
+      params.push(currentProject, currentProject);
+    }
+    query += " WHEN (project IS NULL OR project = 'unknown') AND category IN ('decision', 'snippet') THEN 2 ELSE 3 END,";
+    query += " last_read_at IS NULL, last_read_at DESC, timestamp DESC LIMIT ?";
 
     const rows = this.db.prepare(query).all(...params, limit) as Array<{
       id: string;

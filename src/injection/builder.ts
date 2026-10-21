@@ -19,7 +19,7 @@ import {
 } from "./budget.js";
 
 /** 記憶索引の件数上限（design.md「最小索引」既定値） */
-export const MINIMAL_INDEX_LIMIT = 50;
+export const MINIMAL_INDEX_LIMIT = 20;
 
 /**
  * skipped ラベルのうち「素材欠損ではない正常系」を表すもの（fail-loud 警告・カウンタ対象外）。

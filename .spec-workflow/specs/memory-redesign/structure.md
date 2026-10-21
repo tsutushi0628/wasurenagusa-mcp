@@ -13,7 +13,8 @@ wasurenagusa-mcp/
 │   ├── types.ts          # 共有型定義
 │   ├── tools/            # MCPツール実装（保存、検索、詳細取得、文脈取得、削除、強度更新、stash、restore、自律タスク系）
 │   ├── cli/              # Hooks CLI群（セッション開始注入、会話分析、ガード、夜間統合、埋め込み補完、各ワーカー）
-│   ├── storage/          # 永続化層。sqlite.ts が正本（v2）。markdown.ts はv1遺物、migration.ts はv1→v2移行。search-hint.ts は検索ヒント文言の唯一の判定源（他モジュールに依存しない葉モジュール）
+│   ├── storage/          # 永続化層。sqlite.ts が正本（v2）。markdown.ts はv1遺物。migration.ts はスキーマ移行、correction-schema.ts は訂正記録のDDL。v14で仮記録に出力した全規則の台帳情報を追加。search-hint.ts は検索ヒント文言の唯一の判定源（他モジュールに依存しない葉モジュール）
+│   ├── corrections/      # 訂正の検出、発話と仮記録の照合、規則の保存、注入の選択、遵守確認
 │   ├── vector/           # 埋め込みとスコアリング（ローカル埋め込み、距離計算、タグ拡張、記憶ティア、テーマ）
 │   ├── consolidator/     # 統合アルゴリズムと鮮度判定、統合結果の永続化
 │   ├── analyzer/         # Stop hook の会話分析（LLM呼び出しと決定論のメタ計算）
@@ -35,7 +36,9 @@ wasurenagusa-mcp/
 | 入口 | 実行物 | 通る層 |
 |---|---|---|
 | SessionStart / PreCompact hook | context CLI | storage → 注入本文生成。統合と埋め込み補完のワーカーをspawn |
-| Stop hook | analyze CLI | analyzer（LLM分析）→ storage（自動保存） |
+| UserPromptSubmit hook | context CLI | corrections → 規則の注入。未照合の発話では出力成功後に全規則の台帳情報を仮記録へ保存 |
+| Stop hook | analyze CLI | corrections → 発話と仮記録を照合し、出力済み規則の台帳確定まで同じstorageトランザクションで保存。analyzerで会話を分析 |
+| 訂正スキーマの明示移行 | correction-import CLI | storage/migration.ts。`--migrate-v14` で変更を表示し、`--apply` で適用 |
 | PreToolUse hook（全ツール） | pre-tool-use-guard CLI | 統合キャッシュのガードパターン照合 |
 | 夜間launchd | consolidate-all CLI | vector（近傍探索）→ consolidator → storage |
 | MCPツール呼び出し | index.ts → tools/ | storage、vector、llm |

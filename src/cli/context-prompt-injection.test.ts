@@ -1,16 +1,16 @@
 import Database from "better-sqlite3";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { detectOwnerCorrections } from "../corrections/detector.js";
 import { extractOwnerEvent } from "../corrections/events.js";
 import { selectCorrectionInjections } from "../corrections/injection-policy.js";
 import { applyCorrectionEvidence } from "../corrections/store.js";
 import { correctionConditionKey, serializeCorrectionRuleInput } from "../corrections/rule-template.js";
 import { hashSessionId } from "../corrections/session-store.js";
-import { migrateV11ToV12, migrateV12ToV13 } from "../storage/migration.js";
+import { migrateV11ToV12, migrateV12ToV13, migrateV13ToV14 } from "../storage/migration.js";
 import { SQLiteStorage } from "../storage/sqlite.js";
 import { initializeCorrectionSchema } from "../storage/correction-schema.js";
 
@@ -60,6 +60,10 @@ describe("context.ts: 人間のコードだけのprompt", () => {
   let consoleErrorSpy: ReturnType<typeof vi.spyOn> | undefined;
   const stderrLines: string[] = [];
 
+  beforeEach(() => {
+    vi.stubEnv("WASURENAGUSA_RULINGS_PATH", join(scratchRoot, "missing-rulings.json"));
+  });
+
   afterEach(() => {
     if (priorStdin) Object.defineProperty(process, "stdin", priorStdin);
     if (priorStdout) Object.defineProperty(process, "stdout", priorStdout);
@@ -68,12 +72,176 @@ describe("context.ts: 人間のコードだけのprompt", () => {
       else process.env[key] = value;
     }
     priorEnvironment.clear();
+    vi.unstubAllEnvs();
     memoryPathState.value = "";
     consoleErrorSpy?.mockRestore();
     consoleErrorSpy = undefined;
     stderrLines.length = 0;
     if (tempDirectory) rmSync(tempDirectory, { recursive: true, force: true });
     tempDirectory = undefined;
+  });
+
+  it.each(
+    (["SessionStart", "UserPromptSubmit", "PreCompact"] as const).flatMap((eventKind) =>
+      (["project-root", "override"] as const).map((rulingsSource) => ({ eventKind, rulingsSource })),
+    ),
+  )("$eventKindで$rulingsSourceの指摘リストを照合し、再注入を省く回のログは除外0件にする", async ({ eventKind, rulingsSource }) => {
+    mkdirSync(scratchRoot, { recursive: true });
+    tempDirectory = mkdtempSync(join(scratchRoot, "context-rulings-"));
+    const projectRoot = join(tempDirectory, "fixture-project");
+    const memoryPath = join(projectRoot, ".wasurenagusa");
+    const dbPath = join(memoryPath, "memory.db");
+    mkdirSync(join(projectRoot, ".git"), { recursive: true });
+    mkdirSync(memoryPath, { recursive: true });
+    memoryPathState.value = memoryPath;
+    priorEnvironment = new Map(changedEnvironmentKeys.map((key) => [key, process.env[key]]));
+    process.env.WASURENAGUSA_CORRECTION_LOOP = "on";
+    process.env.WASURENAGUSA_CORRECTION_INJECT = "on";
+    for (const key of changedEnvironmentKeys.slice(2)) process.env[key] = "off";
+    priorStdin = Object.getOwnPropertyDescriptor(process, "stdin");
+    priorStdout = Object.getOwnPropertyDescriptor(process, "stdout");
+
+    const initialStorage = new SQLiteStorage(dbPath);
+    initialStorage.initialize(memoryPath);
+    initialStorage.close();
+    const database = new Database(dbPath);
+    initializeCorrectionSchema(database);
+    migrateV11ToV12(database);
+    migrateV12ToV13(database);
+    migrateV13ToV14(database);
+    database.close();
+
+    const duplicateText = "おい質問に答えろ";
+    const retainedText = "ちゃんと全体設計して。";
+    const seedAt = new Date(Date.now() - 60_000).toISOString();
+    const seedStorage = new SQLiteStorage(dbPath);
+    try {
+      seedStorage.runCorrectionTransaction(({ db, save }) => {
+        for (const [index, ruleText] of [duplicateText, retainedText].entries()) {
+          const eventId = `synthetic-rulings-event-${index}`;
+          db.prepare(`
+            INSERT INTO owner_correction_events (
+              event_id, session_id_hash, source_uuid_hash, human_ordinal, observed_at, available_at,
+              source_kind, excerpt, previous_action, action_first_locator_hash, action_last_locator_hash,
+              project, scope, raw_text_hash, source_locator_hash, processed_at
+            ) VALUES (?, 'synthetic-seed-session', NULL, 1, ?, ?, 'user', ?, 'action_unknown', NULL, NULL,
+              'fixture-project', 'general', 'synthetic-raw-hash', ?, ?)
+          `).run(eventId, seedAt, seedAt, ruleText, `locator-${index}`, seedAt);
+          const bundleKey = `synthetic-ruling-${index}`;
+          const memory = save({
+            category: "dont",
+            title: "合成の確定規則",
+            content: ruleText,
+            tags: ["synthetic"],
+            project: "fixture-project",
+            scope: "general",
+            intensity: 5,
+          });
+          db.prepare(`
+            INSERT INTO owner_correction_bundles (
+              bundle_key, memory_id, rule_text, topic_key, polarity, condition_key, project, scope,
+              visibility, status, intensity, occurrence_count, session_count, first_seen_at, last_seen_at,
+              expires_at, lifetime_kind, continuation_basis, confirmed_at, version, counterevidence_event_id,
+              last_confirmation_asked_at, confirmation_state
+            ) VALUES (?, ?, ?, 'verification', 'negative', 'general', 'fixture-project', 'general', 'owner', 'confirmed',
+              5, 2, 2, ?, ?, NULL, 'explicit_continuing', 'synthetic-continuation', ?, 1, NULL, NULL, 'none')
+          `).run(bundleKey, memory.id, ruleText, seedAt, seedAt, seedAt);
+          db.prepare(`
+            INSERT INTO owner_correction_versions (
+              bundle_key, version, rule_text, body_hash, conditions, condition_key, polarity, visibility,
+              status, confirmed_at, expires_at, lifetime_kind, continuation_basis, evidence_event_ids,
+              effective_from, change_reason
+            ) VALUES (?, 1, ?, 'synthetic-hash', '[]', 'general', 'negative', 'owner', 'confirmed', ?, NULL,
+              'explicit_continuing', 'synthetic-continuation', '[]', ?, 'synthetic-fixture')
+          `).run(bundleKey, ruleText, seedAt, seedAt);
+          db.prepare(`
+            INSERT INTO owner_correction_evidence (event_id, bundle_key, source, score, detector_version, conditions, polarity)
+            VALUES (?, ?, 'legacy_import', 2, 'fixture-v1', '[]', 'negative')
+          `).run(eventId, bundleKey);
+        }
+      });
+    } finally {
+      seedStorage.close();
+    }
+    let rulingsPath: string;
+    if (rulingsSource === "override") {
+      rulingsPath = join(tempDirectory, "rulings.json");
+      process.env.WASURENAGUSA_RULINGS_PATH = rulingsPath;
+    } else {
+      mkdirSync(join(projectRoot, ".claude", "rulings"), { recursive: true });
+      rulingsPath = join(projectRoot, ".claude", "rulings", "rulings.json");
+      delete process.env.WASURENAGUSA_RULINGS_PATH;
+    }
+    writeFileSync(rulingsPath, JSON.stringify({
+      rulings: [{ id: "r-synthetic", rule: "合成の回答規則", quotes: [{ date: "2026-10-01", text: duplicateText }], status: "active", project: null }],
+      resolved_pendings: [],
+    }), "utf8");
+    const nestedCwd = join(projectRoot, "nested", "src");
+    mkdirSync(nestedCwd, { recursive: true });
+
+    const result = await runContextHook({
+      session_id: `synthetic-rulings-session-${eventKind}`,
+      cwd: nestedCwd,
+      hook_event_name: eventKind,
+      source: "startup",
+      prompt: "作業を続けて",
+    });
+
+    expect(result.status).toBe("emitted");
+    expect(result.output).not.toContain(duplicateText);
+    expect(result.output).toContain(retainedText);
+    let expectedMissingCount = 0;
+    const outputDatabase = new Database(dbPath);
+    try {
+      const injections = outputDatabase.prepare(`
+        SELECT bundle_key, body_included, stdout_status FROM owner_correction_injections
+        WHERE session_id_hash = ?
+      `).all(hashSessionId(`synthetic-rulings-session-${eventKind}`));
+      if (eventKind === "UserPromptSubmit") {
+        expectedMissingCount = 1;
+        expect(injections).toEqual([]);
+        const pending = outputDatabase.prepare(`
+          SELECT output_bundle_key, output_version, output_callback_succeeded_at
+          FROM owner_correction_pending WHERE session_id_hash = ?
+        `).all(hashSessionId(`synthetic-rulings-session-${eventKind}`));
+        expect(pending).toEqual([{
+          output_bundle_key: "synthetic-ruling-1",
+          output_version: 1,
+          output_callback_succeeded_at: expect.any(String),
+        }]);
+      } else {
+        expect(injections).toEqual([{
+          bundle_key: "synthetic-ruling-1", body_included: 1, stdout_status: "emitted",
+        }]);
+      }
+    } finally {
+      outputDatabase.close();
+    }
+    const metricsDirectory = join(memoryPath, "logs", "correction-metrics");
+    const logFile = readdirSync(metricsDirectory).find((name) => name.startsWith(`${eventKind}-`) && name.endsWith(".jsonl"));
+    if (logFile === undefined) throw new Error("correction metrics log was not written");
+    const metrics = readFileSync(join(metricsDirectory, logFile), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expect(metrics.filter((entry) => entry.k === "sample")).toEqual([
+      expect.objectContaining({ rulings_excluded: 1, miss: expectedMissingCount }),
+    ]);
+    if (eventKind !== "UserPromptSubmit") {
+      const repeated = await runContextHook({
+        session_id: `synthetic-rulings-session-${eventKind}`,
+        cwd: nestedCwd,
+        hook_event_name: eventKind,
+        source: "startup",
+        prompt: "作業を続けて",
+      });
+
+      expect(repeated.output).not.toContain(duplicateText);
+      expect(repeated.output).not.toContain(retainedText);
+      if (eventKind === "PreCompact") expect(repeated.output).toBe("");
+      const repeatedMetrics = readFileSync(join(metricsDirectory, logFile), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      expect(repeatedMetrics.filter((entry) => entry.k === "sample")).toEqual([
+        expect.objectContaining({ rulings_excluded: 1 }),
+        expect.objectContaining({ rulings_excluded: 0 }),
+      ]);
+    }
   });
 
   it("抽出結果がnullでも確定済み規則をrestoreとして選び、stdoutへ注入する", async () => {
@@ -161,6 +329,7 @@ describe("context.ts: 人間のコードだけのprompt", () => {
       prompt,
     };
     const selection = selectCorrectionInjections(seedStorage, {
+      projectRoot,
       project,
       scope: "general",
       query: prompt,
@@ -300,6 +469,7 @@ describe("context.ts: 人間のコードだけのprompt", () => {
     expect(savedBundle.status).toBe("confirmed");
     expect(savedBundle.bundleKey).toMatch(/^oc:v2:[0-9a-f]{64}$/u);
     const seedSelection = selectCorrectionInjections(seedStorage, {
+      projectRoot,
       project,
       scope: "general",
       query: "",

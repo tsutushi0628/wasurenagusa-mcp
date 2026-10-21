@@ -375,6 +375,7 @@ describe("abstract-principles", () => {
     ).get(candidate.bundle_key) as { status: string });
     expect(promoted.status).toBe("confirmed");
     const injection = selectCorrectionInjections(storage, {
+      projectRoot: directory,
       project: "fixture-project",
       scope: "backend",
       query: "合成記録を先に確認する",
@@ -554,6 +555,7 @@ describe("abstract-principles", () => {
     ).get());
     expect(principle.status).toBe("confirmed");
     const injection = selectCorrectionInjections(storage, {
+      projectRoot: directory,
       project: "fixture-project",
       scope: "backend",
       query: "合成記録を先に確認する",

@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
-import { tmpdir } from "os";
 
 import {
   CORRECTION_HOOK_EVENT_KINDS,
@@ -28,7 +27,9 @@ describe("observability/correction-metrics", () => {
   let memoryPath: string;
 
   beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), "wasurenagusa-correction-metrics-test-"));
+    const scratchRoot = join(process.cwd(), ".tmp");
+    mkdirSync(scratchRoot, { recursive: true });
+    tmpDir = mkdtempSync(join(scratchRoot, "wasurenagusa-correction-metrics-test-"));
     memoryPath = join(tmpDir, ".wasurenagusa");
     mkdirSync(memoryPath, { recursive: true });
   });
@@ -92,6 +93,34 @@ describe("observability/correction-metrics", () => {
       k: "violation",
     });
     expect(Buffer.byteLength(line)).toBeLessThanOrEqual(256);
+  });
+
+  it.each(["SessionStart", "UserPromptSubmit", "PreCompact"] as const)("%sで指摘リスト一致による除外件数を本文なしで記録する", async (eventKind) => {
+    for (const rulingsExcludedCount of [0, 2]) {
+      await expect(recordCorrectionMetric(memoryPath, {
+        eventKind,
+        durationMs: 1,
+        tokens: 0,
+        missingCount: 0,
+        rulingsExcludedCount,
+        stageDurationsMs: zeroStageDurationsMs,
+      }, jstMidnightUtc)).resolves.toBe("recorded");
+    }
+
+    const lines = readFileSync(join(memoryPath, "logs", "correction-metrics", `${eventKind}-2026-10-03.jsonl`), "utf8")
+      .trim().split("\n");
+    expect(lines.map((line) => JSON.parse(line).rulings_excluded)).toEqual([0, 2]);
+    for (const line of lines) expect(Buffer.byteLength(line)).toBeLessThanOrEqual(256);
+  });
+
+  it.each([-1, 0.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1])("不正な除外件数%sを拒否する", async (rulingsExcludedCount) => {
+    await expect(recordCorrectionMetric(memoryPath, {
+      eventKind: "PreCompact",
+      durationMs: 0,
+      tokens: 0,
+      missingCount: 0,
+      rulingsExcludedCount,
+    }, jstMidnightUtc)).rejects.toThrow("Invalid correction metric input");
   });
 
   it("抽象化のCodex呼び出しを本文なしの専用カウンタへ1件記録する", async () => {

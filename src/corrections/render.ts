@@ -124,11 +124,12 @@ function getRuleOrder(
       .filter((entry) => entry.delivery === "restore" && entry.complianceViolation)
       .slice(0, 3);
     const candidates = rules.filter((entry) => entry.delivery === "candidate").slice(0, 2);
+    const refresh = rules.filter((entry) =>
+      entry.delivery === "refresh" || (entry.delivery === "restore" && !entry.complianceViolation),
+    );
     if (complianceRestore.length > 0) {
-      const refresh = rules.filter((entry) => entry.delivery === "refresh");
       return [...complianceRestore, ...refresh, ...candidates].slice(0, 3);
     }
-    const refresh = rules.filter((entry) => entry.delivery === "refresh");
     return [...refresh, ...candidates].slice(0, 2);
   }
   if (trigger !== "prompt") return [...rules];

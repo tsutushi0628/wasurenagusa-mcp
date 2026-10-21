@@ -8,7 +8,7 @@ import { runCorrectionImportCli } from "./correction-import.js";
 import { detectOwnerCorrections } from "../corrections/detector.js";
 import { extractOwnerEvent } from "../corrections/events.js";
 import { correctionConditionKey, serializeCorrectionRuleInput, type CorrectionRuleInput } from "../corrections/rule-template.js";
-import { migrateV10ToV11, migrateV11ToV12 } from "../storage/migration.js";
+import { migrateV10ToV11, migrateV11ToV12, migrateV12ToV13, migrateV13ToV14 } from "../storage/migration.js";
 import { initializeSchema } from "../storage/schema.js";
 
 function sha256(value: string): string {
@@ -204,10 +204,12 @@ describe("訂正記憶取込CLI", () => {
     }
   });
 
-  it("rule_text backfill dry-run shows counts and source-derived examples without writing", () => {
+  it.each([11, 12, 13, 14])("rule_text backfill dry-run shows source-derived examples without writing on schema v%s", (schemaVersion) => {
     const migrationDb = new Database(targetPath);
     migrateV10ToV11(migrationDb);
-    migrateV11ToV12(migrationDb);
+    if (schemaVersion >= 12) migrateV11ToV12(migrationDb);
+    if (schemaVersion >= 13) migrateV12ToV13(migrationDb);
+    if (schemaVersion >= 14) migrateV13ToV14(migrationDb);
     seedEmptyCandidate(migrationDb, "synthetic-fill", "架空の青色試料番号を書くな。");
     seedEmptyCandidate(migrationDb, "synthetic-missing-command", "架空の青色試料番号を書くな。", { includeCommandText: false });
     seedEmptyCandidate(migrationDb, "synthetic-invalid", "架空の青色試料番号を書くな。", { conditions: "{" });
@@ -218,6 +220,7 @@ describe("訂正記憶取込CLI", () => {
     const result = runCorrectionImportCli(["--backfill-rule-text"], targetPath);
 
     expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain(`schema=${schemaVersion}`);
     expect(result.stdout).toMatch(/candidates=4 fill=2 unfilled=2 polarity_changed=2/u);
     expect(result.stdout).toContain("missing_command_text=1");
     expect(result.stdout).toContain("invalid_conditions=1");
@@ -228,10 +231,12 @@ describe("訂正記憶取込CLI", () => {
     expect(readFileSync(targetPath)).toEqual(before);
   });
 
-  it("rule_text backfill apply creates a pre-write backup and stays safe on schema v12", () => {
+  it.each([11, 12, 13, 14])("rule_text backfill apply creates a pre-write backup and fills rules on schema v%s", (schemaVersion) => {
     const migrationDb = new Database(targetPath);
     migrateV10ToV11(migrationDb);
-    migrateV11ToV12(migrationDb);
+    if (schemaVersion >= 12) migrateV11ToV12(migrationDb);
+    if (schemaVersion >= 13) migrateV12ToV13(migrationDb);
+    if (schemaVersion >= 14) migrateV13ToV14(migrationDb);
     seedEmptyCandidate(migrationDb, "synthetic-apply", "架空の青色試料番号を書くな。");
     seedEmptyCandidate(
       migrationDb,
@@ -239,11 +244,14 @@ describe("訂正記憶取込CLI", () => {
       "今後はこの語彙では判断に迷う言葉を使うな",
       { plainCommandEligible: true, detectorVersion: "owner-correction-v2" },
     );
+    const principleMembersBefore = migrationDb.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get("owner_correction_principle_members");
     migrationDb.close();
 
     const result = runCorrectionImportCli(["--backfill-rule-text", "--apply"], targetPath);
 
     expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain(`schema=${schemaVersion}`);
     expect(result.stdout).toMatch(/apply=1 .*candidates=2 fill=1 unfilled=1 polarity_changed=2/u);
     const backupDir = join(directory, "migration-backups");
     expect(existsSync(backupDir)).toBe(true);
@@ -282,9 +290,9 @@ describe("訂正記憶取込CLI", () => {
       `).get("synthetic-polarity-only") as { conditions: string; polarity: string };
       expect(polarityOnlyEvidence.polarity).toBe("negative");
       expect(JSON.parse(polarityOnlyEvidence.conditions).polarity).toBe("negative");
-      expect(db.prepare("SELECT MAX(version) AS version FROM schema_version").get()).toEqual({ version: 12 });
+      expect(db.prepare("SELECT MAX(version) AS version FROM schema_version").get()).toEqual({ version: schemaVersion });
       expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
-        .get("owner_correction_principle_members")).toBeUndefined();
+        .get("owner_correction_principle_members")).toEqual(principleMembersBefore);
     } finally {
       db.close();
     }

@@ -1,3 +1,5 @@
+import { readFileSync } from "fs";
+import { resolve } from "path";
 import type Database from "better-sqlite3";
 import { readCorrectionFeatureModes, type CorrectionFeatureModes } from "./environment-mode.js";
 import type { CorrectionRule } from "./render.js";
@@ -7,8 +9,8 @@ import {
 } from "../storage/correction-schema.js";
 import { getSchemaVersion } from "../storage/schema.js";
 import { isCorrectionComplianceEnabled } from "./compliance.js";
-import { getActiveCorrectionGraduationKeys } from "./graduation.js";
 import { correctionPrincipleCandidateFilter } from "./principles.js";
+import { parseCorrectionRuleInput } from "./rule-template.js";
 import {
   retrieveCorrectionCandidates,
   scoreCorrectionRelevance,
@@ -31,6 +33,7 @@ const COMPLIANCE_RESTORE_LIMIT = 3;
 export type CorrectionInjectionTrigger = "start" | "prompt" | "refresh" | "compact";
 
 export interface CorrectionInjectionRequest extends CorrectionRetrievalInput {
+  projectRoot: string;
   sessionIdHash: string;
   compactEpoch: number;
   humanOrdinal: number;
@@ -50,7 +53,90 @@ export interface CorrectionInjectionSelection {
   unreached: CorrectionUnreachedRule[];
   alwaysOnCount: number;
   ftsCandidateCount: number;
+  rulingsExcludedCount: number;
   correctionMatchedReinjectionKeys: string[];
+}
+
+function normalizeRulingText(text: string): string {
+  return text.normalize("NFKC").trim().replace(/[。.!?]+$/u, "").trim();
+}
+
+function readRulingTexts(projectRoot: string, projectName: string): ReadonlySet<string> {
+  let rulingsPath = process.env.WASURENAGUSA_RULINGS_PATH;
+  if (rulingsPath === undefined) {
+    rulingsPath = resolve(projectRoot, ".claude", "rulings", "rulings.json");
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(rulingsPath, "utf8"));
+  } catch {
+    return new Set<string>();
+  }
+  if (typeof parsed !== "object" || parsed === null || !("rulings" in parsed) || !Array.isArray(parsed.rulings)) {
+    return new Set<string>();
+  }
+
+  const texts = new Set<string>();
+  for (const ruling of parsed.rulings) {
+    if (typeof ruling !== "object" || ruling === null) continue;
+    if (ruling.status !== "active" && ruling.status !== "fixed") continue;
+    if (ruling.project !== null && ruling.project !== projectName) continue;
+    if (typeof ruling.rule !== "string" || !Array.isArray(ruling.quotes)) continue;
+    if (ruling.quotes.some((quote: unknown) =>
+      typeof quote !== "object" || quote === null || !("text" in quote) || typeof quote.text !== "string",
+    )) continue;
+    const ruleText = normalizeRulingText(ruling.rule);
+    if (ruleText !== "") texts.add(ruleText);
+    for (const quote of ruling.quotes) {
+      const quoteText = normalizeRulingText(quote.text);
+      if (quoteText !== "") texts.add(quoteText);
+    }
+  }
+  return texts;
+}
+
+function readRulingEvidenceKeys(
+  storage: SQLiteStorage,
+  rulingTexts: ReadonlySet<string>,
+  candidateBundleKeys: ReadonlySet<string>,
+  principleMembers: readonly CorrectionPrincipleMember[],
+): ReadonlySet<string> {
+  const keys = new Set<string>();
+  if (rulingTexts.size === 0 || candidateBundleKeys.size === 0) return keys;
+  const evidenceBundleKeys = new Set(candidateBundleKeys);
+  const principlesByMember = new Map<string, Set<string>>();
+  for (const member of principleMembers) {
+    if (!candidateBundleKeys.has(member.principle_key)) continue;
+    evidenceBundleKeys.add(member.member_key);
+    let principleKeys = principlesByMember.get(member.member_key);
+    if (principleKeys === undefined) {
+      principleKeys = new Set<string>();
+      principlesByMember.set(member.member_key, principleKeys);
+    }
+    principleKeys.add(member.principle_key);
+  }
+  storage.runCorrectionTransaction(({ db }) => {
+    const rows = db.prepare(`
+      SELECT DISTINCT evidence.bundle_key, event.excerpt, evidence.conditions
+      FROM owner_correction_evidence AS evidence
+      JOIN owner_correction_events AS event ON event.event_id = evidence.event_id
+      WHERE evidence.bundle_key IN (${[...evidenceBundleKeys].map(() => "?").join(", ")})
+    `).all(...evidenceBundleKeys) as Array<{ bundle_key: string; excerpt: string; conditions: string }>;
+    for (const row of rows) {
+      if (rulingTexts.has(normalizeRulingText(row.excerpt))) keys.add(row.bundle_key);
+      const evidenceInput = parseCorrectionRuleInput(row.conditions);
+      if (evidenceInput !== null && evidenceInput.commandText !== undefined
+        && rulingTexts.has(normalizeRulingText(evidenceInput.commandText))) {
+        keys.add(row.bundle_key);
+      }
+    }
+  });
+  for (const [memberKey, principleKeys] of principlesByMember) {
+    if (!keys.has(memberKey)) continue;
+    for (const principleKey of principleKeys) keys.add(principleKey);
+  }
+  return keys;
 }
 
 interface InjectionHistoryRow {
@@ -561,6 +647,7 @@ function buildSelection(
   unreached: CorrectionUnreachedRule[],
   alwaysOnCount: number,
   ftsCandidateCount: number,
+  rulingsExcludedCount: number,
   correctionMatchedReinjectionKeys: readonly string[] = [],
 ): CorrectionInjectionSelection {
   return {
@@ -568,6 +655,7 @@ function buildSelection(
     unreached,
     alwaysOnCount,
     ftsCandidateCount,
+    rulingsExcludedCount,
     correctionMatchedReinjectionKeys: [...correctionMatchedReinjectionKeys],
   };
 }
@@ -584,33 +672,62 @@ export function selectCorrectionInjections(
   const featureModeInput = { ...input, featureModes };
   const retrieval = retrieveCorrectionCandidates(storage, input, featureModes);
   const candidateInjectionEnabled = featureModes.candidateInjection === "on";
-  const reflectedGraduations = getActiveCorrectionGraduationKeys(storage, input.at, undefined, featureModes.graduation);
-  const excludeGraduated = input.trigger === "start" || input.trigger === "prompt" || input.trigger === "refresh";
-  const isAvailable = (rule: RetrievedCorrectionRule): boolean =>
-    !excludeGraduated || !reflectedGraduations.has(rule.bundleKey);
   const history = readSessionHistory(storage, input, featureModes.principles);
-  const complianceRestoreRules = readComplianceRestoreRules(storage, input, featureModes.principles).filter(isAvailable);
-  const complianceRestoreKeys = new Set(complianceRestoreRules.map((rule) => injectionKey(rule.bundleKey, rule.version)));
-  const alwaysOn = orderAlwaysOnByTopic(retrieval.alwaysOn.filter(isAvailable));
-  const projectRules = retrieval.projectRules.filter(isAvailable);
-  const candidateRules = candidateInjectionEnabled && (input.trigger === "start" || input.trigger === "prompt" || input.trigger === "refresh")
-    ? retrieval.candidates.filter(isAvailable)
-    : [];
-  const deliveryRules = requiredDeliveryRules(alwaysOn, projectRules);
+  let alwaysOn = orderAlwaysOnByTopic(retrieval.alwaysOn);
+  const projectRules = retrieval.projectRules;
+  let candidateRules: RetrievedCorrectionRule[] = [];
+  if (candidateInjectionEnabled && input.trigger !== "compact") {
+    candidateRules = retrieval.candidates;
+  }
+  let deliveryRules = requiredDeliveryRules(alwaysOn, projectRules);
+  const hasAttemptForTrigger = history.injections.some((row) => row.trigger === input.trigger);
+  if ((input.trigger === "start" || input.trigger === "compact") && hasAttemptForTrigger) {
+    return buildSelection([], unreachedRules(deliveryRules, history), alwaysOn.length, retrieval.ftsCandidateCount, 0);
+  }
   const successfulKeys = new Set(
     successfulHistory(history).map((row) => injectionKey(row.bundle_key, row.version)),
   );
   const latestInjections = latestSuccessfulInjections(history);
   const relatedRuleMap = new Map<string, RetrievedCorrectionRule>();
-  for (const rule of retrieval.related.filter(isAvailable)) {
-    relatedRuleMap.set(injectionKey(rule.bundleKey, rule.version), rule);
-  }
-  for (const rule of relatedPrincipleReinjectionRules(storage, featureModeInput, featureModes, history, latestInjections).filter(isAvailable)) {
-    const key = injectionKey(rule.bundleKey, rule.version);
-    if (!relatedRuleMap.has(key)) relatedRuleMap.set(key, rule);
+  if (input.trigger === "prompt" || input.trigger === "refresh") {
+    for (const rule of retrieval.related) {
+      relatedRuleMap.set(injectionKey(rule.bundleKey, rule.version), rule);
+    }
+    for (const rule of relatedPrincipleReinjectionRules(storage, featureModeInput, featureModes, history, latestInjections)) {
+      const key = injectionKey(rule.bundleKey, rule.version);
+      if (!relatedRuleMap.has(key)) relatedRuleMap.set(key, rule);
+    }
   }
   const relatedRules = [...relatedRuleMap.values()];
-  const unreached = unreachedRules(deliveryRules, history);
+  const complianceRestoreCandidates = readComplianceRestoreRules(storage, input, featureModes.principles);
+  const evidenceCandidates = [...deliveryRules, ...candidateRules, ...relatedRules, ...complianceRestoreCandidates];
+  if (input.trigger === "start" || input.trigger === "compact") {
+    evidenceCandidates.push(...projectRules);
+  }
+  const rulingTexts = readRulingTexts(input.projectRoot, input.project);
+  const rulingEvidenceKeys = readRulingEvidenceKeys(
+    storage,
+    rulingTexts,
+    new Set(evidenceCandidates.map((rule) => rule.bundleKey)),
+    history.principleMembers,
+  );
+  const matchesRuling = (rule: RetrievedCorrectionRule): boolean =>
+    rulingTexts.has(normalizeRulingText(rule.ruleText)) || rulingEvidenceKeys.has(rule.bundleKey);
+  const rulingsExcludedKeys = new Set<string>();
+  const isAvailable = (rule: RetrievedCorrectionRule): boolean => {
+    if (!matchesRuling(rule)) return true;
+    rulingsExcludedKeys.add(injectionKey(rule.bundleKey, rule.version));
+    return false;
+  };
+  alwaysOn = [
+    ...orderAlwaysOnByTopic(alwaysOn.filter((rule) => !matchesRuling(rule))),
+    ...alwaysOn.filter(matchesRuling),
+  ];
+  deliveryRules = requiredDeliveryRules(alwaysOn, projectRules);
+  const complianceRestoreRules = complianceRestoreCandidates.filter(isAvailable);
+  const complianceRestoreKeys = new Set(complianceRestoreRules.map((rule) => injectionKey(rule.bundleKey, rule.version)));
+  const alwaysOnCount = alwaysOn.filter((rule) => !matchesRuling(rule)).length;
+  const unreached = unreachedRules(deliveryRules.filter((rule) => !matchesRuling(rule)), history);
   const selected: CorrectionRule[] = [];
   const selectedKeys = new Set<string>();
   const correctionMatchedReinjectionKeys = new Set<string>();
@@ -643,40 +760,47 @@ export function selectCorrectionInjections(
       .slice(0, Math.min(CANDIDATE_RULE_LIMIT, limit));
     for (const rule of relatedCandidates) addCandidateRule(rule);
   };
-  const hasAttemptForTrigger = history.injections.some((row) => row.trigger === input.trigger);
-
   if (input.trigger === "start" || input.trigger === "compact") {
-    if (hasAttemptForTrigger) return buildSelection([], unreached, alwaysOn.length, retrieval.ftsCandidateCount);
     const availableModels = deliveryRules
       .filter((rule) => rule.topicKey === "model_routing")
       .filter((rule) => !isCooling(history, latestInjections, rule, true, featureModeInput))
+      .filter(isAvailable)
       .sort(comparePriority);
     for (const rule of availableModels.slice(0, MODEL_ROUTING_RESERVATION_LIMIT)) addRule(rule, "start");
-    const availableAlwaysOn = orderAlwaysOnByTopic(alwaysOn.filter((rule) => rule.topicKey !== "model_routing"))
+    const availableAlwaysOn = orderAlwaysOnByTopic(alwaysOn
+      .filter((rule) => rule.topicKey !== "model_routing")
+      .filter((rule) => {
+        if (isCooling(history, latestInjections, rule, true, featureModeInput)) return !matchesRuling(rule);
+        return isAvailable(rule);
+      }))
       .filter((rule) => !selectedKeys.has(injectionKey(rule.bundleKey, rule.version)))
-      .filter((rule) =>
-      !isCooling(history, latestInjections, rule, true, featureModeInput),
-    );
+      .filter((rule) => !isCooling(history, latestInjections, rule, true, featureModeInput));
     const chosenAlwaysOn = availableAlwaysOn.slice(0, START_RULE_LIMIT - selected.length);
     for (const rule of chosenAlwaysOn) addRule(rule, "start");
     const remainingSlots = START_RULE_LIMIT - selected.length;
-    const chosenProjectRules = projectRules
-      .filter((rule) => rule.topicKey !== "model_routing")
-      .filter((rule) => !selectedKeys.has(injectionKey(rule.bundleKey, rule.version)))
-      .filter((rule) => !isCooling(history, latestInjections, rule, true, featureModeInput))
-      .slice(0, remainingSlots);
-    for (const rule of chosenProjectRules) addRule(rule, "start");
+    if (remainingSlots > 0) {
+      const chosenProjectRules = projectRules
+        .filter((rule) => rule.topicKey !== "model_routing")
+        .filter((rule) => !selectedKeys.has(injectionKey(rule.bundleKey, rule.version)))
+        .filter((rule) => !isCooling(history, latestInjections, rule, true, featureModeInput))
+        .filter(isAvailable)
+        .slice(0, remainingSlots);
+      for (const rule of chosenProjectRules) addRule(rule, "start");
+    }
     const candidateSlots = Math.max(0, START_RULE_LIMIT - selected.length);
-    const startCandidates = [...candidateRules]
-      .sort(comparePriority)
-      .filter((rule) => !selectedKeys.has(injectionKey(rule.bundleKey, rule.version)))
-      .slice(0, Math.min(CANDIDATE_RULE_LIMIT, candidateSlots));
-    for (const rule of startCandidates) addCandidateRule(rule);
+    if (candidateSlots > 0) {
+      const startCandidates = [...candidateRules]
+        .sort(comparePriority)
+        .filter((rule) => !selectedKeys.has(injectionKey(rule.bundleKey, rule.version)))
+        .filter(isAvailable)
+        .slice(0, Math.min(CANDIDATE_RULE_LIMIT, candidateSlots));
+      for (const rule of startCandidates) addCandidateRule(rule);
+    }
     const omittedKeys = new Set(deliveryRules
       .filter((rule) => !selectedKeys.has(injectionKey(rule.bundleKey, rule.version)))
       .map((rule) => injectionKey(rule.bundleKey, rule.version)));
-    const startUnreached = unreachedRules(deliveryRules, history, omittedKeys);
-    return buildSelection(selected, startUnreached, alwaysOn.length, retrieval.ftsCandidateCount, [...correctionMatchedReinjectionKeys]);
+    const startUnreached = unreachedRules(deliveryRules.filter((rule) => !matchesRuling(rule)), history, omittedKeys);
+    return buildSelection(selected, startUnreached, alwaysOnCount, retrieval.ftsCandidateCount, rulingsExcludedKeys.size, [...correctionMatchedReinjectionKeys]);
   }
 
   const recentCorrections = deliveryRules.filter((rule) => {
@@ -692,7 +816,7 @@ export function selectCorrectionInjections(
   const restorationOrder = restorationCandidates.filter((rule) =>
     complianceRestoreKeys.has(injectionKey(rule.bundleKey, rule.version)) ||
       !isCooling(history, latestInjections, rule, true, featureModeInput),
-  );
+  ).filter(isAvailable);
   const restoreLimit = Math.max(RESTORE_RULE_LIMIT, complianceRestoreRules.length);
 
   if (input.trigger === "refresh") {
@@ -708,6 +832,7 @@ export function selectCorrectionInjections(
       ? relatedRules
         .filter((rule) => isCooling(history, latestInjections, rule, false, featureModeInput))
         .filter((rule) => shouldReinjectRelatedDuringCooldown(featureModeInput, history, latestInjections, rule))
+        .filter(isAvailable)
         .slice(0, FULL_REFRESH_LIMIT)
       : [];
     if (restorationOrder.length > 0) {
@@ -730,18 +855,21 @@ export function selectCorrectionInjections(
         addRule(rule, "restore");
       }
       appendRefreshCandidates();
-      return buildSelection(selected, unreached, alwaysOn.length, retrieval.ftsCandidateCount, [...correctionMatchedReinjectionKeys]);
+      return buildSelection(selected, unreached, alwaysOnCount, retrieval.ftsCandidateCount, rulingsExcludedKeys.size, [...correctionMatchedReinjectionKeys]);
     }
     if (isRefreshOrdinal(input.humanOrdinal)) {
       for (const rule of relatedReinjections) addRule(rule, "refresh");
-      const refreshRules = orderForRefresh(alwaysOn, latestInjections)
-        .filter((rule) => !selectedKeys.has(injectionKey(rule.bundleKey, rule.version)))
-        .filter((rule) => !isCooling(history, latestInjections, rule, true, featureModeInput))
-        .slice(0, FULL_REFRESH_LIMIT - selected.length);
-      for (const rule of refreshRules) addRule(rule, "refresh");
+      if (selected.length < FULL_REFRESH_LIMIT) {
+        const refreshRules = orderForRefresh(alwaysOn, latestInjections)
+          .filter((rule) => !selectedKeys.has(injectionKey(rule.bundleKey, rule.version)))
+          .filter((rule) => !isCooling(history, latestInjections, rule, true, featureModeInput))
+          .filter(isAvailable)
+          .slice(0, FULL_REFRESH_LIMIT - selected.length);
+        for (const rule of refreshRules) addRule(rule, "refresh");
+      }
     }
     appendRefreshCandidates();
-    return buildSelection(selected, unreached, alwaysOn.length, retrieval.ftsCandidateCount, [...correctionMatchedReinjectionKeys]);
+    return buildSelection(selected, unreached, alwaysOnCount, retrieval.ftsCandidateCount, rulingsExcludedKeys.size, [...correctionMatchedReinjectionKeys]);
   }
 
   for (const rule of restorationOrder.slice(0, restoreLimit)) {
@@ -753,6 +881,7 @@ export function selectCorrectionInjections(
     const refreshRules = orderForRefresh(alwaysOn, latestInjections)
       .filter((rule) => !selectedKeys.has(injectionKey(rule.bundleKey, rule.version)))
       .filter((rule) => !isCooling(history, latestInjections, rule, true, featureModeInput))
+      .filter(isAvailable)
       .slice(0, PROMPT_REFRESH_LIMIT);
     for (const rule of refreshRules) addRule(rule, "refresh");
   }
@@ -762,6 +891,7 @@ export function selectCorrectionInjections(
     const allowRecentCorrection = !isCorrectionReinjectionEnabled(featureModeInput);
     if (isCooling(history, latestInjections, rule, allowRecentCorrection, featureModeInput)
       && !shouldReinjectRelatedDuringCooldown(featureModeInput, history, latestInjections, rule)) continue;
+    if (!isAvailable(rule)) continue;
     addRule(rule, "related");
   }
 
@@ -769,5 +899,5 @@ export function selectCorrectionInjections(
     addCandidatePromptRules(PROMPT_RULE_LIMIT - selected.length);
   }
 
-  return buildSelection(selected, unreached, alwaysOn.length, retrieval.ftsCandidateCount, [...correctionMatchedReinjectionKeys]);
+  return buildSelection(selected, unreached, alwaysOnCount, retrieval.ftsCandidateCount, rulingsExcludedKeys.size, [...correctionMatchedReinjectionKeys]);
 }

@@ -15,6 +15,8 @@ import {
   enforceInjectionTokenBudget,
   logInjectionBudgetWarning,
   DEFAULT_INJECTION_TOKEN_BUDGET,
+  CONTEXT_HOOK_TIMEOUT_MS,
+  CONTEXT_HOOK_OUTPUT_RESERVE_MS,
 } from "./context.js";
 import { isDirectRun as sharedIsDirectRun } from "../utils/cli-entry.js";
 import { renderCorrectionRules } from "../corrections/render.js";
@@ -374,29 +376,47 @@ describe("context.ts: stdout と訂正注入台帳", () => {
     stdout.destroy();
   });
 
-  it("stdout callback が期限後に返った場合は台帳を保存しない", async () => {
+  it.each([0, -1])("stdout callback が期限後に返った場合は台帳を保存しない（時計差 %i ms）", async (clockOffsetMs) => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    const callbackReached = vi.fn();
     const stdout = new Writable({
       write(_chunk, _encoding, callback) {
-        setTimeout(callback, 30);
+        setTimeout(() => {
+          callbackReached();
+          callback();
+        }, CONTEXT_HOOK_TIMEOUT_MS + 1);
       },
     });
     const storage = { runCorrectionTransaction: vi.fn() };
 
-    const result = await emitContextOutput({
-      output: rendered.text,
-      rendered,
-      storage: storage as never,
-      sessionIdHash: "synthetic-session-hash",
-      compactEpoch: 0,
-      humanOrdinal: 1,
-      trigger: "prompt",
-      deadlineAt: Date.now() + 310,
-      stdout,
-    });
+    try {
+      const startedAt = Date.now();
+      const output = emitContextOutput({
+        output: rendered.text,
+        rendered,
+        storage: storage as never,
+        sessionIdHash: "synthetic-session-hash",
+        compactEpoch: 0,
+        humanOrdinal: 1,
+        trigger: "prompt",
+        deadlineAt: startedAt + CONTEXT_HOOK_TIMEOUT_MS,
+        stdout,
+      });
+      vi.setSystemTime(startedAt + clockOffsetMs);
+      await vi.advanceTimersByTimeAsync(CONTEXT_HOOK_TIMEOUT_MS - CONTEXT_HOOK_OUTPUT_RESERVE_MS);
+      const result = await output;
 
-    expect(result.status).toBe("timeout");
-    expect(storage.runCorrectionTransaction).not.toHaveBeenCalled();
-    stdout.destroy();
+      expect(result.status).toBe("timeout");
+      expect(result.writeAttempted).toBe(true);
+      expect(callbackReached).not.toHaveBeenCalled();
+      expect(storage.runCorrectionTransaction).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(CONTEXT_HOOK_OUTPUT_RESERVE_MS + 1);
+      expect(callbackReached).toHaveBeenCalledTimes(1);
+      expect(storage.runCorrectionTransaction).not.toHaveBeenCalled();
+    } finally {
+      stdout.destroy();
+      vi.useRealTimers();
+    }
   });
 
   it("期限切れなら stdout と台帳のどちらも処理しない", async () => {

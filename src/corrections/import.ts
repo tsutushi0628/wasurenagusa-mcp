@@ -6,6 +6,7 @@ import type { MemoryCategory, ProjectConfidence } from "../types.js";
 import { backupBeforeMigration, migrateV10ToV11, migrateV11ToV12 } from "../storage/migration.js";
 import {
   CORRECTION_COMPLIANCE_SCHEMA_VERSION,
+  CORRECTION_PENDING_OUTPUT_SCHEMA_VERSION,
   CORRECTION_PRINCIPLES_SCHEMA_VERSION,
   CORRECTION_PRINCIPLES_TABLE_NAMES,
   CORRECTION_SCHEMA_VERSION,
@@ -264,8 +265,8 @@ function sourceStoreHash(sourceRealPath: string): string {
 function validateRuleTextBackfillSchema(db: Database.Database): number {
   validateMemoryTable(db);
   const version = getSchemaVersion(db);
-  if (version < CORRECTION_SCHEMA_VERSION || version > CORRECTION_PRINCIPLES_SCHEMA_VERSION) {
-    throw new CorrectionImportError("rule text backfill requires correction schema version 11 through 13");
+  if (version < CORRECTION_SCHEMA_VERSION || version > CORRECTION_PENDING_OUTPUT_SCHEMA_VERSION) {
+    throw new CorrectionImportError(`rule text backfill requires correction schema version ${CORRECTION_SCHEMA_VERSION} through ${CORRECTION_PENDING_OUTPUT_SCHEMA_VERSION}`);
   }
   const requiredTables = [...CORRECTION_TABLES];
   if (version >= CORRECTION_COMPLIANCE_SCHEMA_VERSION) requiredTables.push("owner_correction_violations");

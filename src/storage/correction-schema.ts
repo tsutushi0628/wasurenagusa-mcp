@@ -4,6 +4,12 @@ import { CURRENT_SCHEMA_VERSION, getSchemaVersion } from "./schema.js";
 export const CORRECTION_SCHEMA_VERSION = 11;
 export const CORRECTION_COMPLIANCE_SCHEMA_VERSION = 12;
 export const CORRECTION_PRINCIPLES_SCHEMA_VERSION = 13;
+export const CORRECTION_PENDING_OUTPUT_SCHEMA_VERSION = 14;
+
+export const CORRECTION_PENDING_OUTPUT_DDL = `
+ALTER TABLE owner_correction_pending ADD COLUMN output_ledger TEXT
+    CHECK (output_ledger IS NULL OR json_valid(output_ledger));
+`;
 
 export const CORRECTION_COMPLIANCE_DDL = `
 CREATE TABLE owner_correction_violations (
