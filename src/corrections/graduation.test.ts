@@ -305,7 +305,7 @@ describe("owner correction graduation", () => {
     });
   }
 
-  it("topic=principleとconditions=[]の原則を構成員topicから全役向けscene提案にする", () => {
+  it("topic=principleとconditions=[]の原則を型未指定のscene提案にする", () => {
     const confirmedAt = "2026-09-28T00:00:00.000Z";
     const principleKey = `pr:v1:${"a".repeat(64)}`;
     const memberKey = `oc:v2:${"b".repeat(64)}`;
@@ -345,7 +345,34 @@ describe("owner correction graduation", () => {
       delivery: "scene",
       triggers: expect.arrayContaining(["工程略号"]),
     });
-    expect(entry?.types).toEqual(Array.from({ length: 38 }, (_value, index) => `a${String(index + 1).padStart(2, "0")}`));
+    expect(entry?.types).toEqual([]);
+  });
+
+  it.each([
+    { ruleText: "データを一元管理する設計してってこと", triggers: ["一元管理"] },
+    { ruleText: "データベースを一元管理する", triggers: ["データベース", "一元管理"] },
+    { ruleText: "情報 質問 返答 問題 今回 検討 設定 結果 データを一元管理する", triggers: ["一元管理"] },
+  ])("一般語を除いて固有の引き金語を残す: $ruleText", ({ ruleText, triggers }) => {
+    const bundleKey = `oc:v2:${"5".repeat(64)}`;
+    addBundle({
+      bundleKey,
+      topicKey: "unknown",
+      lifetimeKind: "inferred",
+      confirmedAt: "2026-10-01T00:00:00.000Z",
+      conditionsJson: "[]",
+      ruleText,
+    });
+
+    const proposal = createCorrectionGraduationProposal(storage, {
+      at: "2026-10-08T00:00:00.000Z",
+      sourceHead: "a".repeat(40),
+    });
+
+    expect(proposal?.principles.find((entry) => entry.principle_key === bundleKey)).toMatchObject({
+      delivery: "scene",
+      triggers,
+      types: [],
+    });
   });
 
   it("規則文から引き金語を順序どおり抽出し、一般語だけならtopic固定語に戻す", () => {
@@ -387,15 +414,20 @@ describe("owner correction graduation", () => {
     expect(findTriggers(longRuleKey)).toEqual(["alpha", "テスト", "漢字", "beta", "gamma", "delta", "epsilon", "zeta"]);
   });
 
-  it("Jev取込が捨てる一般語しか引き金語に残らない原則はalwaysで出す", () => {
+  it.each([
+    { topicKey: "response_policy", ruleText: "おい質問に答えろ" },
+    { topicKey: "unknown", ruleText: "データを確認する" },
+    { topicKey: "unknown", ruleText: "する", requiredValues: { term: "データ" } },
+  ])("一般語だけの原則はカード化しないalwaysで出す: $topicKey / $ruleText", ({ topicKey, ruleText, requiredValues }) => {
     const confirmedAt = "2026-10-01T00:00:00.000Z";
     const questionRuleKey = `oc:v2:${"4".repeat(64)}`;
     addBundle({
       bundleKey: questionRuleKey,
-      topicKey: "response_policy",
+      topicKey,
       lifetimeKind: "inferred",
       confirmedAt,
-      ruleText: "おい質問に答えろ",
+      ruleText,
+      requiredValues,
     });
 
     const proposal = createCorrectionGraduationProposal(storage, {
@@ -406,6 +438,7 @@ describe("owner correction graduation", () => {
     expect(proposal?.principles.find((entry) => entry.principle_key === questionRuleKey)).toMatchObject({
       delivery: "always",
       triggers: [],
+      types: [],
     });
   });
 

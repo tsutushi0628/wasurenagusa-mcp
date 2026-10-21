@@ -1,9 +1,10 @@
 import Database from "better-sqlite3";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as graduation from "../corrections/graduation.js";
 import { initializeCorrectionSchema } from "../storage/correction-schema.js";
 import { migrateV11ToV12, migrateV12ToV13 } from "../storage/migration.js";
 import { SQLiteStorage } from "../storage/sqlite.js";
@@ -171,6 +172,41 @@ describe("graduation export CLI", () => {
     expect(existsSync(outputPath)).toBe(true);
     expect(existsSync(process.env.WASURENAGUSA_JEV_IMPORT_OUT)).toBe(false);
     expect(graduationCount()).toBe(0);
+  });
+
+  it.each([{ types: [] }, { types: ["a07"] }])("提案の型指定をそのまま書き出す: $types", ({ types }) => {
+    process.env.WASURENAGUSA_GRADUATION = "shadow";
+    migrateToV13();
+    const proposal: graduation.CorrectionGraduationProposal = {
+      schema: 1,
+      generated_at: "2026-10-08T00:00:00.000Z",
+      source_head: "a".repeat(40),
+      principles: [{
+        principle_key: `oc:v2:${"5".repeat(64)}`,
+        rule_text: "合成規則を検証する",
+        topic_key: "verification",
+        delivery: "scene",
+        triggers: ["検証"],
+        exclude_patterns: [],
+        types,
+        evidence: { sessions: 1, days: 1, injected_sessions: 1, failures_after_injection: 0, violations: 0 },
+      }],
+    };
+    const proposalSpy = vi.spyOn(graduation, "createCorrectionGraduationProposal")
+      .mockImplementation((_storage, _options, writeProposal) => {
+        if (writeProposal === undefined) throw new Error("synthetic proposal writer is required");
+        writeProposal(proposal);
+        return proposal;
+      });
+    try {
+      const result = runGraduationExportCli(["--out", outputPath]);
+      const exported: graduation.CorrectionGraduationProposal = JSON.parse(readFileSync(outputPath, "utf8"));
+
+      expect(result).toMatchObject({ mode: "shadow", status: "written", principleCount: 1 });
+      expect(exported.principles[0].types).toEqual(types);
+    } finally {
+      proposalSpy.mockRestore();
+    }
   });
 
   it("WASURENAGUSA_MEMORY_PATHだけを指定した子CLIが保存先のmemory.dbを開く", () => {

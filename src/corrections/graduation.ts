@@ -1,7 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 import type Database from "better-sqlite3";
 import { CORRECTION_PRINCIPLES_SCHEMA_VERSION } from "../storage/correction-schema.js";
 import { getSchemaVersion } from "../storage/schema.js";
@@ -12,7 +10,6 @@ import { getStrengthBaseIntensity } from "./strength.js";
 import { readEnvironmentMode } from "./environment-mode.js";
 
 const PRINCIPLE_PREFIX = "pr:v1:";
-const JEV_AGENT_TYPES = Array.from({ length: 38 }, (_value, index) => `a${String(index + 1).padStart(2, "0")}`);
 const TOPIC_TRIGGERS: Record<string, readonly string[]> = {
   tone: ["口調", "文体", "敬体", "常体", "敬語"],
   response_policy: ["質問", "回答", "返答", "待機"],
@@ -33,12 +30,13 @@ const RULE_TEXT_GENERIC_WORDS = [
   "作成", "実行", "利用", "提供", "記載", "共通", "全員",
 ] as const;
 // Jev 取込（firebase-kit .claude/hooks/scripts/extract-jev-knowledge.py の GENERIC_TRIGGERS）が
-// 引き金語として捨てる語。ここで先に外さないと、引き金語がそれだけの原則で取込全体が失敗する。
+// 引き金語として捨てる語に、卒業カードの場面を特定できない語を加えて除く。
 const JEV_GENERIC_TRIGGERS: ReadonlySet<string> = new Set([
   "ある", "いる", "お願い", "お願いする", "これ", "ください", "こと", "する", "した", "して", "できる",
   "それ", "ため", "なる", "もの", "作業", "対応", "内容", "方法", "情報", "確認", "質問", "回答",
   "返答", "必要", "問題", "場合", "今回", "利用", "実装", "設計", "検討", "設定", "結果", "処理",
   "状況", "対象", "入力", "出力", "提供", "担当", "資料", "報告", "要求", "一般", "全部", "全て", "すべて",
+  "データ",
 ]);
 const RULE_TEXT_GENERIC_WORD_PATTERN = new RegExp(RULE_TEXT_GENERIC_WORDS.join("|"), "gu");
 const RULE_TEXT_WORD_PATTERN = /[A-Za-z0-9]+|[\p{Script=Katakana}ー]+|[\p{Script=Han}々〆ヶ]+/gu;
@@ -160,7 +158,6 @@ function extractRuleTextTriggers(ruleTexts: readonly string[]): string[] {
       if ((!isAsciiWord && !isKatakanaWord && !isKanjiWord) || wordLength < minimumLength) continue;
       if (!isSafeProposalText(word) || triggers.includes(word)) continue;
       triggers.push(word);
-      if (triggers.length === 8) return triggers;
     }
   }
   return triggers;
@@ -358,7 +355,7 @@ function deriveEntry(
     delivery: proposalTriggers.length > 0 ? "scene" : "always",
     triggers: proposalTriggers,
     exclude_patterns: sortedExclusions,
-    types: [...JEV_AGENT_TYPES],
+    types: [],
     evidence: {
       sessions: evidenceMetrics.sessions,
       days: evidenceMetrics.days,
@@ -513,18 +510,6 @@ export function createCorrectionGraduationProposal(
   });
 }
 
-function defaultJevKnowledgePath(): string {
-  const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-  return resolve(packageRoot, "..", "firebase-kit", ".claude", "hooks", "jev-knowledge.graduated.json");
-}
-
-function resolveJevKnowledgePath(knowledgePath: string | undefined): string | undefined {
-  if (knowledgePath !== undefined && knowledgePath.trim() !== "") return knowledgePath;
-  const path = defaultJevKnowledgePath();
-  if (!existsSync(path)) return undefined;
-  return path;
-}
-
 export function readCorrectionGraduationKnowledgeKeys(knowledgePath: string): ReadonlySet<string> {
   const parsed: unknown = JSON.parse(readFileSync(knowledgePath, "utf8"));
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -594,51 +579,5 @@ export function recordSuccessfulCorrectionGraduationImport(
         VALUES (?, ?, ?, NULL, NULL)
       `).run(bundleKey, at, proposalHash);
     }
-  });
-}
-
-export function getActiveCorrectionGraduationKeys(
-  storage: Pick<SQLiteStorage, "runCorrectionTransaction">,
-  value: string,
-  knowledgePath: string | undefined = process.env.WASURENAGUSA_JEV_KNOWLEDGE_PATH,
-  mode: GraduationMode = resolveGraduationMode(process.env.WASURENAGUSA_GRADUATION),
-): ReadonlySet<string> {
-  if (mode !== "on") return new Set();
-  const at = canonicalTime(value);
-  return storage.runCorrectionTransaction(({ db }) => {
-    if (getSchemaVersion(db as unknown as Database.Database) < CORRECTION_PRINCIPLES_SCHEMA_VERSION) return new Set<string>();
-    assertGraduationTables(db as unknown as Database.Database);
-    revokeGraduationsWithNewEvidence(db as unknown as Database.Database, at);
-    const resolvedKnowledgePath = resolveJevKnowledgePath(knowledgePath);
-    let reflectedPrincipleKeys = new Set<string>();
-    if (resolvedKnowledgePath !== undefined) {
-      try {
-        reflectedPrincipleKeys = new Set(readCorrectionGraduationKnowledgeKeys(resolvedKnowledgePath));
-      } catch (error) {
-        // Jev 側が読めないときは移したことにせず、こちらの差し込みを続ける
-        process.stderr.write(`[graduation] Jev knowledge unreadable: ${error instanceof Error ? error.message : String(error)}\n`);
-      }
-    }
-    if (reflectedPrincipleKeys.size === 0) return new Set<string>();
-    const rows = db.prepare(`
-      SELECT graduation.bundle_key
-      FROM owner_correction_graduations AS graduation
-      JOIN owner_correction_bundles AS bundle ON bundle.bundle_key = graduation.bundle_key
-      JOIN memories AS memory ON memory.id = bundle.memory_id
-      JOIN owner_correction_versions AS currentVersion
-        ON currentVersion.bundle_key = bundle.bundle_key AND currentVersion.version = bundle.version
-      WHERE graduation.revoked_at IS NULL AND julianday(graduation.graduated_at) <= julianday(?)
-        AND bundle.status = 'confirmed' AND memory.state = 'active' AND memory.category = 'dont'
-        AND bundle.visibility = 'owner'
-        AND bundle.lifetime_kind IN ('explicit_continuing','inferred')
-        AND bundle.topic_key <> 'model_routing'
-        AND (bundle.expires_at IS NULL OR julianday(bundle.expires_at) > julianday(?))
-        AND currentVersion.status = 'confirmed' AND currentVersion.visibility = 'owner'
-        AND currentVersion.lifetime_kind IN ('explicit_continuing','inferred')
-        AND (currentVersion.expires_at IS NULL OR julianday(currentVersion.expires_at) > julianday(?))
-        ${principleMemberEligibilitySql()}
-      ORDER BY graduation.bundle_key
-    `).all(at, at, at) as Array<{ bundle_key: string }>;
-    return new Set(rows.filter((row) => reflectedPrincipleKeys.has(row.bundle_key)).map((row) => row.bundle_key));
   });
 }
