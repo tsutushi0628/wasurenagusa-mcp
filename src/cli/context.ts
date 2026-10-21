@@ -921,20 +921,25 @@ function recordPendingOutput(
   const entry = rendered.ledger[0];
   if (!receiptId || !entry) return false;
   return storage.runCorrectionTransaction(({ db }) => {
-    if (!supportsPendingOutputLedger(db)) return false;
+    const hasOutputLedger = supportsPendingOutputLedger(db);
     const parameters: (string | number)[] = [
       compactEpoch, entry.outputOrder, entry.bundleKey, entry.version,
-      rendered.outputHash, new Date().toISOString(), JSON.stringify({ trigger, entries: rendered.ledger }),
+      rendered.outputHash, new Date().toISOString(),
     ];
+    let outputLedgerAssignment = "";
+    if (hasOutputLedger) {
+      outputLedgerAssignment = ", output_ledger = ?";
+      parameters.push(JSON.stringify({ trigger, entries: rendered.ledger }));
+    }
     parameters.push(receiptId);
     const result = db.prepare(`
       UPDATE owner_correction_pending
       SET output_epoch = ?, output_order = ?, output_bundle_key = ?, output_version = ?,
-        output_hash = ?, output_callback_succeeded_at = ?, output_ledger = ?
+        output_hash = ?, output_callback_succeeded_at = ?${outputLedgerAssignment}
       WHERE receipt_id = ? AND output_callback_succeeded_at IS NULL
     `).run(...parameters);
     if (result.changes !== 1) throw new Error("pending correction output record failed");
-    return true;
+    return hasOutputLedger;
   });
 }
 

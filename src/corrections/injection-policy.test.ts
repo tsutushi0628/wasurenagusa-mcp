@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { initializeCorrectionSchema } from "../storage/correction-schema.js";
-import { migrateV11ToV12, migrateV12ToV13 } from "../storage/migration.js";
+import { migrateV11ToV12, migrateV12ToV13, migrateV13ToV14 } from "../storage/migration.js";
 import { SQLiteStorage } from "../storage/sqlite.js";
 import { detectOwnerCorrections } from "./detector.js";
 import { extractOwnerEvent } from "./events.js";
@@ -102,10 +102,11 @@ describe("owner correction injection policy", () => {
     vi.restoreAllMocks();
   });
 
-  function migrateToV13(): void {
+  function migrateToV13(schemaVersion = 13): void {
     storage.close();
     const db = new Database(dbPath);
     migrateV12ToV13(db);
+    if (schemaVersion === 14) migrateV13ToV14(db);
     db.close();
     storage = new SQLiteStorage(dbPath);
     storage.initialize();
@@ -316,14 +317,14 @@ describe("owner correction injection policy", () => {
     };
   }
 
-  function writeRuling(rule: string, quotes: string[], status: string, project: string | null = null): void {
+  function writeRuling(rule: string, quotes: string[], status: string, project: string | null = null, scope = "all"): void {
     writeFileSync(rulingsPath, JSON.stringify({
       rulings: [{
         id: "r-015",
         scene: "合成の回答場面",
         rule,
         quotes: quotes.map((text) => ({ date: "2026-10-01", text })),
-        scope: "all",
+        scope,
         project,
         sources: [],
         checks: [],
@@ -337,8 +338,10 @@ describe("owner correction injection policy", () => {
   }
 
   describe.each(["start", "prompt", "refresh", "compact"] as const)("指摘リスト照合: %s", (trigger) => {
-    it.each(["excerpt", "commandText"])("束ねた訂正の%sが一致した確定原則も外す", (evidenceField) => {
-      migrateToV13();
+    it.each([13, 14].flatMap((schemaVersion) =>
+      ["excerpt", "commandText", "ruleText"].map((evidenceField) => ({ schemaVersion, evidenceField })),
+    ))("v$schemaVersionで束ねた訂正の$evidenceFieldが一致した確定原則も外す", ({ schemaVersion, evidenceField }) => {
+      migrateToV13(schemaVersion);
       process.env.WASURENAGUSA_PRINCIPLES = "on";
       const memberKey = `oc:v2:${"1".repeat(64)}`;
       const principleKey = `pr:v1:${"2".repeat(64)}`;
@@ -347,7 +350,7 @@ describe("owner correction injection policy", () => {
       addRule({ bundleKey: memberKey, topicKey: "verification" });
       addRule({ bundleKey: principleKey, topicKey: "verification", ruleText: "回答の条件を守る合成原則" });
       addRule({ bundleKey: retainedKey, topicKey: "verification", ruleText: "出典を確かめる合成原則" });
-      addCorrectionEvidence(memberKey, 1, "legacy_import");
+      if (evidenceField !== "ruleText") addCorrectionEvidence(memberKey, 1, "legacy_import");
       storage.runCorrectionTransaction(({ db }) => {
         db.prepare(`
           INSERT INTO owner_correction_principle_members (principle_key, member_key, attached_at, attach_source)
@@ -356,11 +359,14 @@ describe("owner correction injection policy", () => {
         if (evidenceField === "excerpt") {
           db.prepare("UPDATE owner_correction_events SET excerpt = ? WHERE event_id = ?")
             .run(text, `synthetic-correction-${memberKey}-1`);
-        } else {
+        } else if (evidenceField === "commandText") {
           const candidate = detectSyntheticCandidates(text)[0];
           if (candidate === undefined) throw new Error("synthetic evidence command was not detected");
           db.prepare("UPDATE owner_correction_evidence SET conditions = ? WHERE bundle_key = ?")
             .run(serializeCorrectionRuleInput(candidate.ruleInput), memberKey);
+        } else {
+          db.prepare("UPDATE owner_correction_bundles SET rule_text = ? WHERE bundle_key = ?")
+            .run(`　${text}！？　`, memberKey);
         }
       });
       writeRuling("合成の回答規則", [text], "active");
@@ -449,6 +455,29 @@ describe("owner correction injection policy", () => {
 
     expect(result.rules.map((rule) => rule.bundleKey)).toEqual(["inactive-ruling"]);
     expect(result.rulingsExcludedCount).toBe(0);
+  });
+
+  describe.each(["start", "prompt", "refresh", "compact"] as const)("指摘リストのscope絞り込み: %s", (trigger) => {
+    it.each([
+      { scope: "sub", excludedCount: 0 },
+      { scope: "main", excludedCount: 2 },
+      { scope: "all", excludedCount: 2 },
+    ])("scope=$scopeなら$excludedCount件を外す", ({ scope, excludedCount }) => {
+      const bundleKeys = ["scope-ruling-body", "scope-ruling-evidence"];
+      addRule({ bundleKey: bundleKeys[0], topicKey: "verification", ruleText: "合成の出典を確認する" });
+      addRule({ bundleKey: bundleKeys[1], topicKey: "verification" });
+      addCorrectionEvidence(bundleKeys[1], 1, "legacy_import", "合成の出典を確認する");
+      writeRuling("合成の出典を確認する", [], "active", null, scope);
+
+      const result = selectCorrectionInjections(storage, request({ trigger, humanOrdinal: 31 }));
+
+      expect(result.rulingsExcludedCount).toBe(excludedCount);
+      if (excludedCount === 0) {
+        expect(result.rules.map((rule) => rule.bundleKey).sort()).toEqual(bundleKeys);
+      } else {
+        expect(result.rules).toEqual([]);
+      }
+    });
   });
 
   it.each(["おい質問に答えて", "おい質問に答えろ、先に", "おい 質問に答えろ"])("似ているだけの文「%s」では外さない", (text) => {
@@ -558,12 +587,12 @@ describe("owner correction injection policy", () => {
     addCorrectionEvidence("invalid-evidence", 1, "legacy_import", "壊れた項目の証拠");
     let malformedRuling: unknown = malformed;
     if (typeof malformed === "object" && malformed !== null && !Array.isArray(malformed)) {
-      malformedRuling = { status: "active", project: null, ...malformed };
+      malformedRuling = { status: "active", scope: "all", project: null, ...malformed };
     }
     writeFileSync(rulingsPath, JSON.stringify({ rulings: [
-      { status: "active", project: null, rule: "前の有効な合成規則", quotes: [] },
+      { status: "active", scope: "all", project: null, rule: "前の有効な合成規則", quotes: [] },
       malformedRuling,
-      { status: "fixed", project: "fixture-project", rule: "後の有効な合成規則", quotes: [] },
+      { status: "fixed", scope: "all", project: "fixture-project", rule: "後の有効な合成規則", quotes: [] },
     ] }), "utf8");
 
     const result = selectCorrectionInjections(storage, request({ trigger: "start" }));
@@ -572,28 +601,35 @@ describe("owner correction injection policy", () => {
     expect(result.rulingsExcludedCount).toBe(2);
   });
 
-  it.each(["start", "compact"] as const)("%sの再注入を省く回は証拠を読まず除外件数を0にする", (trigger) => {
+  it.each(["start", "compact"] as const)("%sの再注入を省く回は証拠の表を読まず本文一致の除外件数を返す", (trigger) => {
+    process.env.WASURENAGUSA_CANDIDATE_INJECT = "on";
     addRule({ bundleKey: "excluded-ruling", topicKey: "verification", ruleText: "合成の出典を確認する" });
     addRule({ bundleKey: "already-emitted", topicKey: "verification" });
+    addRule({ bundleKey: "unreached-rule", topicKey: "verification" });
+    addCorrectionEvidence("unreached-rule", 1, "legacy_import", "合成の出典を確認する");
     addEmission("already-emitted", { trigger, humanOrdinal: 0 });
     writeRuling("合成の出典を確認する", [], "active");
-    const evidenceReads = trackRulingEvidenceReads();
+    const evidenceReads = trackRulingEvidenceReads(true);
     vi.mocked(readFileSync).mockClear();
 
     const result = selectCorrectionInjections(storage, request({ trigger }));
 
     expect(result.rules).toEqual([]);
-    expect(result.rulingsExcludedCount).toBe(0);
+    expect(result.rulingsExcludedCount).toBe(1);
+    expect(result.unreached).toEqual([{ bundleKey: "unreached-rule", version: 1, reason: "item_limit" }]);
+    expect(result.alwaysOnCount).toBe(2);
     expect(evidenceReads).toEqual([]);
-    expect(vi.mocked(readFileSync).mock.calls.filter(([path]) => path === rulingsPath)).toHaveLength(0);
+    expect(vi.mocked(readFileSync).mock.calls.filter(([path]) => path === rulingsPath)).toHaveLength(1);
   });
 
-  function trackRulingEvidenceReads(): number[] {
+  function trackRulingEvidenceReads(includePositions = false): number[] {
     const rowCounts: number[] = [];
     const prepare = Database.prototype.prepare;
     vi.spyOn(Database.prototype, "prepare").mockImplementation(function (this: Database.Database, sql: string) {
       const statement = prepare.call(this, sql);
-      if (sql.includes("event.excerpt") && sql.includes("evidence.conditions")) {
+      if (/^\s*SELECT\s+\*\s+FROM\s+owner_correction_evidence\s+LIMIT\s+0\s*;?\s*$/iu.test(sql)) return statement;
+      if ((sql.includes("event.excerpt") && sql.includes("evidence.conditions"))
+        || (includePositions && sql.includes("FROM owner_correction_evidence"))) {
         const readAll = statement.all.bind(statement);
         vi.spyOn(statement, "all").mockImplementation((...parameters: unknown[]) => {
           const rows = readAll(...parameters);

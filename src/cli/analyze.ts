@@ -18,6 +18,7 @@ import {
   hashRawText,
   hashSessionId,
   hashTranscriptPosition,
+  isPendingOutputLedger,
   prepareCorrectionInjectionInsert,
   resolveSessionProject,
   supportsPendingOutputLedger,
@@ -45,8 +46,6 @@ import {
 } from "../corrections/compliance.js";
 import { Analyzer } from "../analyzer/index.js";
 import { SQLiteStorage } from "../storage/index.js";
-import type { CorrectionInjectionLedgerEntry } from "../corrections/render.js";
-import type { CorrectionInjectionTrigger } from "../corrections/injection-policy.js";
 import { getMemoryPath, config } from "../config.js";
 import { getCorrectionLoopMode } from "../corrections/environment-mode.js";
 import { findProjectRoot } from "../utils/projectRoot.js";
@@ -345,27 +344,6 @@ function readStopSessionState(
   });
 }
 
-function isPendingOutputLedger(output: unknown): output is {
-  trigger: CorrectionInjectionTrigger;
-  entries: Array<Omit<CorrectionInjectionLedgerEntry, "bodyIncluded"> & { bodyIncluded: boolean }>;
-} {
-  if (typeof output !== "object" || output === null || Array.isArray(output)) return false;
-  if (!("trigger" in output) || !("entries" in output) || !Array.isArray(output.entries)) return false;
-  if (output.trigger !== "start" && output.trigger !== "prompt" && output.trigger !== "refresh" && output.trigger !== "compact") {
-    return false;
-  }
-  return output.entries.every((entry: unknown) => {
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return false;
-    return "bundleKey" in entry && typeof entry.bundleKey === "string" && entry.bundleKey.length > 0
-      && "version" in entry && typeof entry.version === "number" && Number.isSafeInteger(entry.version) && entry.version > 0
-      && "bodyHash" in entry && typeof entry.bodyHash === "string"
-      && "outputHash" in entry && typeof entry.outputHash === "string"
-      && "tokenEstimate" in entry && typeof entry.tokenEstimate === "number" && Number.isSafeInteger(entry.tokenEstimate) && entry.tokenEstimate >= 0
-      && "outputOrder" in entry && typeof entry.outputOrder === "number" && Number.isSafeInteger(entry.outputOrder) && entry.outputOrder >= 0
-      && "bodyIncluded" in entry && typeof entry.bodyIncluded === "boolean";
-  });
-}
-
 function commitStopBatch(
   storage: SQLiteStorage,
   sessionIdHash: string,
@@ -399,6 +377,9 @@ function commitStopBatch(
       outputLedgerColumn = "output_ledger";
     }
     const insert = prepareCorrectionInjectionInsert(db);
+    const savepoint = db.prepare("SAVEPOINT pending_output_ledger");
+    const rollback = db.prepare("ROLLBACK TO SAVEPOINT pending_output_ledger");
+    const release = db.prepare("RELEASE SAVEPOINT pending_output_ledger");
     for (const match of committed.matchedReceipts) {
       if (!hasDeadlineTimeRemaining(deadline)) throw new StopDeadlineExceededError();
       const pending = db.prepare(`
@@ -430,12 +411,23 @@ function commitStopBatch(
         console.error(`[analyze] pending correction ${match.receiptId}: output ledger is inconsistent`);
         continue;
       }
-      for (const entry of output.entries) {
-        if (!hasDeadlineTimeRemaining(deadline)) throw new StopDeadlineExceededError();
-        insert.run(
-          sessionIdHash, pending.output_epoch, entry.bundleKey, entry.version, match.humanOrdinal, output.trigger,
-          pending.output_callback_succeeded_at, entry.outputOrder, entry.bodyHash, pending.output_hash, entry.tokenEstimate,
-        );
+      savepoint.run();
+      try {
+        for (const entry of output.entries) {
+          if (!hasDeadlineTimeRemaining(deadline)) throw new StopDeadlineExceededError();
+          insert.run(
+            sessionIdHash, pending.output_epoch, entry.bundleKey, entry.version, match.humanOrdinal, output.trigger,
+            pending.output_callback_succeeded_at, entry.outputOrder, entry.bodyHash, pending.output_hash, entry.tokenEstimate,
+          );
+        }
+        release.run();
+      } catch (error) {
+        rollback.run();
+        release.run();
+        if (error instanceof StopDeadlineExceededError) throw error;
+        let message = String(error);
+        if (error instanceof Error) message = error.message;
+        console.error(`[analyze] pending correction ${match.receiptId}: ${redactSensitive(message).replace(/[\r\n]+/gu, " ")}`);
       }
     }
 

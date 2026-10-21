@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { Readable, Writable } from "node:stream";
 import { SQLiteStorage } from "../storage/sqlite.js";
 import { initializeCorrectionSchema } from "../storage/correction-schema.js";
@@ -77,7 +76,9 @@ describe("analyze Stop correction recovery", () => {
   let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
-    tempDir = mkdtempSync(join(tmpdir(), "analyze-correction-"));
+    const scratchRoot = join(process.cwd(), ".tmp");
+    mkdirSync(scratchRoot, { recursive: true });
+    tempDir = mkdtempSync(join(scratchRoot, "analyze-correction-"));
     projectRoot = join(tempDir, "fixture-project");
     memoryPath = join(projectRoot, ".wasurenagusa");
     mkdirSync(join(projectRoot, ".git"), { recursive: true });
@@ -337,6 +338,35 @@ describe("analyze Stop correction recovery", () => {
       }
     });
 
+    it("records the pending output metadata while preserving the schema-specific ledger path", async () => {
+      const { receiptId, result } = await emitPendingRules(2, true, "refresh");
+      expect(result.status).toBe("emitted");
+      const entry = result.rendered.ledger[0];
+      const database = new Database(join(memoryPath, "memory.db"));
+      try {
+        const pending = database.prepare(`
+          SELECT * FROM owner_correction_pending WHERE receipt_id = ?
+        `).get(receiptId);
+        expect(pending).toMatchObject({
+          output_epoch: 2, output_order: entry.outputOrder,
+          output_bundle_key: entry.bundleKey, output_version: entry.version,
+          output_hash: result.rendered.outputHash, output_callback_succeeded_at: expect.any(String),
+          matched_event_id: null,
+        });
+        if (schemaVersion === 13) {
+          expect(pending).not.toHaveProperty("output_ledger");
+          expect(readInjections()).toHaveLength(2);
+        } else {
+          expect(pending).toMatchObject({
+            output_ledger: JSON.stringify({ trigger: "refresh", entries: result.rendered.ledger }),
+          });
+          expect(readInjections()).toEqual([]);
+        }
+      } finally {
+        database.close();
+      }
+    });
+
     it.skipIf(schemaVersion === 13)("confirms every rule in a two-rule refresh output with its original metadata", async () => {
       const { receiptId, result } = await emitPendingRules(2, true, "refresh");
       expect(result.status).toBe("emitted");
@@ -387,6 +417,38 @@ describe("analyze Stop correction recovery", () => {
       expect(readInjections()).toEqual([]);
       expect(readCorrectionState().pending).toContainEqual({ receipt_id: receiptId, matched_event_id: null });
     });
+
+    it.skipIf(schemaVersion === 13).each(["prompt", "refresh"] as const)(
+      "counts unmatched successful %s output for the next prompt and PreCompact cooldown",
+      async (outputTrigger) => {
+        const { receiptId, result } = await emitPendingRules(2, true, outputTrigger);
+        expect(result.status).toBe("emitted");
+        await stopPendingPrompt("別の合成発話");
+        const storage = SQLiteStorage.openExistingForHook(join(memoryPath, "memory.db"));
+        try {
+          for (const trigger of ["prompt", "refresh", "compact"] as const) {
+            let compactEpoch = 2;
+            if (trigger === "compact") compactEpoch = 3;
+            const selection = selectCorrectionInjections(storage, {
+              projectRoot, sessionIdHash: hashSessionId("fixture-session"), compactEpoch, humanOrdinal: 2,
+              trigger, project: "fixture-project", scope: "general", query: prompt,
+              at: new Date(Date.now() + 1000).toISOString(),
+              featureModes: {
+                correctionLoop: "on", correctionInject: "on", compliance: "off",
+                principles: "off", graduation: "off", strength: "off",
+                reinjection: "off", candidateInjection: "off", ownerScopeBehavior: "off",
+              },
+            });
+            expect(selection.rules).toEqual([]);
+            expect(selection.unreached).toEqual([]);
+          }
+        } finally {
+          storage.close();
+        }
+        expect(readInjections()).toEqual([]);
+        expect(readCorrectionState().pending).toContainEqual({ receipt_id: receiptId, matched_event_id: null });
+      },
+    );
 
     it.skipIf(schemaVersion === 13).each([
       { name: "null output", assignment: "output_ledger = 'null'", reason: "output ledger has invalid shape" },
@@ -483,18 +545,42 @@ describe("analyze Stop correction recovery", () => {
       expect(consoleErrorSpy).toHaveBeenCalledOnce();
     });
 
-    it.skipIf(schemaVersion === 13)("rolls back matching and every ledger row if confirming the second rule fails", async () => {
+    it.skipIf(schemaVersion === 13)("rolls back only the failing receipt and confirms the next receipt when its second INSERT fails", async () => {
       const { receiptId } = await emitPendingRules(2, true, "prompt");
+      const successful = await emitPendingRules(1, true, "prompt", "pending-next");
       const database = new Database(join(memoryPath, "memory.db"));
       database.exec(`
         CREATE TRIGGER reject_second_injection BEFORE INSERT ON owner_correction_injections
         WHEN NEW.output_order = 2 BEGIN SELECT RAISE(ABORT, 'synthetic ledger failure'); END
       `);
       database.close();
-      await expect(stopPendingPrompt(prompt)).rejects.toThrow("synthetic ledger failure");
-      expect(readInjections()).toEqual([]);
-      expect(readCorrectionState().pending).toContainEqual({ receipt_id: receiptId, matched_event_id: null });
-      expect(readCorrectionState().events).toHaveLength(2);
+      const transcript = writeTranscript([
+        user("pending-human", prompt, "2026-10-03T00:01:00.000Z"),
+        assistant("pending-response", "合成の応答", "2026-10-03T00:01:01.000Z"),
+        user("pending-next", prompt, "2026-10-03T00:01:02.000Z"),
+        assistant("pending-next-response", "合成の次の応答", "2026-10-03T00:01:03.000Z"),
+      ]);
+      attachStdin(transcript);
+
+      await expect(runMain()).resolves.toBeUndefined();
+
+      expect(readInjections()).toEqual([expect.objectContaining({
+        bundle_key: successful.result.rendered.ledger[0].bundleKey, human_ordinal: 2, output_order: 1,
+      })]);
+      const state = readCorrectionState();
+      expect(state.pending).toEqual(expect.arrayContaining([
+        { receipt_id: receiptId, matched_event_id: expect.any(String) },
+        { receipt_id: successful.receiptId, matched_event_id: expect.any(String) },
+      ]));
+      expect(state.events).toHaveLength(4);
+      expect(consoleErrorSpy.mock.calls).toEqual([
+        [`[analyze] pending correction ${receiptId}: synthetic ledger failure`],
+      ]);
+      attachStdin(transcriptPath);
+      await expect(runMain()).resolves.toBeUndefined();
+      expect(readCorrectionState()).toEqual(state);
+      expect(readInjections()).toHaveLength(1);
+      expect(consoleErrorSpy).toHaveBeenCalledOnce();
     });
   });
 

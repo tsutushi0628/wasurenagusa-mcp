@@ -85,7 +85,7 @@ describe("context.ts: 人間のコードだけのprompt", () => {
     (["SessionStart", "UserPromptSubmit", "PreCompact"] as const).flatMap((eventKind) =>
       (["project-root", "override"] as const).map((rulingsSource) => ({ eventKind, rulingsSource })),
     ),
-  )("$eventKindで$rulingsSourceの指摘リストを照合し、再注入を省く回のログは除外0件にする", async ({ eventKind, rulingsSource }) => {
+  )("$eventKindで$rulingsSourceの指摘リストを照合し、再注入を省く回のログにも本文一致の除外件数を残す", async ({ eventKind, rulingsSource }) => {
     mkdirSync(scratchRoot, { recursive: true });
     tempDirectory = mkdtempSync(join(scratchRoot, "context-rulings-"));
     const projectRoot = join(tempDirectory, "fixture-project");
@@ -173,7 +173,7 @@ describe("context.ts: 人間のコードだけのprompt", () => {
       delete process.env.WASURENAGUSA_RULINGS_PATH;
     }
     writeFileSync(rulingsPath, JSON.stringify({
-      rulings: [{ id: "r-synthetic", rule: "合成の回答規則", quotes: [{ date: "2026-10-01", text: duplicateText }], status: "active", project: null }],
+      rulings: [{ id: "r-synthetic", rule: "合成の回答規則", quotes: [{ date: "2026-10-01", text: duplicateText }], status: "active", scope: "all", project: null }],
       resolved_pendings: [],
     }), "utf8");
     const nestedCwd = join(projectRoot, "nested", "src");
@@ -239,8 +239,29 @@ describe("context.ts: 人間のコードだけのprompt", () => {
       const repeatedMetrics = readFileSync(join(metricsDirectory, logFile), "utf8").trim().split("\n").map((line) => JSON.parse(line));
       expect(repeatedMetrics.filter((entry) => entry.k === "sample")).toEqual([
         expect.objectContaining({ rulings_excluded: 1 }),
-        expect.objectContaining({ rulings_excluded: 0 }),
+        expect.objectContaining({ rulings_excluded: 1 }),
       ]);
+    } else {
+      for (const hookEventName of ["UserPromptSubmit", "PreCompact"]) {
+        const next = await runContextHook({
+          session_id: `synthetic-rulings-session-${eventKind}`,
+          cwd: nestedCwd,
+          hook_event_name: hookEventName,
+          prompt: "合成の次の作業を続けて",
+        });
+
+        expect(next.status).toBe("emitted");
+        expect(next.output).toBe("");
+      }
+      const database = new Database(dbPath);
+      try {
+        expect(database.prepare("SELECT * FROM owner_correction_injections WHERE session_id_hash = ?")
+          .all(hashSessionId(`synthetic-rulings-session-${eventKind}`))).toEqual([]);
+        expect(database.prepare("SELECT matched_event_id FROM owner_correction_pending WHERE output_ledger IS NOT NULL")
+          .all()).toEqual([{ matched_event_id: null }]);
+      } finally {
+        database.close();
+      }
     }
   });
 

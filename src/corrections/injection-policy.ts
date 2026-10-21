@@ -11,6 +11,7 @@ import { getSchemaVersion } from "../storage/schema.js";
 import { isCorrectionComplianceEnabled } from "./compliance.js";
 import { correctionPrincipleCandidateFilter } from "./principles.js";
 import { parseCorrectionRuleInput } from "./rule-template.js";
+import { isPendingOutputLedger, supportsPendingOutputLedger } from "./session-store.js";
 import {
   retrieveCorrectionCandidates,
   scoreCorrectionRelevance,
@@ -81,6 +82,7 @@ function readRulingTexts(projectRoot: string, projectName: string): ReadonlySet<
   for (const ruling of parsed.rulings) {
     if (typeof ruling !== "object" || ruling === null) continue;
     if (ruling.status !== "active" && ruling.status !== "fixed") continue;
+    if (ruling.scope !== "main" && ruling.scope !== "all") continue;
     if (ruling.project !== null && ruling.project !== projectName) continue;
     if (typeof ruling.rule !== "string" || !Array.isArray(ruling.quotes)) continue;
     if (ruling.quotes.some((quote: unknown) =>
@@ -115,6 +117,7 @@ function readRulingEvidenceKeys(
       principlesByMember.set(member.member_key, principleKeys);
     }
     principleKeys.add(member.principle_key);
+    if (rulingTexts.has(normalizeRulingText(member.rule_text))) keys.add(member.member_key);
   }
   storage.runCorrectionTransaction(({ db }) => {
     const rows = db.prepare(`
@@ -159,12 +162,14 @@ interface CorrectionEvidencePosition {
 interface CorrectionPrincipleMember {
   principle_key: string;
   member_key: string;
+  rule_text: string;
 }
 
 interface SessionHistory {
   injections: InjectionHistoryRow[];
   evidencePositions: CorrectionEvidencePosition[];
   principleMembers: CorrectionPrincipleMember[];
+  skipSelection: boolean;
 }
 
 function comparePriority(left: RetrievedCorrectionRule, right: RetrievedCorrectionRule): number {
@@ -209,6 +214,42 @@ function readSessionHistory(
       WHERE session_id_hash = ? AND compact_epoch = ?
       ORDER BY human_ordinal, output_order, bundle_key
     `).all(input.sessionIdHash, input.compactEpoch) as InjectionHistoryRow[];
+    if (supportsPendingOutputLedger(db)) {
+      const pendingOutputs = db.prepare(`
+        SELECT last_confirmed_ordinal, output_ledger, output_hash, output_callback_succeeded_at
+        FROM owner_correction_pending
+        WHERE session_id_hash = ? AND matched_event_id IS NULL
+          AND output_callback_succeeded_at IS NOT NULL AND output_ledger IS NOT NULL
+          AND output_hash IS NOT NULL
+          AND (output_epoch = ? OR (? = 'compact' AND output_epoch < ?))
+        ORDER BY received_at, receipt_id
+      `).all(input.sessionIdHash, input.compactEpoch, input.trigger, input.compactEpoch) as Array<{
+        last_confirmed_ordinal: number;
+        output_ledger: string;
+        output_hash: string;
+        output_callback_succeeded_at: string;
+      }>;
+      for (const pending of pendingOutputs) {
+        const output: unknown = JSON.parse(pending.output_ledger);
+        if (!isPendingOutputLedger(output)) continue;
+        if (output.entries.some((entry) => !entry.bodyIncluded || entry.outputHash !== pending.output_hash)) continue;
+        for (const entry of output.entries) {
+          injections.push({
+            bundle_key: entry.bundleKey,
+            version: entry.version,
+            human_ordinal: pending.last_confirmed_ordinal + 1,
+            trigger: output.trigger,
+            emitted_at: pending.output_callback_succeeded_at,
+            output_order: entry.outputOrder,
+            body_included: 1,
+            stdout_status: "emitted",
+          });
+        }
+      }
+    }
+    const skipSelection = (input.trigger === "start" || input.trigger === "compact")
+      && injections.some((row) => row.trigger === input.trigger);
+    if (skipSelection) return { injections, evidencePositions: [], principleMembers: [], skipSelection };
     const evidencePositions = db.prepare(`
       SELECT e.bundle_key, e.source, event.human_ordinal
       FROM owner_correction_evidence e
@@ -219,8 +260,10 @@ function readSessionHistory(
     let principleMembers: CorrectionPrincipleMember[] = [];
     if (principlesMode === "on" && getSchemaVersion(db as unknown as Database.Database) >= CORRECTION_PRINCIPLES_SCHEMA_VERSION) {
       principleMembers = db.prepare(`
-        SELECT member.principle_key, member.member_key
+        SELECT member.principle_key, member.member_key, member_bundle.rule_text
         FROM owner_correction_principle_members AS member
+        JOIN owner_correction_bundles AS member_bundle
+          ON member_bundle.bundle_key = member.member_key
         JOIN owner_correction_bundles AS principle
           ON principle.bundle_key = member.principle_key
         JOIN owner_correction_versions AS version
@@ -241,7 +284,7 @@ function readSessionHistory(
         ORDER BY member.principle_key, member.member_key
       `).all(input.at, input.at, input.at, input.at, input.at) as CorrectionPrincipleMember[];
     }
-    return { injections, evidencePositions, principleMembers };
+    return { injections, evidencePositions, principleMembers, skipSelection };
   });
 }
 
@@ -670,9 +713,11 @@ export function selectCorrectionInjections(
 
   const featureModes = input.featureModes ?? readCorrectionFeatureModes();
   const featureModeInput = { ...input, featureModes };
-  const retrieval = retrieveCorrectionCandidates(storage, input, featureModes);
-  const candidateInjectionEnabled = featureModes.candidateInjection === "on";
   const history = readSessionHistory(storage, input, featureModes.principles);
+  let retrievalFeatureModes = featureModes;
+  if (history.skipSelection) retrievalFeatureModes = { ...featureModes, candidateInjection: "off" };
+  const retrieval = retrieveCorrectionCandidates(storage, input, retrievalFeatureModes);
+  const candidateInjectionEnabled = featureModes.candidateInjection === "on";
   let alwaysOn = orderAlwaysOnByTopic(retrieval.alwaysOn);
   const projectRules = retrieval.projectRules;
   let candidateRules: RetrievedCorrectionRule[] = [];
@@ -680,9 +725,11 @@ export function selectCorrectionInjections(
     candidateRules = retrieval.candidates;
   }
   let deliveryRules = requiredDeliveryRules(alwaysOn, projectRules);
-  const hasAttemptForTrigger = history.injections.some((row) => row.trigger === input.trigger);
-  if ((input.trigger === "start" || input.trigger === "compact") && hasAttemptForTrigger) {
-    return buildSelection([], unreachedRules(deliveryRules, history), alwaysOn.length, retrieval.ftsCandidateCount, 0);
+  const rulingTexts = readRulingTexts(input.projectRoot, input.project);
+  if (history.skipSelection) {
+    const unmatchedDeliveryRules = deliveryRules.filter((rule) => !rulingTexts.has(normalizeRulingText(rule.ruleText)));
+    const alwaysOnCount = alwaysOn.filter((rule) => !rulingTexts.has(normalizeRulingText(rule.ruleText))).length;
+    return buildSelection([], unreachedRules(unmatchedDeliveryRules, history), alwaysOnCount, retrieval.ftsCandidateCount, deliveryRules.length - unmatchedDeliveryRules.length);
   }
   const successfulKeys = new Set(
     successfulHistory(history).map((row) => injectionKey(row.bundle_key, row.version)),
@@ -704,7 +751,6 @@ export function selectCorrectionInjections(
   if (input.trigger === "start" || input.trigger === "compact") {
     evidenceCandidates.push(...projectRules);
   }
-  const rulingTexts = readRulingTexts(input.projectRoot, input.project);
   const rulingEvidenceKeys = readRulingEvidenceKeys(
     storage,
     rulingTexts,

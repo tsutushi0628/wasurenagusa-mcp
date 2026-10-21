@@ -2,11 +2,34 @@ import { createHash, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { CORRECTION_PENDING_OUTPUT_SCHEMA_VERSION } from "../storage/correction-schema.js";
 import { getSchemaVersion } from "../storage/schema.js";
+import type { CorrectionInjectionLedgerEntry } from "./render.js";
+import type { CorrectionInjectionTrigger } from "./injection-policy.js";
 
 export const MAX_PENDING_CANDIDATES = 3;
 
 export function supportsPendingOutputLedger(db: Pick<Database.Database, "prepare">): boolean {
   return getSchemaVersion(db as Database.Database) >= CORRECTION_PENDING_OUTPUT_SCHEMA_VERSION;
+}
+
+export function isPendingOutputLedger(output: unknown): output is {
+  trigger: CorrectionInjectionTrigger;
+  entries: Array<Omit<CorrectionInjectionLedgerEntry, "bodyIncluded"> & { bodyIncluded: boolean }>;
+} {
+  if (typeof output !== "object" || output === null || Array.isArray(output)) return false;
+  if (!("trigger" in output) || !("entries" in output) || !Array.isArray(output.entries)) return false;
+  if (output.trigger !== "start" && output.trigger !== "prompt" && output.trigger !== "refresh" && output.trigger !== "compact") {
+    return false;
+  }
+  return output.entries.every((entry: unknown) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return false;
+    return "bundleKey" in entry && typeof entry.bundleKey === "string" && entry.bundleKey.length > 0
+      && "version" in entry && typeof entry.version === "number" && Number.isSafeInteger(entry.version) && entry.version > 0
+      && "bodyHash" in entry && typeof entry.bodyHash === "string"
+      && "outputHash" in entry && typeof entry.outputHash === "string"
+      && "tokenEstimate" in entry && typeof entry.tokenEstimate === "number" && Number.isSafeInteger(entry.tokenEstimate) && entry.tokenEstimate >= 0
+      && "outputOrder" in entry && typeof entry.outputOrder === "number" && Number.isSafeInteger(entry.outputOrder) && entry.outputOrder >= 0
+      && "bodyIncluded" in entry && typeof entry.bodyIncluded === "boolean";
+  });
 }
 
 export function prepareCorrectionInjectionInsert(db: Pick<Database.Database, "prepare">): Database.Statement {
