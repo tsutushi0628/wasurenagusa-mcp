@@ -1299,8 +1299,9 @@ async function createRuntime(compiledRoot, scratchRoot, measurementRoot = compil
     migration.migrateV12ToV13(storage.db);
     correctionVersion = schema.getSchemaVersion(storage.db);
   }
-  if (correctionVersion !== correctionSchema.CORRECTION_PRINCIPLES_SCHEMA_VERSION) {
-    throw new Error("scratch correction store is not schema v13");
+  if (correctionVersion !== correctionSchema.CORRECTION_PRINCIPLES_SCHEMA_VERSION
+      && correctionVersion !== correctionSchema.CORRECTION_PENDING_OUTPUT_SCHEMA_VERSION) {
+    throw new Error("scratch correction store requires the correction principles or pending output schema");
   }
   return { storage, events, detector, sessionStore, correctionStore, context, policy, render, budget, transcriptReader, redact, query, ruleTemplate, strength, compliance, compiledCompliance, funnel, keying };
 }
@@ -2290,6 +2291,7 @@ async function runCoverage({
     const budget = runtime.budget.DEFAULT_INJECTION_TOKEN_BUDGET;
     const plan = runtime.context.getContextInjectionPlan(input, state.humanSeen, budget);
     const selection = runtime.policy.selectCorrectionInjections(storage, {
+      projectRoot: join(isolatedStoreRoot, session.project),
       project: session.project,
       scope: SOURCE_SCOPE,
       query: "",
@@ -2481,6 +2483,7 @@ async function runCoverage({
         );
         plan = runtime.context.getContextInjectionPlan(hookInput, input.humanOrdinal, runtime.budget.DEFAULT_INJECTION_TOKEN_BUDGET);
         selection = runtime.policy.selectCorrectionInjections(storage, {
+          projectRoot: join(isolatedStoreRoot, input.project),
           project: input.project,
           scope: SOURCE_SCOPE,
           query: input.text,

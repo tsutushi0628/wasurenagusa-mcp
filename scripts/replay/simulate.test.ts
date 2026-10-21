@@ -7,6 +7,7 @@ import { makeManifest } from "./make-manifest.mjs";
 import { readManifest } from "./lib/simulate-engine.mjs";
 import { internal } from "./lib/simulate-engine.mjs";
 import { parseReplayArguments } from "./simulate.mjs";
+import { migrateV13ToV14 } from "../../src/storage/migration.js";
 
 const projectScratchRoot = join(process.cwd(), ".tmp", "fd31f1b6-ac90-4336-a1e7-260faaa28f1e", "tests");
 const projectScratchDirectories: string[] = [];
@@ -145,7 +146,7 @@ describe("scratchストア初期化", () => {
     )).toBe(`oc:v2:${createHash("sha256").update(identity).digest("hex")}`);
   });
 
-  it("v13へ移行して強度イベント表を作る", async () => {
+  it("initializes v13 with strength events and reopens a store migrated to v14", async () => {
     const tempRoot = createProjectScratchDirectory();
     const compiledRoot = join(tempRoot, "build");
     const measurementRoot = join(tempRoot, "measurement");
@@ -181,6 +182,15 @@ describe("scratchストア初期化", () => {
       expect(runtime.keying.storedBundleKey(
         "synthetic-logical-key", "synthetic-project", "owner", "synthetic-session", "explicit_continuing", "owner",
       )).not.toBe("measurement-stored-key");
+      migrateV13ToV14(runtime.storage.db);
+      runtime.storage.close();
+
+      runtime = await internal.initializeBlankStore(compiledRoot, scratchRoot, measurementRoot);
+
+      expect(runtime.storage.db.prepare("SELECT MAX(version) AS version FROM schema_version").get())
+        .toEqual({ version: 14 });
+      expect(runtime.storage.db.prepare("PRAGMA table_info(owner_correction_pending)").all())
+        .toContainEqual(expect.objectContaining({ name: "output_ledger" }));
     } finally {
       runtime?.storage.close();
       for (const [key, value] of Object.entries(originalEnv)) {
