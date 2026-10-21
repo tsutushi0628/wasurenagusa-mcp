@@ -7,7 +7,7 @@
  * 履歴の永続化（プロセスをまたぐPreToolUse呼び出し間で直近100件を引き継ぐ）だけ
  * ファイルI/Oを使うが、判定ロジック自体はファイルを読んだ後の配列に対してのみ動く。
  */
-import { appendFile, mkdir, readFile } from "fs/promises";
+import { appendFile, mkdir, open } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
 
@@ -79,9 +79,47 @@ export async function getRecentHistory(
   const filePath = getHistoryFilePath(memoryPath);
   if (!existsSync(filePath)) return [];
   try {
-    const raw = await readFile(filePath, "utf-8");
-    const lines = raw.split("\n").filter((l) => l.trim().length > 0);
-    const recentLines = lines.slice(-window);
+    const lines: string[] = [];
+    let lineLimit = Infinity;
+    if (window >= 1) {
+      lineLimit = Math.trunc(window);
+    }
+    const handle = await open(filePath, "r");
+    try {
+      let position = (await handle.stat()).size;
+      const buffer = Buffer.alloc(16 * 1024);
+      let remainder = Buffer.alloc(0);
+      while (position > 0 && lines.length < lineLimit) {
+        const length = Math.min(buffer.length, position);
+        position -= length;
+        let totalBytesRead = 0;
+        while (totalBytesRead < length) {
+          const { bytesRead } = await handle.read(buffer, totalBytesRead, length - totalBytesRead, position + totalBytesRead);
+          if (bytesRead === 0) return [];
+          totalBytesRead += bytesRead;
+        }
+        const chunk = Buffer.concat([buffer.subarray(0, length), remainder]);
+        let lineEnd = chunk.length;
+        for (let index = chunk.length - 1; index >= 0 && lines.length < lineLimit; index--) {
+          if (chunk[index] !== 0x0a) continue;
+          const line = chunk.subarray(index + 1, lineEnd).toString("utf-8");
+          if (line.trim().length > 0) {
+            lines.push(line);
+          }
+          lineEnd = index;
+        }
+        remainder = chunk.subarray(0, lineEnd);
+      }
+      if (position === 0 && lines.length < lineLimit) {
+        const line = remainder.toString("utf-8");
+        if (line.trim().length > 0) {
+          lines.push(line);
+        }
+      }
+    } finally {
+      await handle.close();
+    }
+    const recentLines = lines.reverse().slice(-window);
     const actions: EvalAction[] = [];
     for (const line of recentLines) {
       try {
