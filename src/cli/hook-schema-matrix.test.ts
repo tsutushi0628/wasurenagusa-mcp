@@ -437,8 +437,9 @@ describe.each([11, 12, 13])("analyze Stop correction recovery schema v%s", (sche
     } finally {
       stdoutWriteSpy.mockRestore();
     }
-    expect(stdoutChunks.join("")).toContain(termsRule.bundle_key);
-    expect(stdoutChunks.join("")).not.toContain(answerRule.bundle_key);
+    expect(stdoutChunks.join("")).toContain(termsRule.rule_text);
+    expect(stdoutChunks.join("")).not.toContain(answerRule.rule_text);
+    expect(stdoutChunks.join("")).not.toContain("oc:v2:");
   });
 
   it.skipIf(schemaVersion !== 12)("schema v12のDBで合成pr規則IDの取消を反映する", async () => {
@@ -566,7 +567,7 @@ describe.each([11, 12, 13])("analyze Stop correction recovery schema v%s", (sche
       const startTranscript = writeTranscript([]);
       attachContextStdin(startTranscript, "third-session", "SessionStart", { source: "startup" });
       expect(await context.main()).toBe("emitted");
-      expect(stdoutChunks.join("")).toContain("### オーナーからの確認済み規則");
+      expect(stdoutChunks.join("")).toContain("オーナーの過去の指摘（今回関係）");
       expect(stdoutChunks.join("")).toContain("質問に回答する");
     } finally {
       stdoutWriteSpy.mockRestore();
@@ -643,6 +644,7 @@ describe.each([11, 12, 13])("analyze Stop correction recovery schema v%s", (sche
       });
       expect(state.memories).toEqual([{ id: expect.any(String), content: "文章は毎回全文を表示する", state: "active" }]);
 
+      stdoutChunks.length = 0;
       attachContextStdin(writeTranscript([]), "ordinary-request-next-session", "SessionStart", { source: "startup" });
       expect(await context.main()).toBe("emitted");
       expect(stdoutChunks.join("")).toContain("文章は毎回全文を表示する");

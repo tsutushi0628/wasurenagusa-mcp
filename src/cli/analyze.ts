@@ -48,6 +48,7 @@ import { Analyzer } from "../analyzer/index.js";
 import { SQLiteStorage } from "../storage/index.js";
 import { getMemoryPath, config } from "../config.js";
 import { getCorrectionLoopMode } from "../corrections/environment-mode.js";
+import { transcriptHasExplicitRecord } from "../corrections/explicit.js";
 import { findProjectRoot } from "../utils/projectRoot.js";
 import { redactSensitive } from "../utils/redact-sensitive-data.js";
 import { isDirectRun } from "../utils/cli-entry.js";
@@ -92,6 +93,7 @@ type StopSessionState = {
 };
 
 type PreparedStopEvent = {
+  byteOffset: number;
   event: SessionCorrectionEvent;
   candidates: CorrectionCandidate[];
   modelRoutingRetractionTargets: string[];
@@ -285,6 +287,7 @@ function prepareStopEvents(
     lastAvailableAt = availableAtMs;
 
     prepared.push({
+      byteOffset: record.byteOffset,
       event: {
         eventId,
         ...(ownerEvent.uuid ? { sourceUuidHash: hashRawText(ownerEvent.uuid) } : {}),
@@ -498,6 +501,26 @@ function commitStopBatch(
   });
 }
 
+let stopBlockReason: string | null = null;
+
+/** 指摘が検出されたのに記録ツールが呼ばれていなければ差し戻し文を作る。1回だけ（再 Stop は stop_hook_active で素通り）。 */
+function detectUnrecordedCorrection(
+  records: readonly TranscriptRecord[],
+  prepared: readonly PreparedStopEvent[],
+): string | null {
+  const flagged = prepared.filter((item) => !item.cancellationBundleKey && item.candidates.some((candidate) => candidate.ruleText.trim().length > 0));
+  const last = flagged[flagged.length - 1];
+  if (!last) return null;
+  const offsets = records.map((record) => record.byteOffset);
+  if (transcriptHasExplicitRecord(records as ReadonlyArray<{ entry: Record<string, unknown> }>, last.byteOffset, offsets)) return null;
+  return [
+    "オーナーの指摘が未記録。質問に答えたうえで記録する。",
+    `原文: ${last.event.excerpt}`,
+    "同趣旨の規則が既にあれば correction_recur(query=規則文の一部, quote=原文)、無ければ correction_record(rule=次回の行動1行, scene=思い出す場面1行, quote=原文)。",
+    "返事に ID・番号は書かない。",
+  ].join("\n");
+}
+
 async function recoverStopCorrections(hookInput: HookInput, deadline: number): Promise<boolean> {
   if (!hasDeadlineTimeRemaining(deadline)) return false;
   const projectRoot = findProjectRoot(hookInput.cwd);
@@ -528,6 +551,7 @@ async function recoverStopCorrections(hookInput: HookInput, deadline: number): P
     );
     if (!hasDeadlineTimeRemaining(deadline)) return false;
 
+    stopBlockReason = detectUnrecordedCorrection(delta.records, prepared);
     const humanOrdinal = commitStopBatch(
       storage,
       sessionIdHash,
@@ -661,6 +685,11 @@ export async function main() {
 
   if (getCorrectionLoopMode() === "on") {
     await recoverStopCorrections(hookInput, deterministicDeadline);
+    if (stopBlockReason) {
+      process.stdout.write(`${JSON.stringify({ decision: "block", reason: stopBlockReason })}\n`);
+      if (isCliEntry) process.exit(0);
+      return;
+    }
   }
 
   if (!shouldRunStopLlm() || finishAtTotalDeadline(totalDeadline)) return;

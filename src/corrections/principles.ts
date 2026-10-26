@@ -933,3 +933,4 @@ export function guardCorrectionPrincipleAbstraction(
   if (polarity !== expectedPolarity) return rejectAbstraction("polarity_mismatch");
   return { accepted: true, reason: null, principle };
 }
+

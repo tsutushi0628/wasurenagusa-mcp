@@ -431,3 +431,68 @@ Codex実装2本。D3aの単一受入動作＝独立根拠から意味と条件�
 | D3b | `src/corrections/retrieval.ts`, `injection-policy.ts`, 各同名test、`scripts/replay/simulate.mjs`, `scripts/replay/lib/simulate-engine.mjs`, `scripts/replay/lib/simulate.test.ts`: 規則到達と分割別検証 | ①常時規則をrelatedから除外せず、型の対象topicで候補取得、モデル名だけの照合は不採用、冷却10・候補40・関連2・重複0 ②開始6件内モデル最大2予約、project可視維持、開始後確定/未到達/compactの後続配送 ③ヘッダー込み開始1800・発話800以内、予算で落ちた規則は未配送維持、部分文0 ④T23改修: manifest/compiled-root/scratch/split引数、98sessionの固定7:3・DB/台帳分離・各分割内の再発分母、全指標をJSON/Markdownの調整70%/評価30%の2列へ出す ⑤調整側だけで変更を決めhash固定後に評価側1回、評価を見た再調整禁止、両側の到達/誤保存/tokenとSol/Opus監査を報告 ⑥別session理由に時点別有効性・開始時状態・枠/後続配送/観測/検索の副理由、hook観測数と出力数、旧実装も同じ判定器で比較 ⑦元106本の復元ゲートとwarm比較/必須ゲートを除去、現98sessionの欠損・hash不一致は失敗 ⑧実binの隔離通し試験と既存回帰を通し、機密値・逐語を追跡成果物へ出さない | `pnpm exec vitest run src/corrections/retrieval.test.ts src/corrections/injection-policy.test.ts scripts/replay/lib/simulate.test.ts src/corrections/render.test.ts src/injection/budget.test.ts`、`pnpm exec tsc --noEmit`、`pnpm test`、節8のscratchビルド→`--split tune`→固定→`--split evaluation`、同CLIの`--mode acceptance`・`--mode hook-timing` | D3a後。T13/T23改善分を所有、D3a所有ファイルは読取のみ。render/budgetのtestは実行のみ。T25は分割別検証・監査合格と本番承認後 |
 
 レビュー: 条件統合後も適用範囲を広げていないか／型が停止・期限・否定・モデル版を補完/欠落させていないか／評価側を見て語彙・閾値・束・配送を変更していないか。改善後の(a)(b)(c)件数と率は両分割で実測、目標値の数字は置かない。
+
+## 12. 明示記録へ切替、firebase-kit 指摘リストを畳む
+
+### 12.1 現状の実測（2026-10-26 memory.db）
+- 束 769。confirmed 4、candidate 387、disputed 377、rejected 1。
+- candidate の rule_text ほぼ空。confirmed 4 件は「再設計して」「おい質問に答えろ」など発話の生文。規則文の形になっていない。
+- 自動検出（detector）だけでは規則が溜まらない。firebase-kit 側で 10-19 に別の指摘リスト（git 管理 JSON、r-001〜r-284、active 266）が作られたのはこれが原因。
+- 指摘リストの欠点: git 管理（Mac/Windows で番号衝突、履歴が汚れる）、r-xxx 番号がオーナーへの返事・差し戻し文面に出る。
+- Wasurenagusa 側も注入見出しに `（ID: oc:v2:… / v6）` を出す。オーナーの「番号を出すな」はここにも当たる。
+
+### 12.2 決定
+1. 置き場 = memory.db（owner_correction_*）だけ。firebase-kit の `.claude/rulings/` は消す。git に残すのは hook 呼び出しコードとテストだけ。
+2. 記録 = AI の明示記録。オーナー指摘が来たら AI が「次回の行動1行」「思い出す場面1行」「原文」を書き、`owner_confirmed` 束として保存。自動検出は補助（候補のまま、注入しない）。
+3. 識別子はオーナーに見せない。注入見出し・Stop 差し戻し・返事・サブ依頼文、全部で規則文と場面だけ。bundle_key は内部。
+4. 未記録の差し戻しは Stop（analyze）で出す。指摘を検出して記録が無ければ `decision: block`、理由文は「この指摘を記録する: <原文>」＋記録ツールの呼び方。1 セッション 1 回。
+5. 引き出しは場面文で。UserPromptSubmit で `wasurenagusa-context` が場面列＋規則文を FTS、上位候補を LLM で選別（firebase-kit advise.py の recall 5件・閾値0.7 を移す。API キー無しは FTS のみ）。
+6. サブ招聘にも注入。Agent 呼び出し（PreToolUse Agent）と Codex ラッパから `wasurenagusa-context`（hook_event_name=SubagentStart 相当の新入口、`--scope sub`）を叩き、規則文だけ渡す。
+7. 2 台共有は既存 `wasurenagusa-correction-import --source <相手の memory.db>`。キーはハッシュで衝突なし、重複は imports 表で抑止。handoff 時に相手 DB を取り込む手順を書く。
+
+### 12.3 スキーマ追加
+- owner_correction_bundles に `scene TEXT`（場面1行）と `origin TEXT CHECK(origin IN ('explicit','detector','legacy_import'))` を足す。v15 migration、既存行は origin='detector'、scene=''。
+- FTS に scene を含める。retrieval は scene 一致を rule_text より重く。
+- quotes は owner_correction_evidence（原文・日付）。recur は occurrence_count を増やす。
+
+### 12.4 入口（新規）
+| 入口 | 役 | 置換元 |
+|---|---|---|
+| MCP `correction_record(rule, scene, quote, project, scope)` | 新規に owner_confirmed 束 | ruling.py add |
+| MCP `correction_recur(query or key, quote)` | 既存束に根拠を足す。key はツール内部で解決、AI は規則文で指す | ruling.py recur |
+| MCP `correction_dismiss(receipt)` | 指摘でないと判断した pending を閉じる | pending dismiss |
+| `wasurenagusa-context` SubagentStart / `--scope sub` | サブ・Codex への注入本文 | ruling.py inject --sub |
+| `wasurenagusa-analyze` Stop の block | 未記録の差し戻し | advise.py pending_rulings |
+| `scripts/maintenance/import-rulings-json.ts`（1 回限り） | rulings.json → 束・evidence | なし |
+
+### 12.5 移行（rulings.json → memory.db）
+- rulings 284 → 束 284（origin='legacy_import', status=confirmed, rule_text=rule, scene=scene, project=project or 'owner' visibility, scope=scope, intensity=4）。status fixed 17 は confirmed のまま、checks 済みの印は不要。blocked 1 は status=rejected でなく confirmed＋evidence に blocked_reason。
+- quotes 292 → evidence 292。
+- resolved_pendings 377: recur 79 は occurrence_count に加算、resolve 259 と dismiss 39 は捨てる（操作ログ、規則でない）。
+- checks 22 件（firebase-kit のファイル grep・pytest）は記憶でなくテスト。firebase-kit `.claude/hooks/tests/test_rule_doc_guards.py` に r 番号なしで移す。
+- 件数突合は 規則 284・引用 292 で行う。pendings は突合に使わない。
+- 番号 r-xxx は列として持ち込まない。
+
+### 12.6 firebase-kit 側の撤去
+- 消す: `.claude/rulings/` 全部、advise.py の ruling import・recall・pending_rulings・Stop 差し戻し、session_state の record_ruling_pending/claim_*、fusion ラッパの `ruling.py inject`、hooks-selftest の ruling check、tests/test_rulings.py。
+- 置換: advise.py UserPromptSubmit は何も注入しない（wasurenagusa-context が出す）。PreToolUse Agent と fusion は `wasurenagusa-context --scope sub` の出力を依頼文に足す。
+- 文書: CLAUDE.md・refs/gates.md・agents・skills の「指摘リスト」「ruling.py」「r-xxx」を「Wasurenagusa に記録」に直す。返事に識別子を出さない規則を CLAUDE.md 会話文体に 1 行。
+- docs/specs/owner-rulings-ledger.md は削除、本節を参照先にする。
+
+### 12.7 検収
+- grep: firebase-kit で rulings・ruling.py・指摘リスト 0 件（worklog・git 履歴除く）。
+- 新セッション起動で、関係する規則文だけが注入され、ID 文字列（oc:v2、r-）が本文に無い。
+- オーナー指摘を 1 回入れて Stop 差し戻し → correction_record → 次発話で注入、を実物で 1 周。
+- wasurenagusa-mcp vitest 全通過、firebase-kit hooks/tests 全通過。
+
+### 12.8 順番
+1. wasurenagusa-mcp: v15 migration・MCP 3 ツール・retrieval の scene・render の ID 削除・analyze の block・context の sub 入口・import スクリプト・テスト。
+2. 移行実行（dry-run → apply、件数突合）。
+3. firebase-kit: 撤去・置換・文書・checks のテスト化・テスト。
+4. 実物 1 周、Windows 側は相手 DB import の手順を handoff に書く。
+
+### 12.9 注入本文の形（追加決定）
+- ID・版・ハッシュ・見出しの定型文（「記憶に基づく補助情報…」）を出さない。トークン削減。
+- 本文は原始人調（助詞最小・1規則1行・「場面 → 行動」）。意味・条件・数値は落とさない。例: `サブ招聘 → Wasurenagusa の規則文だけ渡す。ID 禁止`。
+- rule_text・scene は保存時点で原始人調に整える（correction_record が受ける文のまま保存、長文は拒否 240 字）。
+- 旧束（detector 由来・legacy_import）の本文も render 時に見出しなしで 1 行化。

@@ -35,6 +35,12 @@ import {
   handleMemoryRestore,
   memoryUnarchiveTool,
   handleMemoryUnarchive,
+  correctionRecordTool,
+  correctionRecurTool,
+  correctionSearchTool,
+  handleCorrectionRecord,
+  handleCorrectionRecur,
+  handleCorrectionSearch,
 } from "./tools/index.js";
 import { findProjectRoot } from "./utils/projectRoot.js";
 import { ensureOwnerProfileExists } from "./utils/owner-profile.js";
@@ -76,6 +82,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       memoryStashTool,
       memoryRestoreTool,
       memoryUnarchiveTool,
+      correctionRecordTool,
+      correctionRecurTool,
+      correctionSearchTool,
     ],
   };
 });
@@ -90,6 +99,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     switch (name) {
       case "memory_get_context":
         result = await handleMemoryGetContext(args || {}, PROJECT_ROOT);
+        break;
+      case "correction_record":
+        result = await handleCorrectionRecord(args || {}, PROJECT_ROOT);
+        break;
+      case "correction_recur":
+        result = await handleCorrectionRecur(args || {}, PROJECT_ROOT);
+        break;
+      case "correction_search":
+        result = await handleCorrectionSearch(args || {}, PROJECT_ROOT);
         break;
       case "memory_save":
         result = await handleMemorySave(args || {}, PROJECT_ROOT);

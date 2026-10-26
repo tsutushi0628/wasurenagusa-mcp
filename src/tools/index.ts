@@ -11,3 +11,4 @@ export { memoryUpdateIntensityTool, handleMemoryUpdateIntensity } from "./update
 export { memoryStashTool, handleMemoryStash } from "./stash.js";
 export { memoryRestoreTool, handleMemoryRestore } from "./restore.js";
 export { memoryUnarchiveTool, handleMemoryUnarchive } from "./unarchive.js";
+export { correctionRecordTool, correctionRecurTool, correctionSearchTool, handleCorrectionRecord, handleCorrectionRecur, handleCorrectionSearch } from "./correctionRecord.js";

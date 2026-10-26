@@ -21,7 +21,8 @@
     "wasurenagusa-pretool-guard": "./dist/cli/pre-tool-use-guard.js",
     "wasurenagusa-dream-worker": "./dist/cli/dream-worker.js",
     "wasurenagusa-promote": "./dist/cli/promote.js",
-    "wasurenagusa-guard-approve": "./dist/cli/guard-approve.js"
+    "wasurenagusa-guard-approve": "./dist/cli/guard-approve.js",
+    "wasurenagusa-rules": "./dist/cli/rules.js"
   },
   "scripts": {
     "build": "tsc && chmod +x dist/cli/*.js dist/index.js",

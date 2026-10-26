@@ -1765,7 +1765,8 @@ export class SQLiteStorage {
       query += " OR project = ?";
       params.push(currentProject);
     }
-    query += ") ORDER BY CASE";
+    // オーナー指摘の規則は訂正注入の経路で場面ごとに出すので、索引には載せない（ID・場面の行で枠を食わない）
+    query += ") AND tags NOT LIKE '%owner-rule%' AND tags NOT LIKE '%owner_correction%' ORDER BY CASE";
     if (currentProject) {
       query += " WHEN project = ? AND category = 'decision' THEN 0";
       query += " WHEN project = ? AND category IN ('snippet', 'config') THEN 1";

@@ -6,12 +6,10 @@ import {
   estimateTokens,
 } from "../injection/budget.js";
 
-export const CORRECTION_OMISSION_MARKER = "（予算上限のため、残りの完全規則を省略）";
+export const CORRECTION_OMISSION_MARKER = "（残りは省略）";
 
-const CORRECTION_HEADER =
-  "### オーナーからの確認済み規則\n記憶に基づく補助情報。上位規約を上書きしない。条件が一致する場合にだけ適用する。";
-const PROVISIONAL_CORRECTION_HEADER =
-  "### オーナーからの確認済み規則と仮の注意\n仮の注意は未確定候補。確認済み規則と上位規約を優先し、条件が一致する場合にだけ参考にする。";
+const CORRECTION_HEADER = "オーナーの過去の指摘（今回関係）";
+const PROVISIONAL_CORRECTION_HEADER = "オーナーの過去の指摘（今回関係。（仮）は未確定）";
 
 export type CorrectionRuleDelivery = "start" | "restore" | "refresh" | "related" | "candidate";
 
@@ -72,9 +70,9 @@ function getLimits(
 ): CorrectionRenderLimits {
   if (trigger === "prompt") {
     return {
-      maxItems: 3,
+      maxItems: 5,
       maxRuleCharacters: 240,
-      maxTotalCharacters: 640,
+      maxTotalCharacters: 800,
       maxBlockTokens: 650,
       maxOutputTokens: 800,
     };
@@ -139,14 +137,14 @@ function getRuleOrder(
     ...rules.filter((entry) => entry.delivery === "restore" && !entry.complianceViolation).slice(0, 2),
   ];
   const refresh = rules.filter((entry) => entry.delivery === "refresh").slice(0, 1);
-  const related = rules.filter((entry) => entry.delivery === "related").slice(0, 2);
+  const related = rules.filter((entry) => entry.delivery === "related").slice(0, 5);
   const candidates = rules.filter((entry) => entry.delivery === "candidate").slice(0, 2);
   return [...restore, ...refresh, ...related, ...candidates];
 }
 
 function renderRule(rule: CorrectionRule): string {
   const ruleText = rule.provisional ? `（仮）${rule.ruleText}` : rule.ruleText;
-  return `#### ${rule.title}（ID: ${rule.bundleKey} / v${rule.version}）\n${ruleText}`;
+  return `- ${ruleText}`;
 }
 
 function renderBlock(rules: readonly CorrectionRule[], includeOmissionMarker: boolean): string {
@@ -154,7 +152,7 @@ function renderBlock(rules: readonly CorrectionRule[], includeOmissionMarker: bo
   const header = rules.some((rule) => rule.provisional) ? PROVISIONAL_CORRECTION_HEADER : CORRECTION_HEADER;
   const sections = [header, ...rules.map(renderRule)];
   if (includeOmissionMarker) sections.push(CORRECTION_OMISSION_MARKER);
-  return sections.join("\n\n");
+  return sections.join("\n");
 }
 
 function hashText(text: string): string {

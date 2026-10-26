@@ -36,7 +36,7 @@ describe("renderCorrectionRules", () => {
     const result = renderCorrectionRules({ trigger: "prompt", rules: [candidate] });
     const expectedBodyHash = createHash("sha256").update("（仮）合成規則。", "utf8").digest("hex");
 
-    expect(result.text).toContain("確認済み規則と仮の注意");
+    expect(result.text).toContain("（仮）は未確定");
     expect(result.text).toContain("（仮）合成規則。");
     expect(result.ledger[0]?.bodyHash).toBe(expectedBodyHash);
   });
@@ -82,10 +82,11 @@ describe("renderCorrectionRules", () => {
       "restore-1",
       "restore-2",
       "refresh-1",
+      "related-1",
     ]);
-    expect(result.text.indexOf("restore-1")).toBeLessThan(result.text.indexOf("restore-2"));
-    expect(result.text.indexOf("restore-2")).toBeLessThan(result.text.indexOf("refresh-1"));
-    expect(result.omittedBundleKeys).toContain("related-1");
+    expect(result.text.indexOf("未到達規則一")).toBeLessThan(result.text.indexOf("未到達規則二"));
+    expect(result.text.indexOf("未到達規則二")).toBeLessThan(result.text.indexOf("定期規則"));
+    expect(result.text).not.toContain("restore-1");
     expect(result.tokenCount).toBeLessThanOrEqual(800);
   });
 
@@ -167,10 +168,10 @@ describe("renderCorrectionRules", () => {
     const fullItem = renderCorrectionRules({ trigger: "start", rules: [refreshRule] });
     const promptResult = renderCorrectionRules({ trigger: "prompt", rules: [refreshRule] });
 
-    expect(fullItem.tokenCount).toBeGreaterThan(450);
-    expect(fullItem.tokenCount).toBeLessThanOrEqual(650);
-    expect(promptResult.includedRules).toEqual([]);
-    expect(promptResult.omittedBundleKeys).toEqual(["refresh-title-limit"]);
+    expect(fullItem.text).not.toContain("合成題名");
+    expect(fullItem.text).not.toContain("refresh-title-limit");
+    expect(promptResult.includedRules.map((entry) => entry.bundleKey)).toEqual(["refresh-title-limit"]);
+    expect(promptResult.tokenCount).toBeLessThanOrEqual(450);
   });
 
   it("定期再注入でも未配送のrestore規則を2件出力し、台帳候補に残す", () => {
@@ -319,7 +320,7 @@ describe("renderCorrectionRules", () => {
 
   it("1件を予算落ちさせた後の出力・台帳ID・本文hash・最終hashを一致させる", () => {
     const first = rule("kept-id", "条件: 合成入力。\n否定: 本文を省かない。");
-    const second = rule("omitted-id", "次の規則。", {
+    const second = rule("omitted-id", "次の規則。".repeat(40), {
       title: "長い題名".repeat(100),
     });
     const full = renderCorrectionRules({
@@ -327,7 +328,7 @@ describe("renderCorrectionRules", () => {
       rules: [first, second],
     });
     const single = renderCorrectionRules({ trigger: "start", rules: [first] });
-    const markerBudget = estimateTokens(`${single.text}\n\n${CORRECTION_OMISSION_MARKER}`);
+    const markerBudget = estimateTokens(`${single.text}\n${CORRECTION_OMISSION_MARKER}`);
     const result = renderCorrectionRules({
       trigger: "start",
       rules: [first, second],

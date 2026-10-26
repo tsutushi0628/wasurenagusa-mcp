@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import { readCorrectionFeatureModes, type CorrectionFeatureModes } from "./environment-mode.js";
 import { correctionPrincipleCandidateFilter } from "./principles.js";
 import { extractShortCjkTokens, SQLiteStorage, tokenizeForFts } from "../storage/sqlite.js";
+import { rankExplicitRules } from "./explicit.js";
 
 interface CorrectionPrincipleExclusion {
   sql: string;
@@ -49,6 +50,8 @@ export interface CorrectionRetrievalInput {
   scope: string;
   query: string;
   at: string;
+  /** start/compact では明示規則の場面照合を行わない（関連規則は発話時にだけ出す） */
+  trigger?: string;
   topicKeys?: readonly string[];
   toolNames?: readonly string[];
 }
@@ -548,6 +551,7 @@ export function retrieveCorrectionCandidates(
   let projectRules: RetrievedCorrectionRule[] = [];
   let candidates: RetrievedCorrectionRule[] = [];
   let ownerScopeBehaviorRules: RetrievedCorrectionRule[] = [];
+  let explicitRules: Array<RetrievedCorrectionRule & { relevance: number }> = [];
   const ownerScopeBehaviorEnabled = featureModes.ownerScopeBehavior === "on";
   const candidateInjectionEnabled = featureModes.candidateInjection === "on";
   const topicKeys = [...new Set([...inferCorrectionTopicKeys(input.query), ...(input.topicKeys ?? [])])];
@@ -564,6 +568,13 @@ export function retrieveCorrectionCandidates(
       candidates = readCandidateRules(db, input, exclusion, ownerScopeBehaviorEnabled);
     }
     topicRules = readTopicRules(db, topicKeys, input, exclusion, intensitySql);
+    const explicitEligible = input.trigger === undefined || input.trigger === "prompt" || input.trigger === "refresh";
+    explicitRules = (explicitEligible ? rankExplicitRules(db, { query: input.query, project: input.project, limit: 8 }) : []).map((rule) => ({
+      bundleKey: rule.bundleKey, version: rule.version, title: rule.scene, ruleText: rule.ruleText, topicKey: "explicit",
+      conditionKey: "", visibility: rule.visibility, project: rule.project, scope: "general", intensity: 4,
+      sessionCount: rule.occurrenceCount, lastSeenAt: rule.lastSeenAt, expiresAt: null, lifetimeKind: "inferred",
+      continuationBasis: "", relevance: rule.relevance,
+    }));
     if (!query.searchText) return;
     const search = storage.searchCorrectionCandidates({ query: query.searchText, project: input.project });
     const memoryIds = search.results.map((entry) => entry.id).slice(0, MAX_FTS_CANDIDATES);
@@ -577,6 +588,7 @@ export function retrieveCorrectionCandidates(
   const routeAssignments = extractModelRoutingAssignments(input.query);
   const candidateMap = new Map<string, RetrievedCorrectionRule>();
   for (const rule of [...topicRules, ...ftsRules]) {
+    if (rule.topicKey === "explicit") continue;
     candidateMap.set(rule.bundleKey + ":" + rule.version, rule);
   }
   const candidateCounts = new Map<string, number>();
@@ -587,8 +599,8 @@ export function retrieveCorrectionCandidates(
       candidateCounts.set(rule.visibility, count + 1);
       return true;
     });
-  ftsCandidateCount = ftsRules.length;
-  const related = ftsRules
+  ftsCandidateCount = ftsRules.length + explicitRules.length;
+  const relatedDetector = ftsRules
     .map((rule) => ({
       rule,
       relevance: scoreCorrectionRelevance({
@@ -613,6 +625,9 @@ export function retrieveCorrectionCandidates(
       visibility: ownerScopeBehaviorKeys.has(correctionRuleIdentity(entry.rule)) ? "owner" : entry.rule.visibility,
       relevance: entry.relevance,
     }));
+  const related = [...explicitRules, ...relatedDetector]
+    .sort((left, right) => right.relevance - left.relevance)
+    .slice(0, MAX_FTS_CANDIDATES);
 
   return { query, alwaysOn, projectRules, related, candidates, ftsCandidateCount };
 }
