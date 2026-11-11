@@ -35,8 +35,11 @@ export async function handleMemoryDelete(
     const result = storage.delete({ ids });
 
     // ベクトル削除（SQLiteStorage統合済み）
-    if (result.deleted.length > 0) {
-      storage.deleteVectors(result.deleted);
+    // 論理削除にとどめた分は復元できるようにベクトルを残す
+    const soft = new Set(result.softDeleted ?? []);
+    const hardDeleted = result.deleted.filter((id) => !soft.has(id));
+    if (hardDeleted.length > 0) {
+      storage.deleteVectors(hardDeleted);
     }
 
     return JSON.stringify(result, null, 2);

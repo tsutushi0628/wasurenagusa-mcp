@@ -160,6 +160,7 @@ export interface DeleteParams {
 export interface DeleteResult {
   deleted: string[];             // 削除成功したID
   notFound: string[];            // 見つからなかったID
+  softDeleted?: string[];        // 指摘の記録から参照されるため論理削除にとどめたID（deleted にも含む）
 }
 
 // 重複チェック入力

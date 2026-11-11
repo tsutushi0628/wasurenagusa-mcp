@@ -1177,25 +1177,65 @@ export class SQLiteStorage {
     return { entries, notFound };
   }
 
+  // 指摘の記録（owner_correction_bundles / owner_correction_imports）から外部キーで参照される memory の ID 集合。
+  // 指摘の表が未作成の DB では空集合。
+  private correctionReferencedIds(): Set<string> {
+    const ids = new Set<string>();
+    const hasTable = (name: string) =>
+      this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?").get(name) !== undefined;
+    if (hasTable("owner_correction_bundles")) {
+      for (const row of this.db.prepare(
+        "SELECT memory_id AS id FROM owner_correction_bundles WHERE memory_id IS NOT NULL"
+      ).all() as { id: string }[]) ids.add(row.id);
+    }
+    if (hasTable("owner_correction_imports")) {
+      for (const row of this.db.prepare(
+        "SELECT target_memory_id AS id FROM owner_correction_imports"
+      ).all() as { id: string }[]) ids.add(row.id);
+    }
+    return ids;
+  }
+
+  // 削除は全件まとめて1トランザクション（途中で失敗したら1件も消さない）。
+  // 指摘の記録から参照される memory は物理削除すると外部キー違反になるため、
+  // 指摘を rejected にして注入対象から外し、memory は論理削除（deleted_at）で残す。
   delete(params: DeleteParams): DeleteResult {
     try {
-      const deleted: string[] = [];
-      const notFound: string[] = [];
+      const run = this.db.transaction((ids: string[]): DeleteResult => {
+        const deleted: string[] = [];
+        const notFound: string[] = [];
+        const softDeleted: string[] = [];
+        const referenced = this.correctionReferencedIds();
+        const ts = this.generateTimestamp();
 
-      const deleteMemory = this.db.prepare("DELETE FROM memories WHERE id = ?");
+        const checkStmt = this.db.prepare("SELECT id FROM memories WHERE id = ?");
+        const deleteMemory = this.db.prepare("DELETE FROM memories WHERE id = ?");
+        const deleteVec = this.db.prepare("DELETE FROM vectors WHERE id = ?");
+        const softStmt = this.db.prepare(
+          "UPDATE memories SET deleted_at = ?, state = 'deleted' WHERE id = ? AND deleted_at IS NULL"
+        );
 
-      for (const id of params.ids) {
-        const existing = this.db.prepare("SELECT id FROM memories WHERE id = ?").get(id) as { id: string } | undefined;
-        if (existing) {
-          deleteMemory.run(id);
-          this.db.prepare("DELETE FROM vectors WHERE id = ?").run(id);
+        for (const id of ids) {
+          if (!checkStmt.get(id)) {
+            notFound.push(id);
+            continue;
+          }
+          if (referenced.has(id)) {
+            this.db.prepare(
+              "UPDATE owner_correction_bundles SET status = 'rejected' WHERE memory_id = ? AND status != 'rejected'"
+            ).run(id);
+            softStmt.run(ts, id);
+            softDeleted.push(id);
+          } else {
+            deleteMemory.run(id);
+            deleteVec.run(id);
+          }
           deleted.push(id);
-        } else {
-          notFound.push(id);
         }
-      }
 
-      return { deleted, notFound };
+        return softDeleted.length > 0 ? { deleted, notFound, softDeleted } : { deleted, notFound };
+      });
+      return run(params.ids);
     } catch (error) {
       this.recordWriteFailure("delete", error);
       throw error;
@@ -1280,9 +1320,11 @@ export class SQLiteStorage {
     }
 
     const purge = this.db.transaction(() => {
+      // 指摘の記録から参照される tombstone は物理削除すると外部キー違反になるので残す。
+      const referenced = this.correctionReferencedIds();
       const tombstoneIds = (this.db.prepare(
         "SELECT id FROM memories WHERE deleted_at IS NOT NULL"
-      ).all() as { id: string }[]).map((row) => row.id);
+      ).all() as { id: string }[]).map((row) => row.id).filter((id) => !referenced.has(id));
 
       let deletedVectors = 0;
       let deletedVectorMetadata = 0;
@@ -1293,14 +1335,16 @@ export class SQLiteStorage {
         deletedVectorMetadata += deleteMeta.run(id).changes;
       }
 
-      const memoriesResult = this.db.prepare(
-        "DELETE FROM memories WHERE deleted_at IS NOT NULL"
-      ).run();
+      const deleteMemory = this.db.prepare("DELETE FROM memories WHERE id = ?");
+      let deletedMemories = 0;
+      for (const id of tombstoneIds) {
+        deletedMemories += deleteMemory.run(id).changes;
+      }
 
       return {
         deletedVectors,
         deletedVectorMetadata,
-        deletedMemories: memoriesResult.changes,
+        deletedMemories,
       };
     });
 
