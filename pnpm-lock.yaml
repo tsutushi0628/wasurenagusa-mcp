@@ -54,7 +54,7 @@ importers:
         version: 0.24.1
       '@huggingface/transformers':
         specifier: ^4.3.1
-        version: 4.3.1(@types/node@20.19.43)
+        version: 4.3.2(@types/node@20.19.43)
       '@modelcontextprotocol/sdk':
         specifier: ^1.32.2
         version: 1.32.2(@cfworker/json-schema@4.1.1)(zod@4.6.7)
@@ -78,8 +78,8 @@ importers:
         specifier: ^20.19.43
         version: 20.19.43
       fast-check:
-        specifier: 4.9.0
-        version: 4.9.0
+        specifier: 4.10.2
+        version: 4.10.2
       firebase-admin:
         specifier: ^13.10.0
         version: 13.10.0
@@ -354,15 +354,15 @@ packages:
     peerDependencies:
       hono: '>=4.13.7 <5'
 
-  '@huggingface/jinja@0.5.10':
-    resolution: {integrity: sha512-SgS1D1bglQ94ceD4ZCL6eayUDy9uV1xuyk61OjgSxU5GJh7upqZCKII0JoTYMc6wWsg3JUgaPRX0ElQzXPk3Cw==}
+  '@huggingface/jinja@0.5.12':
+    resolution: {integrity: sha512-o0aIdtHrSBmNgUC3zVHSRBReUZO87679tK9sQztp683pu6cbidcWnHivJYChYf/aDpGdlwxbTfs4pRQ1MhBGkQ==}
     engines: {node: '>=18'}
 
   '@huggingface/tokenizers@0.2.0':
     resolution: {integrity: sha512-LidMHe1FpcSYH4vcSjXooda34pC0M8m1gmDOv7SQi6Iv+ib1zX7J3sHBCC9/3FPCkn2k1b55FneVqMRxrr99pg==}
 
-  '@huggingface/transformers@4.3.1':
-    resolution: {integrity: sha512-5+voSeUCFK6PCKlY15dPhNOKq3/zOTxDN7oC+Wy9dFb1QZ0TSQomZRRy7URRK8YRuUoE9fGMQTTPC5d/pWBJhA==}
+  '@huggingface/transformers@4.3.2':
+    resolution: {integrity: sha512-V3+dqf3iWlRYJ9I9GreM3zGQd0lAXnnoPeddmkOQYWAEE4l/+Fi6p7tx/qVUJlKQgLXGim2W76rTOzz+eC0i7g==}
 
   '@img/colour@1.1.0':
     resolution: {integrity: sha512-Td76q7j57o/tLVdgS746cYARfSyxk8iEfRxewL9h4OMzYhbW4TAcppl0mT4eyqXddh6L/jwoM75mo7ixa/pCeQ==}
@@ -1095,8 +1095,8 @@ packages:
     resolution: {integrity: sha512-6ypT4XfgqJk/F3Yuv4SX26I3doUjt0GTG4a+JgWxXQpxXzTBq8fPUeGHfcYMMDPHJHm3yPOSjaeBwBGAHWXCdA==}
     engines: {node: '>=18.0.0'}
 
-  fast-check@4.9.0:
-    resolution: {integrity: sha512-7ms6T7SybUev/PQITciI0yLM2pOSFy5zpG8Ty7tQofcVaQUvrMXp6CBwqF6fThLCLOrfBtuHAtwq6Yu4XPCllg==}
+  fast-check@4.10.2:
+    resolution: {integrity: sha512-iK2f+YrcmoeGqk6fA0ea2bptcu/itMIm4NfEozq6N25+aG6h7s5HZbB/k1aV7b5w5sFLMCbbtRUsTVR+BgC3xw==}
     engines: {node: '>=12.17.0'}
 
   fast-deep-equal@3.1.3:
@@ -1204,8 +1204,8 @@ packages:
   github-from-package@0.0.0:
     resolution: {integrity: sha512-SyHy3T1v2NUXn29OsWdxmK6RwHD+vkj3v8en8AOBZ1wBQ/hCAQ5bAQTD02kW4W9tUp/3Qh6J8r9EvntiyCmOOw==}
 
-  global-agent@4.1.3:
-    resolution: {integrity: sha512-KUJEViiuFT3I97t+GYMikLPJS2Lfo/S2F+DQuBWzuzaMPnvt5yyZePzArx36fBzpGTxZjIpDbXLeySLgh+k76g==}
+  global-agent@4.1.7:
+    resolution: {integrity: sha512-pxaZqdsMwPA4i7TuRKpDUONm2xGRjvYdRoidCQz7VleUKVuUfh/4p5Q3QDTGrpAE5Kz5TxxcZ+uqEgTkoKRNtg==}
     engines: {node: '>=10.0'}
 
   globalthis@1.0.4:
@@ -1641,6 +1641,11 @@ packages:
     engines: {node: '>=10'}
     hasBin: true
 
+  semver@7.8.6:
+    resolution: {integrity: sha512-9lpSSU4Mly3mrtruwLs1eLK6+gzbzqeBFwRNjIjE+9LuDpWdYctrQlQ3ej1Ilgi7gknpsTRnPoLP8DpCHqHIJw==}
+    engines: {node: '>=10'}
+    hasBin: true
+
   send@1.2.1:
     resolution: {integrity: sha512-1gnZf7DFcoIcajTjTwjwuDjzuz4PPcY2StKPlsGAQ1+YH20IRVrBaXSWmdjowTJ6u8Rc01PoYOGHXfP1mYcZNQ==}
     engines: {node: '>= 18'}
@@ -1819,6 +1824,9 @@ packages:
 
   tslib@2.8.1:
     resolution: {integrity: sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==}
+
+  tslib@2.9.1:
+    resolution: {integrity: sha512-a4Ux9VKuIMHsOS7ENbEq6hK2ZGYIT27Rtl0E4eD9KqwxhKiQeMZE/9xb3IdYwWaSOyIBQLExhQgXDTYoiCxnWA==}
 
   tunnel-agent@0.6.0:
     resolution: {integrity: sha512-McnNiV1l8RYeY8tBgEpuodCC1mLUdbSN+CYBL7kJsJNInOP8UjDDEwdk6Mw60vdLLrr5NHKZhMAOSrR2NZuQ+w==}
@@ -2032,7 +2040,7 @@ snapshots:
 
   '@emnapi/runtime@1.11.3':
     dependencies:
-      tslib: 2.8.1
+      tslib: 2.9.1
     optional: true
 
   '@esbuild/aix-ppc64@0.28.2':
@@ -2233,13 +2241,13 @@ snapshots:
     dependencies:
       hono: 4.13.13
 
-  '@huggingface/jinja@0.5.10': {}
+  '@huggingface/jinja@0.5.12': {}
 
   '@huggingface/tokenizers@0.2.0': {}
 
-  '@huggingface/transformers@4.3.1(@types/node@20.19.43)':
+  '@huggingface/transformers@4.3.2(@types/node@20.19.43)':
     dependencies:
-      '@huggingface/jinja': 0.5.10
+      '@huggingface/jinja': 0.5.12
       '@huggingface/tokenizers': 0.2.0
       onnxruntime-node: 1.30.0
       onnxruntime-web: 1.31.0-dev.20260914-8d85527a0
@@ -2939,7 +2947,7 @@ snapshots:
 
   farmhash-modern@1.1.0: {}
 
-  fast-check@4.9.0:
+  fast-check@4.10.2:
     dependencies:
       pure-rand: 8.4.2
 
@@ -3099,11 +3107,11 @@ snapshots:
 
   github-from-package@0.0.0: {}
 
-  global-agent@4.1.3:
+  global-agent@4.1.7:
     dependencies:
       globalthis: 1.0.4
       matcher: 4.0.0
-      semver: 7.8.5
+      semver: 7.8.6
       serialize-error: 8.1.0
 
   globalthis@1.0.4:
@@ -3382,7 +3390,7 @@ snapshots:
 
   node-abi@3.99.0:
     dependencies:
-      semver: 7.8.5
+      semver: 7.8.6
 
   node-domexception@1.0.0: {}
 
@@ -3423,7 +3431,7 @@ snapshots:
   onnxruntime-node@1.30.0:
     dependencies:
       adm-zip: 0.6.1
-      global-agent: 4.1.3
+      global-agent: 4.1.7
       onnxruntime-common: 1.30.0
 
   onnxruntime-web@1.31.0-dev.20260914-8d85527a0:
@@ -3604,6 +3612,8 @@ snapshots:
 
   semver@7.8.5: {}
 
+  semver@7.8.6: {}
+
   send@1.2.1:
     dependencies:
       debug: 4.4.3
@@ -3639,7 +3649,7 @@ snapshots:
     dependencies:
       '@img/colour': 1.1.0
       detect-libc: 2.1.2
-      semver: 7.8.5
+      semver: 7.8.6
     optionalDependencies:
       '@img/sharp-darwin-arm64': 0.35.5
       '@img/sharp-darwin-x64': 0.35.5
@@ -3841,6 +3851,9 @@ snapshots:
       yn: 3.1.1
 
   tslib@2.8.1: {}
+
+  tslib@2.9.1:
+    optional: true
 
   tunnel-agent@0.6.0:
     dependencies:
